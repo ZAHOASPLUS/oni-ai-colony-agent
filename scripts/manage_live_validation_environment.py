@@ -2171,6 +2171,29 @@ def _expected_pipeline_startup_expectations(
     return expected
 
 
+# The Mod reports its validation-session autosave guard as a top-level
+# snapshot object ``autosave`` (status, guard_active, cycle_interval,
+# suppression_patch_installed, ...).  ONI's autosave rotation deletes the
+# oldest same-colony saves in the active save folder (review P0-1), so a live
+# run may only proceed on a snapshot whose guard is enforced with autosave
+# disabled.  A missing object means a Mod build without the guard: refused.
+def autosave_guard_blockers(state: Mapping[str, Any]) -> list[str]:
+    guard = state.get("autosave")
+    if not isinstance(guard, Mapping):
+        return ["autosave_guard_missing"]
+    blockers: list[str] = []
+    if guard.get("status") != "enforced":
+        blockers.append("autosave_guard_not_enforced")
+    if guard.get("guard_active") is not True:
+        blockers.append("autosave_guard_inactive")
+    interval = guard.get("cycle_interval")
+    if type(interval) is not int or interval != 0:
+        blockers.append("autosave_cycle_interval_not_zero")
+    if guard.get("suppression_patch_installed") is not True:
+        blockers.append("autosave_suppression_patch_missing")
+    return blockers
+
+
 def command_pipeline_gate(
     bridge: pathlib.Path,
     *,
@@ -2236,6 +2259,11 @@ def command_pipeline_gate(
         "expected pipeline save hash",
     ):
         raise WorkflowError("command pipeline raw tip does not bind the final lineage save")
+    guard_blockers = autosave_guard_blockers(raw_state)
+    if guard_blockers:
+        raise WorkflowError(
+            "final Probe snapshot autosave guard is not enforced: " + ", ".join(guard_blockers)
+        )
 
     try:
         publication = priority_pair_contract.validate_enriched_latest_against_raw(

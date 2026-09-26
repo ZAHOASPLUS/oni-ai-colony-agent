@@ -299,6 +299,14 @@ def priority_snapshot(
         "save_id_hash": save_hash,
         "save_dirty": False,
         "world_id": 0,
+        # manage_save_lineage refuses a snapshot without an enforced
+        # autosave guard (review P0-1).
+        "autosave": {
+            "status": "enforced",
+            "guard_active": True,
+            "cycle_interval": 0,
+            "suppression_patch_installed": True,
+        },
         "observation_scope": {
             "active_world_id": 0,
             "populated_world_ids": [0],

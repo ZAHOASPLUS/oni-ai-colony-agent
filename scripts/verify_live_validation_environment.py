@@ -1187,11 +1187,29 @@ def prepare_configured_runtime(
     return {"bridge": bridge, "archived_old": archived_old, "probe": probe}
 
 
+# The Mod's validation-session autosave guard as reported in every snapshot
+# (lane/mod-csharp); finalize refuses a final tip without it enforced.
+ENFORCED_AUTOSAVE: dict[str, Any] = {
+    "status": "enforced",
+    "guard_active": True,
+    "activation_reason": "fresh_startup_binding",
+    "cycle_interval": 0,
+    "interval_at_session_start": 1,
+    "enforced_interval": 0,
+    "enforcement_count": 1,
+    "suppressed_autosave_count": 0,
+    "suppression_patch_installed": True,
+    "source": "fixture",
+    "failure": None,
+}
+
+
 def simulate_runtime(
     fixture: dict[str, pathlib.Path | str],
     *,
     evict_forward_frame: bool = False,
     evict_forward_certificate: bool = False,
+    autosave_guard: Mapping[str, Any] | None = ENFORCED_AUTOSAVE,
 ) -> dict[str, Any]:
     oni = pathlib.Path(fixture["oni"])
     run_id = str(fixture["run_id"])
@@ -1309,6 +1327,7 @@ def simulate_runtime(
                 "covered_world_ids": [final_world_id],
                 "complete_for_populated_worlds": True,
             },
+            **({"autosave": copy.deepcopy(dict(autosave_guard))} if autosave_guard is not None else {}),
             "cycle": 10,
             "game": {"paused": True},
             "duplicants": {"total": 3, "stressed": 0, "idle": 0},
@@ -2753,6 +2772,30 @@ def test_golden_baseline_cross_run(base: pathlib.Path) -> dict[str, Any]:
         "environment manifest does not bind the golden baseline",
     )
     results["explicit_establishment"] = "bound_in_manifest"
+    return results
+
+
+def test_autosave_guard_finalize_refusals(base: pathlib.Path) -> dict[str, Any]:
+    """finalize refuses a run whose final Probe snapshot lacks an enforced autosave guard."""
+    results: dict[str, str] = {}
+    for index, (label, guard) in enumerate((
+        ("guard_missing", None),
+        ("guard_violated", {**ENFORCED_AUTOSAVE, "status": "violated"}),
+        ("autosave_interval_nonzero", {**ENFORCED_AUTOSAVE, "cycle_interval": 3}),
+        ("suppression_patch_missing", {**ENFORCED_AUTOSAVE, "suppression_patch_installed": False}),
+    )):
+        # Short names: the runtime bootstrap keeps every path within 259 units.
+        fixture = make_fixture(base, f"as-{index}", run_id=f"g0-as{index}")
+        prepare_fixture(fixture)
+        simulate_runtime(fixture, autosave_guard=guard)
+        before = file_inventory(pathlib.Path(fixture["oni"]))
+        blocked = json.loads(core(fixture, "finalize", what_if=True, expected={2}).stdout)
+        assert_true(
+            "autosave guard is not enforced" in str(blocked.get("error")),
+            f"{label}: finalize was not refused for the autosave guard",
+        )
+        assert_true(file_inventory(pathlib.Path(fixture["oni"])) == before, f"{label}: refusal changed the fixture")
+        results[label] = "refused_zero_write"
     return results
 
 
@@ -9493,6 +9536,7 @@ def main() -> int:
         ("tamper_refusals", test_tamper_refusals),
         ("golden_baseline_cross_run_refusals", test_golden_baseline_cross_run),
         ("loader_colony_isolation_refusals", test_loader_colony_isolation_refusals),
+        ("autosave_guard_finalize_refusals", test_autosave_guard_finalize_refusals),
         ("priority_pair_report_bundle_freeze_tamper_refusals", test_priority_evidence_tamper_refusals),
         ("normal_shutdown_evidence_finalizer_refusals", test_shutdown_evidence_finalizer_refusals),
         ("startup_consumption_preflight_custody_refusals", test_startup_consumption_preflight_custody_refusals),

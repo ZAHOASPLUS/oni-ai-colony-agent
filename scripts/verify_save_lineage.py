@@ -43,6 +43,20 @@ from manage_save_lineage import (
 
 
 MOD_VERSION = "0.7.0"
+# The Mod's validation-session autosave guard, as reported in every snapshot.
+ENFORCED_AUTOSAVE = {
+    "status": "enforced",
+    "guard_active": True,
+    "activation_reason": "fresh_startup_binding",
+    "cycle_interval": 0,
+    "interval_at_session_start": 1,
+    "enforced_interval": 0,
+    "enforcement_count": 1,
+    "suppressed_autosave_count": 0,
+    "suppression_patch_installed": True,
+    "source": "fixture",
+    "failure": None,
+}
 
 
 def snapshot(session_id: str, seq: int, save_hash: str) -> dict:
@@ -59,6 +73,7 @@ def snapshot(session_id: str, seq: int, save_hash: str) -> dict:
         "save_dirty": False,
         "world_id": 0,
         "bridge": {"stale": False},
+        "autosave": copy.deepcopy(ENFORCED_AUTOSAVE),
     }
 
 
@@ -94,6 +109,62 @@ def append_records(path: pathlib.Path, *records: dict) -> None:
     with path.open("a", encoding="utf-8", newline="\n") as handle:
         for record in records:
             handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+def autosave_guard_refusals() -> dict:
+    """reserve must refuse a snapshot whose autosave guard is absent or not enforced."""
+    cases = {
+        "missing": None,
+        "inactive_status": {**ENFORCED_AUTOSAVE, "status": "inactive", "guard_active": False},
+        "violated": {**ENFORCED_AUTOSAVE, "status": "violated"},
+        "patch_missing": {**ENFORCED_AUTOSAVE, "status": "suppression_patch_missing",
+                          "suppression_patch_installed": False},
+        "nonzero_interval": {**ENFORCED_AUTOSAVE, "cycle_interval": 1},
+        "bool_interval": {**ENFORCED_AUTOSAVE, "cycle_interval": False},
+        "guard_not_active": {**ENFORCED_AUTOSAVE, "guard_active": False},
+    }
+    results: dict = {}
+    with tempfile.TemporaryDirectory(prefix="oni-save-lineage-guard-") as temporary:
+        for label, guard in cases.items():
+            root = pathlib.Path(temporary) / label
+            bridge = root / "bridge"
+            bridge.mkdir(parents=True)
+            source_path = root / "source.sav"
+            source_path.write_bytes(b"source-save")
+            state = snapshot("session-source", 5, sha256_file(source_path))
+            if guard is None:
+                del state["autosave"]
+            else:
+                state["autosave"] = guard
+            write_json_atomic(bridge / "latest_state.json", state)
+            write_json_atomic(
+                bridge / "action-policy.json",
+                {
+                    "schema": "oni.action-policy.v1",
+                    "actions_enabled": False,
+                    "allowed_save_hashes": [],
+                    "allowed_actions": ["noop", "focus_note"],
+                    "command_ttl_seconds": 30,
+                    "max_pending_commands": 20,
+                },
+            )
+            try:
+                reserve(
+                    argparse.Namespace(
+                        run_id=f"guard-{label}".replace("_", "-"),
+                        bridge_dir=bridge,
+                        save_path=root / "new-validation-save.sav",
+                        mod_version=MOD_VERSION,
+                        source_kind="save_as_copy",
+                        allow_external_save=True,
+                    )
+                )
+                results[label] = "accepted"
+            except LineageError as exc:
+                results[label] = "refused" if "autosave guard" in str(exc) else f"refused_other: {exc}"
+            if (bridge / "evidence").exists() and results[label] == "refused":
+                results[label] = "refused_but_wrote_manifest"
+    return results
 
 
 def run_fixture() -> dict:
@@ -159,6 +230,7 @@ def run_fixture() -> dict:
             save_hash=initial_hash,
         )
         initial_reload["mod_version"] = MOD_VERSION
+        initial_reload["autosave"] = copy.deepcopy(ENFORCED_AUTOSAVE)
         append_records(bridge / "state.jsonl", activation_event, initial_reload)
         write_json_atomic(bridge / "latest_state.json", initial_reload)
         activate(argparse.Namespace(manifest=manifest_path, bridge_dir=bridge))
@@ -455,9 +527,11 @@ def run_fixture() -> dict:
         )
         write_json_atomic(manifest_path, manifest)
         priority_pair = run_priority_pair_fixture()
+        guard_refusals = autosave_guard_refusals()
         return {
             "status": "passed"
             if report["status"] == "passed"
+            and all(value == "refused" for value in guard_refusals.values())
             and tamper_report["status"] != "passed"
             and duplicate_reservation_blocked
             and artifact_frozen
@@ -482,6 +556,7 @@ def run_fixture() -> dict:
             == "command_pipeline_mutation_not_ready"
             else "failed",
             "valid_lineage": report["status"],
+            "autosave_guard_refusals": guard_refusals,
             "tamper_rejected": tamper_report["status"] != "passed",
             "existing_save_reservation_rejected": duplicate_reservation_blocked,
             "checkpoint_artifact_frozen": artifact_frozen,
