@@ -238,15 +238,19 @@ def binding_blockers(
     if not isinstance(projection, Mapping):
         blockers.add("frame_health_projection_missing")
     else:
+        # The frame no longer projects snapshot_age_seconds (it changed the
+        # frame digest on every poll); freshness is carried by status and
+        # trust_ready, which remain bound here.
         for field in (
             "status",
-            "snapshot_age_seconds",
             "trust_ready",
             "replay_mode",
             "session_start_observed",
         ):
             if projection.get(field) != health.get(field):
                 blockers.add(f"frame_health_{field}_mismatch")
+        if projection.get("snapshot_age_seconds") is not None:
+            blockers.add("frame_health_snapshot_age_seconds_projected")
 
     bridge = state.get("bridge")
     if not isinstance(bridge, Mapping):
