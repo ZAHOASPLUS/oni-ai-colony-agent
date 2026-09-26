@@ -35,6 +35,69 @@ namespace OniAiProbeMod.Patches
             PatchFirst(harmony, "Game", StopMethods, nameof(OnGameStopped), "game_stop");
             PatchSaveLifecycle(harmony);
             PatchAutosaveSuppression(harmony);
+            PatchPauseLedger(harmony);
+        }
+
+        // The executor only runs for an accepted startup binding; it needs the
+        // pause reference count to avoid taking a modal's pause (PauseLedger).
+        private static void PatchPauseLedger(Harmony harmony)
+        {
+            if (!StartupBinding.WasAccepted)
+            {
+                return;
+            }
+            try
+            {
+                MethodInfo pause = AccessTools.Method(
+                    typeof(SpeedControlScreen),
+                    "Pause",
+                    new[] { typeof(bool), typeof(bool) });
+                MethodInfo unpause = AccessTools.Method(typeof(SpeedControlScreen), "Unpause", new[] { typeof(bool) });
+                if (pause == null || unpause == null)
+                {
+                    ProbeWriter.WriteError("patch_pause_ledger", "SpeedControlScreen.Pause/Unpause method was not found.");
+                    return;
+                }
+
+                HarmonyMethod prefix = new HarmonyMethod(AccessTools.Method(typeof(LifecyclePatches), nameof(OnPauseChanging)));
+                HarmonyMethod postfix = new HarmonyMethod(AccessTools.Method(typeof(LifecyclePatches), nameof(OnPauseChanged)));
+                harmony.Patch(pause, prefix: prefix, postfix: postfix);
+                harmony.Patch(unpause, prefix: prefix, postfix: postfix);
+                Commands.PauseLedger.MarkTracking();
+                ProbeWriter.WriteEvent("probe_patch_registered", new Dictionary<string, object>
+                {
+                    { "target", "SpeedControlScreen.Pause/Unpause" },
+                    { "patch", "pause_ledger" }
+                });
+            }
+            catch (Exception ex)
+            {
+                ProbeWriter.WriteError("patch_pause_ledger", ex);
+            }
+        }
+
+        private static void OnPauseChanging(SpeedControlScreen __instance)
+        {
+            try
+            {
+                Commands.PauseLedger.BeginChange(__instance);
+            }
+            catch
+            {
+                // Never break the game's pause; an unobserved change stays unknown.
+            }
+        }
+
+        private static void OnPauseChanged(SpeedControlScreen __instance, int ___pauseCount)
+        {
+            try
+            {
+                Commands.PauseLedger.Observe(__instance, ___pauseCount);
+            }
+            catch
+            {
+                // As above.
+            }
         }
 
         // P0-1: GameClock.DoAutoSave is the only caller that saves with

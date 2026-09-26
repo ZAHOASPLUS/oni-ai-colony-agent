@@ -1024,6 +1024,16 @@ namespace OniAiProbeMod.Commands
                 return ValidationResult.Reject("Current-state precondition failed: " + preconditionError);
             }
 
+            // Refused here, before any claim or dispatch: a refusal at dispatch
+            // would be classified outcome_unknown and latch the session.
+            string unpauseRefusal = action == "set_paused" && !command["args"]["paused"].Value<bool>()
+                ? DescribeUnpauseRefusal()
+                : null;
+            if (unpauseRefusal != null)
+            {
+                return ValidationResult.Stale("Unpause refused: " + unpauseRefusal + ".");
+            }
+
             return ValidationResult.Valid(
                 beforeState,
                 (JObject)policy.DeepClone(),
@@ -1606,6 +1616,46 @@ namespace OniAiProbeMod.Commands
                     message = "Unsupported action.";
                     return false;
             }
+        }
+
+        // See PauseLedger: one Unpause() must release the game's only pause.
+        private static string DescribeUnpauseRefusal()
+        {
+            // Managed null check only: IsPaused and the ledger are plain managed
+            // state, and DestroyInstance clears the static on unload.
+            SpeedControlScreen speedControl = SpeedControlScreen.Instance;
+            if (ReferenceEquals(speedControl, null) || !speedControl.IsPaused)
+            {
+                // TrySetPaused reports the missing screen; an unpaused game
+                // already matches and Unpause() is not called.
+                return null;
+            }
+
+            bool countKnown = PauseLedger.TryGetCount(speedControl, out int pauseCount);
+            // The scene scan runs only when the count alone allows the unpause.
+            return PauseLedger.CountRefusal(PauseLedger.IsTracking, countKnown, pauseCount) ??
+                PauseLedger.ModalRefusal(CountOpenPausingModals());
+        }
+
+        private static int CountOpenPausingModals()
+        {
+            int count = 0;
+            foreach (KModalScreen screen in UnityEngine.Object.FindObjectsOfType<KModalScreen>())
+            {
+                if (screen != null && screen.pause && screen.isActiveAndEnabled)
+                {
+                    count++;
+                }
+            }
+            // KModalButtonMenu (the pause menu among them) always pauses while shown.
+            foreach (KModalButtonMenu menu in UnityEngine.Object.FindObjectsOfType<KModalButtonMenu>())
+            {
+                if (menu != null && menu.isActiveAndEnabled)
+                {
+                    count++;
+                }
+            }
+            return count;
         }
 
         private static bool TrySetPaused(bool paused, out string message)
