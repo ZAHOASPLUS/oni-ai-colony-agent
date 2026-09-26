@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from agent.state_quality import (
+    ALERTS_ACTIVE_WORLD_SCOPE,
+    ALERTS_ACTIVE_WORLD_SOURCE,
+    ALERTS_ALL_WORLDS_SCOPE,
+    ALERTS_ALL_WORLDS_SOURCE,
     field_quality,
     parse_snapshot_timestamp,
     quality_contract_blockers,
@@ -228,6 +232,9 @@ class FieldContract:
     sorted_items: bool = False
     allowed_string_items: Tuple[str, ...] = ()
     status_completeness: Tuple[Tuple[str, str], ...] = ()
+    # When set, the entry's (scope, source) must be one of these pairs, so a
+    # source cannot claim a scope it does not cover.
+    scope_sources: Tuple[Tuple[str, str], ...] = ()
     capture_max_age_seconds: Optional[float] = None
     mutating_condition_allowed: bool = True
 
@@ -313,10 +320,16 @@ _CONTRACTS: Tuple[FieldContract, ...] = (
         statuses=("observed",),
         semantics=("canonical_active_alert_ids",),
         units=("alert_id_list",),
-        scopes=("active_world",),
+        # The Probe reads every world with live duplicants (review G3/M8).
+        # The active-world form is still read so older recordings replay; the
+        # snapshot trust check accepts it only while the camera world is the
+        # only populated one.
+        scopes=(ALERTS_ALL_WORLDS_SCOPE, ALERTS_ACTIVE_WORLD_SCOPE),
         completeness=("complete",),
-        sources=(
-            "Components.LiveMinionIdentities.GetWorldItems(activeWorldId,false)+typed_monitor_predicates;catalog=oni.alert.catalog.active_world.v1",
+        sources=(ALERTS_ALL_WORLDS_SOURCE, ALERTS_ACTIVE_WORLD_SOURCE),
+        scope_sources=(
+            (ALERTS_ALL_WORLDS_SCOPE, ALERTS_ALL_WORLDS_SOURCE),
+            (ALERTS_ACTIVE_WORLD_SCOPE, ALERTS_ACTIVE_WORLD_SOURCE),
         ),
         captures=("snapshot.ts",),
         value_type="string_list",
@@ -2331,6 +2344,66 @@ def _value_blockers(
     return blockers
 
 
+ALERTS_BY_WORLD_SEMANTIC = "canonical_active_alert_ids_by_world"
+ALERTS_BY_WORLD_UNIT = "world_alert_groups"
+_ALERTS_BY_WORLD_ENTRY_KEYS = frozenset({"world_id", "duplicant_count", "alerts"})
+
+
+def _alerts_by_world_blockers(state: Mapping[str, Any], alerts: Any, entry: Mapping[str, Any]) -> list[str]:
+    """Check the optional per-world alert groups against ``alerts``.
+
+    ``alerts_by_world`` is additive: an absent or null field changes
+    nothing.  When present it must be a list ordered by world id (a null
+    world, e.g. a duplicant in transit, first), carry its own quality entry
+    with the same source and scope as ``alerts``, and its groups' union must
+    equal ``alerts`` exactly; any disagreement makes ``alerts`` unusable.
+    """
+
+    groups = state.get("alerts_by_world")
+    if groups is None:
+        return []
+    blockers: list[str] = []
+    group_entry = field_quality(state if isinstance(state, dict) else dict(state), "alerts_by_world")
+    if (
+        group_entry.get("status") != "observed"
+        or group_entry.get("semantic") != ALERTS_BY_WORLD_SEMANTIC
+        or group_entry.get("unit") != ALERTS_BY_WORLD_UNIT
+        or group_entry.get("scope") != entry.get("scope")
+        or group_entry.get("source") != entry.get("source")
+    ):
+        blockers.append("alerts_by_world_quality_mismatch")
+    if not isinstance(groups, list) or len(groups) > 1000:
+        return blockers + ["alerts_by_world_invalid"]
+    union: set[str] = set()
+    previous_key: Optional[int] = None
+    for group in groups:
+        if not isinstance(group, Mapping) or set(group) != _ALERTS_BY_WORLD_ENTRY_KEYS:
+            return blockers + ["alerts_by_world_invalid"]
+        world_id = group.get("world_id")
+        count = group.get("duplicant_count")
+        group_alerts = group.get("alerts")
+        if world_id is not None and (
+            isinstance(world_id, bool) or not isinstance(world_id, int) or not 0 <= world_id <= _INT32_MAX
+        ):
+            return blockers + ["alerts_by_world_invalid"]
+        if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= _INT32_MAX:
+            return blockers + ["alerts_by_world_invalid"]
+        if (
+            not isinstance(group_alerts, list)
+            or any(not isinstance(item, str) or item not in CANONICAL_ALERT_IDS for item in group_alerts)
+            or group_alerts != sorted(set(group_alerts))
+        ):
+            return blockers + ["alerts_by_world_invalid"]
+        key = -1 if world_id is None else world_id
+        if previous_key is not None and key <= previous_key:
+            return blockers + ["alerts_by_world_order_invalid"]
+        previous_key = key
+        union.update(group_alerts)
+    if not isinstance(alerts, list) or union != set(item for item in alerts if isinstance(item, str)):
+        blockers.append("alerts_by_world_union_mismatch")
+    return blockers
+
+
 def field_contract_blockers(
     state: Optional[Mapping[str, Any]],
     path: str,
@@ -2370,6 +2443,10 @@ def field_contract_blockers(
         entry.get("status"), entry.get("completeness")
     ) not in contract.status_completeness:
         blockers.append("quality_status_completeness_mismatch")
+    if contract.scope_sources and (
+        entry.get("scope"), entry.get("source")
+    ) not in contract.scope_sources:
+        blockers.append("quality_scope_source_mismatch")
     blockers.extend(_capture_binding_blockers(state, entry, contract))
 
     marker = object()
@@ -2378,6 +2455,8 @@ def field_contract_blockers(
         blockers.append("field_missing")
     else:
         blockers.extend(_value_blockers(value, contract, path))
+        if contract.contract_id == ALERTS_CANONICAL_CONTRACT_ID:
+            blockers.extend(_alerts_by_world_blockers(state_dict, value, entry))
         if contract.value_type == "functional_buildings":
             blockers.extend(_functional_buildings_state_binding_blockers(state_dict, value))
         elif contract.value_type == "functional_building_geometry":

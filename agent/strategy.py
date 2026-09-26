@@ -25,7 +25,13 @@ from contextvars import ContextVar
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from agent.state_quality import (
+    ALERTS_ACTIVE_WORLD_SCOPE,
+    ALERTS_ACTIVE_WORLD_SOURCE,
+    ALERTS_ALL_WORLDS_SCOPE,
+    ALERTS_ALL_WORLDS_SOURCE,
+    alerts_cover_all_worlds,
     canonical_state_hash,
+    observation_scope_coverage_blockers,
     field_quality,
     parse_snapshot_timestamp,
     quality_contract_blockers,
@@ -215,11 +221,9 @@ CERTIFYING_FIELD_CONTRACTS: Dict[str, Dict[str, Any]] = {
     "alerts": {
         "semantics": ("canonical_active_alert_ids",),
         "units": ("alert_id_list",),
-        "scopes": ("active_world",),
+        "scopes": (ALERTS_ALL_WORLDS_SCOPE, ALERTS_ACTIVE_WORLD_SCOPE),
         "completeness": ("complete",),
-        "sources": (
-            "Components.LiveMinionIdentities.GetWorldItems(activeWorldId,false)+typed_monitor_predicates;catalog=oni.alert.catalog.active_world.v1",
-        ),
+        "sources": (ALERTS_ALL_WORLDS_SOURCE, ALERTS_ACTIVE_WORLD_SOURCE),
         "captures": ("snapshot.ts",),
         "contract_ids": (ALERTS_CANONICAL_CONTRACT_ID,),
     },
@@ -1264,9 +1268,6 @@ def _observation_scope_blockers(state: Optional[Mapping[str, Any]]) -> List[str]
             f"{scope_path}:{blocker}"
             for blocker in _field_contract_blockers(state_dict, scope_path)
         )
-    if safe_get(state_dict, path) is not True:
-        blockers.append("populated_world_coverage_incomplete")
-
     scope = state_dict.get("observation_scope")
     populated = scope.get("populated_world_ids") if isinstance(scope, Mapping) else None
     covered = scope.get("covered_world_ids") if isinstance(scope, Mapping) else None
@@ -1287,17 +1288,34 @@ def _observation_scope_blockers(state: Optional[Mapping[str, Any]]) -> List[str]
         blockers.append("populated_world_ids_missing")
     if not covered_ids:
         blockers.append("covered_world_ids_missing")
-    if populated_ids is not None and covered_ids is not None and not set(populated_ids).issubset(covered_ids):
+    all_world_alerts = alerts_cover_all_worlds(state_dict)
+    if (
+        not all_world_alerts
+        and populated_ids is not None
+        and covered_ids is not None
+        and not set(populated_ids).issubset(covered_ids)
+    ):
         blockers.append("populated_world_not_covered")
-    if isinstance(active_world, bool) or not isinstance(active_world, int) or active_world < 0:
-        blockers.append("active_world_id_invalid")
-    else:
-        if covered_ids is not None and active_world not in covered_ids:
-            blockers.append("active_world_not_covered")
-        if covered_ids != [active_world]:
-            blockers.append("covered_world_ids_not_active_world_only")
-        if safe_get(state_dict, path) is True and populated_ids != [active_world]:
-            blockers.append("complete_populated_world_ids_not_active_world_only")
+    if (
+        isinstance(active_world, int)
+        and not isinstance(active_world, bool)
+        and covered_ids is not None
+        and active_world not in covered_ids
+    ):
+        blockers.append("active_world_not_covered")
+    # Multi-world aware (review M8): a populated world outside the covered
+    # set, or a camera on an empty world, keeps trust only while the survival
+    # alerts cover every world; the objectives then describe the camera world
+    # plus the save-global report rates and all-world alerts.
+    blockers.extend(
+        observation_scope_coverage_blockers(
+            state_dict,
+            active_world_id=active_world,
+            populated_world_ids=populated_ids,
+            covered_world_ids=covered_ids,
+            complete=safe_get(state_dict, path),
+        )
+    )
     top_level_world = state_dict.get("world_id")
     if (
         isinstance(active_world, int)
