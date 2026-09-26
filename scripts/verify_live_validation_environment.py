@@ -172,11 +172,39 @@ def run(command: list[str], expected: int | set[int] = 0, timeout: int = 90) -> 
     return completed
 
 
+_PS_PARAMETER = re.compile(r"-[A-Za-z][A-Za-z0-9]*(?::\$(?:true|false))?")
+
+
+def ps_command_text(script: pathlib.Path, arguments: tuple[str, ...]) -> str:
+    """Build a -Command invocation that binds switch values on PowerShell 5.1.
+
+    ``powershell.exe -File`` passes ``-Confirm:$false`` as the string
+    "$false", which Windows PowerShell 5.1 refuses to bind to a switch.
+    Parameter names (and switch values) are emitted verbatim; every other
+    argument is a single-quoted literal.  No fixture value starts with "-".
+    """
+
+    def quote(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
+    parts = ["&", quote(str(script))]
+    for argument in arguments:
+        parts.append(argument if _PS_PARAMETER.fullmatch(argument) else quote(argument))
+    return " ".join(parts)
+
+
 def ps(script: pathlib.Path, *arguments: str, expected: int | set[int] = 0) -> subprocess.CompletedProcess[str]:
     if not POWERSHELL:
         raise VerificationFailure("PowerShell is unavailable")
     return run(
-        [POWERSHELL, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script), *arguments],
+        [
+            POWERSHELL,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            ps_command_text(script, arguments),
+        ],
         expected=expected,
     )
 

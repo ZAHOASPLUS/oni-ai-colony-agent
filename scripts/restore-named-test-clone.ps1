@@ -125,15 +125,25 @@ function Get-Sha256([string]$LiteralPath) {
 }
 
 function Move-ReplaceFile([string]$Source, [string]$Destination) {
+    # .NET Core (PowerShell 7) has File.Move(src, dst, overwrite).  Windows
+    # PowerShell 5.1 runs on .NET Framework, which lacks it; there File.Replace
+    # (Win32 ReplaceFile) swaps an existing destination atomically on the same
+    # volume.  Both callers stage the source next to an existing destination.
     $overwriteMove = [IO.File].GetMethods() | Where-Object {
         $_.Name -ceq 'Move' -and
         $_.GetParameters().Count -eq 3 -and
         $_.GetParameters()[2].ParameterType -eq [bool]
     } | Select-Object -First 1
-    if ($null -eq $overwriteMove) {
-        throw 'Atomic overwrite requires a PowerShell runtime backed by a three-argument File.Move implementation.'
+    if ($null -ne $overwriteMove) {
+        [void]$overwriteMove.Invoke($null, [object[]]@($Source, $Destination, $true))
+        return
     }
-    [IO.File]::Move($Source, $Destination, $true)
+    if (-not (Test-Path -LiteralPath $Destination -PathType Leaf)) {
+        throw 'Atomic replacement requires an existing destination file.'
+    }
+    # [NullString]::Value: a PowerShell $null would bind as "" and make
+    # ReplaceFile reject an empty backup path.
+    [IO.File]::Replace($Source, $Destination, [NullString]::Value, $true)
 }
 
 function Get-StableFileState([string]$LiteralPath) {
