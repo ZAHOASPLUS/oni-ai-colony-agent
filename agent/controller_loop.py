@@ -49,7 +49,13 @@ RECOVERY_SCHEMA = "oni.controller-recovery.v1"
 MAX_STATE_BYTES = 1024 * 1024
 MAX_INTENT_RECEIPT_BYTES = 2 * 1024 * 1024
 MAX_ACTION_ARGS_BYTES = 8 * 1024
-MAX_CONDITIONS = 32
+# Derived from the advanced-action catalog, not chosen for convenience.  The
+# largest catalogued leaf is a 64-cell Wire path: each placement target carries
+# 10 preconditions and 15 expected effects on top of a few fixed environment
+# and catalog conditions (~1,000 in total).  A dig batch is 32 cells.  Keep the
+# bound finite with headroom; test_controller_loop checks that every builder's
+# maximal hint still fits.
+MAX_CONDITIONS = 2048
 MAX_ACTION_ATTEMPTS = 3
 # Retained VPS controller admission bound, not a claim about the game's limit.
 MAX_CYCLE_VALUE = 1_000_000_000
@@ -365,7 +371,11 @@ class Condition:
     def __post_init__(self) -> None:
         object.__setattr__(self, "path", self.path if isinstance(self.path, str) else "")
         op = self.op if isinstance(self.op, str) else ""
-        object.__setattr__(self, "op", {"==": "eq", "!=": "neq"}.get(op, op))
+        # "ne" is the project-wide spelling (field contracts, Colony Plan,
+        # command queue, and the C# executor).  Accept the older controller
+        # spelling as an input alias only, so emitted conditions always use
+        # the vocabulary every other layer validates.
+        object.__setattr__(self, "op", {"==": "eq", "!=": "ne", "neq": "ne"}.get(op, op))
         qualities = self.quality if isinstance(self.quality, (list, tuple)) else ()
         object.__setattr__(self, "quality", _unique_strings(qualities))
         object.__setattr__(self, "quality_contract_id", self.quality_contract_id if isinstance(self.quality_contract_id, str) and self.quality_contract_id else None)
@@ -406,7 +416,7 @@ class Condition:
         blockers: list[str] = []
         if not _PATH_RE.fullmatch(self.path):
             blockers.append("condition_path_invalid")
-        if self.op not in {"eq", "neq", "lt", "lte", "gt", "gte", "contains", "in"}:
+        if self.op not in {"eq", "ne", "lt", "lte", "gt", "gte", "contains", "in"}:
             blockers.append("condition_operator_invalid")
         if not self.has_value:
             blockers.append("condition_value_missing")
@@ -443,7 +453,7 @@ class Condition:
         try:
             if self.op == "eq":
                 matches = _strict_equal(actual, expected)
-            elif self.op == "neq":
+            elif self.op == "ne":
                 matches = not _strict_equal(actual, expected)
             elif self.op == "lt":
                 matches = actual < expected
