@@ -512,7 +512,7 @@ def case_hysteresis_boundaries() -> Dict[str, Any]:
 
 
 def case_higher_priority_pairwise_fail_closed() -> Dict[str, Any]:
-    variants = ("invalid", "missing", "stale", "non_open", "wrongrisk")
+    variants = ("invalid", "missing", "stale", "non_open", "contradictory", "wrongrisk")
     case_count = 0
     blocker_counts: Dict[str, int] = {variant: 0 for variant in variants}
     pair_names: List[str] = []
@@ -539,7 +539,18 @@ def case_higher_priority_pairwise_fail_closed() -> Dict[str, Any]:
                 records[0]["last_seen"] = (parsed - dt.timedelta(seconds=1)).isoformat(timespec="microseconds")
                 expected_direct = f"incident_witness_not_current:{higher}"
             elif variant == "non_open":
+                # pending/cooldown are hysteresis states: the witness cannot
+                # authorize yet, so it blocks lower-priority selection exactly
+                # like a missing witness (code review 2026-09-26, L9).
                 records[0]["status"] = "pending"
+                if SAMPLES[higher] == 1 and DURATIONS[higher] == 0.0:
+                    expected_direct = f"incident_witness_missing:{higher}"
+                else:
+                    expected_direct = f"incident_witness_higher_priority_missing:{higher}"
+            elif variant == "contradictory":
+                # A resolved record for an alert that is active now contradicts
+                # the telemetry and remains an invalid authorizing episode.
+                records[0]["status"] = "resolved"
                 expected_direct = "open_incident_status_invalid"
             else:
                 records[0]["risk"] = "low"
@@ -573,7 +584,7 @@ def case_higher_priority_pairwise_fail_closed() -> Dict[str, Any]:
                 "survival_certificate_status_mismatch" in certificate_blockers,
                 f"certificate {variant} {higher}>{lower} did not reject selected status",
             )
-    check(case_count == 36 * 5, "pairwise case count drifted")
+    check(case_count == 36 * len(variants), "pairwise case count drifted")
     return {
         "pair_count": len(pair_names),
         "variant_count": case_count,

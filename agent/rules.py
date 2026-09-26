@@ -682,14 +682,25 @@ def _reduce_survival_arbitration(
         blockers.append("paused_contract_unusable")
 
     active_set = set(active_ids)
+    # pending/cooldown are the tracker's hysteresis states for an alert that is
+    # active but not yet authorizing.  Treat them like an absent witness
+    # (pending_hysteresis) so frame certificates, advice and candidate
+    # admission agree whether or not the caller filtered the list to open
+    # records (code review 2026-09-26, L9).
+    hysteresis_statuses = {"pending", "cooldown"}
     relevant_records = [
         item
         for item in records
-        if item.get("status") == "open" or item.get("incident_id") in active_set
+        if item.get("status") == "open"
+        or (
+            item.get("incident_id") in active_set
+            and item.get("status") not in hysteresis_statuses
+        )
     ]
     # The incidents payload contains retained inactive/cooldown history. It is
-    # ignored unless its id is active now; a non-open active witness is an
-    # invalid authorizing episode rather than a reason to silently omit it.
+    # ignored unless its id is active now; any other non-open active witness
+    # (resolved, inactive, blocked_unknown) contradicts the active alert and is
+    # an invalid authorizing episode rather than a reason to silently omit it.
     if any(
         item.get("incident_id") in active_set and item.get("status") != "open"
         for item in relevant_records

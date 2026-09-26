@@ -24,6 +24,26 @@ class IncidentValidationError(ValueError):
     """Raised when an incident signal violates the tracker input contract."""
 
 
+def _plain_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _snapshot_follows(previous: Mapping[str, Any], snapshot: Mapping[str, Any]) -> bool:
+    """Return whether ``snapshot`` is the next sample after the episode's last.
+
+    Survival witnesses must prove every sample from first to last
+    (``last_snapshot_seq - first_snapshot_seq + 1 == consecutive_samples``).
+    Inputs without snapshot sequences keep the historical count; the arbiter
+    rejects such witnesses on sequence grounds anyway.
+    """
+
+    last = previous.get("last_snapshot_seq")
+    current = snapshot.get("snapshot_seq")
+    if not _plain_int(last) or not _plain_int(current):
+        return True
+    return current == last + 1
+
+
 def _validate_non_negative_number(
     signal: Mapping[str, Any], key: str, *, integer: bool = False
 ) -> int | float:
@@ -182,7 +202,15 @@ class IncidentTracker:
             self.incidents[incident_id] = incident
             return
 
-        if old_status not in {"pending", "open", "cooldown"}:
+        continuing = old_status in {"pending", "open", "cooldown"}
+        if continuing and not _snapshot_follows(previous, snapshot):
+            # A sample was skipped (the Bridge does not update incidents for
+            # untrusted snapshots) or repeated, so this episode can no longer
+            # prove continuity.  Restart it at this sample instead of carrying
+            # an unprovable count that blocks every survival arbitration until
+            # the alert clears (code review 2026-09-26, L8).
+            continuing = False
+        if not continuing:
             incident["first_seen"] = _iso(now)
             incident["first_seq"] = snapshot.get("seq")
             incident["first_snapshot_seq"] = snapshot.get("snapshot_seq")
