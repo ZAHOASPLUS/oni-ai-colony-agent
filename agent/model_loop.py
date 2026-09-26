@@ -14,8 +14,9 @@ against live game state, and the confirmation, rejection or failure of every
 published command is fed back into the next prompt.
 
 The loop is explicit opt-in (``oni_bridge.py --model-loop``) and never runs in
-replay.  It yields to open rule incidents, any other command in the pipeline,
-and an active Colony Plan.
+replay.  It yields to a rule's mutating suggestion (the arbitrated survival
+pause), any other command in the pipeline, and an active Colony Plan; other
+open rule findings are passed to the model as context.
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ from agent.command_queue import (
     now,
     trusted_proposal_state,
 )
+from agent.field_contracts import NON_MUTATING_ACTIONS
 from agent.llm_planner import (
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
@@ -189,16 +191,29 @@ def _instance_order(entry: Mapping[str, Any]) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
+def advice_suggests_mutation(item: Mapping[str, Any]) -> bool:
+    """True when a rule advice item carries a mutating (or malformed) command."""
+
+    command = item.get("command")
+    return isinstance(command, Mapping) and command.get("action") not in NON_MUTATING_ACTIONS
+
+
 def build_choice_payload(
     state: Mapping[str, Any],
     candidates: Sequence[Mapping[str, Any]],
     outcomes: Sequence[Mapping[str, Any]],
     goal: str,
+    advice: Sequence[Mapping[str, Any]] = (),
 ) -> Dict[str, Any]:
     return {
         "schema": CHOICE_INPUT_SCHEMA,
         "goal": display_text(goal, 500),
         "colony": colony_summary(state),
+        "rule_findings": [
+            {"title": display_text(item.get("title"), 160), "risk": display_text(item.get("risk"), 16)}
+            for item in list(advice)[:FEEDBACK_LIMIT]
+            if isinstance(item, Mapping)
+        ],
         "candidates": [
             {key: item[key] for key in ("candidate_id", "summary", "action", "risk")}
             for item in candidates
@@ -213,6 +228,7 @@ def build_choice_payload(
             "A chosen action still needs local human approval and is verified against the game.",
             "recent_outcomes lists earlier choices and whether the game confirmed their effect.",
             "colony.fields holds only values the game observed; null means not observed.",
+            "rule_findings lists open findings of the local safety rules (informational).",
         ],
     }
 
@@ -424,7 +440,7 @@ class ModelLoop:
             elif not blockers:
                 published = self._publish(root, latest, frame, policy, candidate_set)
         if not blockers and published is None and self._decision is None:
-            self._submit(latest, candidate_set, outcomes, current)
+            self._submit(latest, candidate_set, outcomes, advice, current)
 
         status = self._status(root, latest, frame, candidate_set, blockers, outcomes, published, current)
         atomic_write_json(root / "model-loop.json", status)
@@ -464,9 +480,12 @@ class ModelLoop:
             blockers.append("suggestions_disabled")
         elif latest.get("save_id_hash") not in (policy.get("allowed_save_hashes") or []):
             blockers.append("save_not_allowed")
-        if advice:
-            # Open rule incidents (survival pause first) own the pipeline.
-            blockers.append("rules_advice_active")
+        if any(isinstance(item, Mapping) and advice_suggests_mutation(item) for item in advice):
+            # A rule's mutating suggestion (the arbitrated survival pause)
+            # owns the pipeline.  Informational and focus-note findings (idle
+            # duplicants, a missing or non-operational building) can stay open
+            # for a whole session, so they go into the prompt instead.
+            blockers.append("rules_mutation_suggested")
         if (root / "colony-plans" / "active.json").exists():
             try:
                 plan_status = load_active_plan(root).get("status")
@@ -543,6 +562,7 @@ class ModelLoop:
         latest: Optional[Dict[str, Any]],
         candidate_set: Mapping[str, Any],
         outcomes: Sequence[Mapping[str, Any]],
+        advice: Sequence[Mapping[str, Any]],
         current: float,
     ) -> None:
         if self._request is not None:
@@ -568,7 +588,7 @@ class ModelLoop:
             self._next_request_at = current + FAILURE_BACKOFF_SECONDS[0]
             self._event("config_unavailable", status=str(config.get("config_error") or "missing_api_key"))
             return
-        payload = build_choice_payload(latest or {}, items, outcomes, self._goal)
+        payload = build_choice_payload(latest or {}, items, outcomes, self._goal, advice)
         prompt_text = build_choice_prompt_text(payload)
         if estimate_tokens(prompt_text) > MAX_PROMPT_TOKENS:
             self._next_request_at = current + FAILURE_BACKOFF_SECONDS[-1]

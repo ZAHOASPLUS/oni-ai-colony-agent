@@ -371,14 +371,38 @@ class ModelLoopTests(unittest.TestCase):
         self.assertEqual(self.pending(), [])
         self.assertEqual(status["last_event"]["kind"], "choice_stale")
 
-    def test_open_rule_incident_owns_the_pipeline(self):
+    def test_rule_pause_suggestion_owns_the_pipeline(self):
         model = FakeModel()
         loop = self.loop(model)
-        advice = [{"incident_id": "test.incident", "risk": "high", "title": "t", "reason": "r"}]
+        advice = [{"incident_id": "test.suffocation", "risk": "critical", "title": "Suffocation alert observed",
+                   "reason": "r", "incident_opened_at": self.runtime.latest["ts"],
+                   "command": {"action": "set_paused", "args": {"paused": True}}}]
         with mock.patch.object(oni_bridge.agent_rules, "build_arbitrated_advice", return_value=advice):
             status = self.tick(loop)
-        self.assertIn("rules_advice_active", status["blockers"])
+        self.assertIn("rules_mutation_suggested", status["blockers"])
         self.assertEqual(model.prompts, [])
+
+    def test_informational_rule_findings_reach_the_model_instead_of_stopping_it(self):
+        # A cycle-6 live snapshot keeps "Native manual generator operational
+        # check failed" open indefinitely; idle duplicants are routine.
+        model = FakeModel()
+        loop = self.loop(model)
+        opened = self.runtime.latest["ts"]
+        advice = [
+            {"incident_id": "native.manual_generator", "risk": "medium", "incident_opened_at": opened,
+             "title": "Native manual generator operational check failed", "reason": "r"},
+            {"incident_id": "idle_duplicants", "risk": "medium", "incident_opened_at": opened,
+             "title": "Duplicants are idle", "reason": "r",
+             "command": {"action": "focus_note", "args": {"tag": "idle_dupes", "message": "1 idle"}}},
+        ]
+        with mock.patch.object(oni_bridge.agent_rules, "build_arbitrated_advice", return_value=advice):
+            status = self.tick(loop)
+            loop.join_request(5)
+        self.assertNotIn("rules_mutation_suggested", status["blockers"])
+        self.assertEqual(len(model.prompts), 1)
+        payload = json.loads(model.prompts[0].split("\n\n", 1)[1])
+        self.assertEqual([item["title"] for item in payload["rule_findings"]],
+                         ["Native manual generator operational check failed", "Duplicants are idle"])
 
 
 class CandidateTests(unittest.TestCase):
