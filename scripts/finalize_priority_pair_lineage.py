@@ -124,6 +124,12 @@ BRIDGE_HEALTH_FIELDS = frozenset(
         "decision_frame_id",
         "decision_frame_trust",
         "decision_frame_readiness",
+        # Rotation observability (ReplayState.health); omitted here when it
+        # was added, so every real health document was rejected.
+        "rotation_tail_records_total",
+        "last_rotation_tail",
+        "last_event_seq",
+        "last_snapshot_seq",
     }
 )
 BRIDGE_STARTUP_BINDING_FIELDS = frozenset(
@@ -497,6 +503,18 @@ def validate_enriched_latest_against_raw(
     require(
         all(_nonnegative_integer(health.get(field)) is not None for field in integrity_counters),
         "bridge_health_integrity_counters_invalid",
+    )
+    last_event_seq = _nonnegative_integer(health.get("last_event_seq"))
+    raw_seq = _nonnegative_integer(raw_core.get("seq"))
+    require(
+        _nonnegative_integer(health.get("rotation_tail_records_total")) is not None
+        and (health.get("last_rotation_tail") is None or isinstance(health.get("last_rotation_tail"), Mapping))
+        # Events (acks, shutdown) may follow the tip snapshot; snapshots may not.
+        and last_event_seq is not None
+        and raw_seq is not None
+        and last_event_seq >= raw_seq
+        and health.get("last_snapshot_seq") == raw_core.get("snapshot_seq"),
+        "bridge_health_rotation_fields_invalid",
     )
     require(
         all(
