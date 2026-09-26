@@ -16,7 +16,7 @@ import stat
 import sys
 import tempfile
 import time
-from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Set, Tuple
+from typing import Any, Callable, Deque, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -2341,6 +2341,55 @@ def publish_command_pipeline_health(
     }
 
 
+def _archived_session_prefix(
+    bridge_dir: pathlib.Path,
+    raw_lines: Sequence[bytes],
+) -> Iterator[Dict[str, Any]]:
+    """Yield the archived records that precede the replay window's session.
+
+    The replay window holds only the recent lines of the active log.  After a
+    rotation (every few minutes at production snapshot sizes) the current
+    session's seq=1 start and early records live only in its session archive,
+    so a restarted Bridge could never verify the session again (code review
+    2026-09-26, L6).  When the window's last session first appears with a
+    sequence above 1, stream that session's archived records below that
+    sequence, in archive order.  ReplayState still validates the start
+    contract and every sequence; a gap or conflict stays untrusted.
+    """
+
+    def parsed(raw: bytes) -> Optional[Dict[str, Any]]:
+        record, _ = parse_json_line(raw.decode("utf-8-sig", errors="replace"))
+        return record
+
+    target: Optional[str] = None
+    for raw in reversed(raw_lines):
+        record = parsed(raw)
+        if record is not None and isinstance(record.get("session_id"), str) and record["session_id"].strip():
+            target = record["session_id"]
+            break
+    if target is None:
+        return
+    first_sequence: Optional[int] = None
+    for raw in raw_lines:
+        record = parsed(raw)
+        if record is not None and record.get("session_id") == target:
+            first_sequence = parse_positive_sequence(record.get("seq"))
+            break
+    if first_sequence is None or first_sequence <= 1:
+        return
+    archive = bridge_dir / "sessions" / safe_session_name(target) / "state.jsonl"
+    if not archive.is_file():
+        return
+    with archive.open("rb") as handle:
+        for raw in handle:
+            record = parsed(raw.rstrip(b"\r\n"))
+            if record is None or record.get("session_id") != target:
+                continue
+            sequence = parse_positive_sequence(record.get("seq"))
+            if sequence is not None and sequence < first_sequence:
+                yield record
+
+
 def replay_initial_records(
     path: pathlib.Path,
     bridge_dir: pathlib.Path,
@@ -2349,6 +2398,7 @@ def replay_initial_records(
     startup_expectations: Optional[Dict[str, Any]] = None,
     require_startup_binding: bool = False,
     strategy_goal: str = STRATEGY_GOAL,
+    session_archive_prefix: bool = False,
 ) -> Tuple[ReplayState, int]:
     raw_lines, position, partial = load_recent_raw_lines(path)
     runtime = ReplayState(
@@ -2358,6 +2408,10 @@ def replay_initial_records(
         strategy_goal=strategy_goal,
     )
     runtime.partial_bytes = partial
+    if session_archive_prefix:
+        # Already archived; replayed for state only, not re-added below.
+        for record in _archived_session_prefix(bridge_dir, raw_lines):
+            runtime.process(record)
     archive = SessionArchiveBuilder(bridge_dir)
     try:
         for raw in raw_lines:
@@ -3365,6 +3419,7 @@ def run_once(
             startup_expectations=startup_expectations if input_path is None else None,
             require_startup_binding=input_path is None,
             strategy_goal=goal,
+            session_archive_prefix=input_path is None,
         )
         write_outputs(
             bridge_dir,
@@ -3409,6 +3464,7 @@ def watch(
             startup_expectations=startup_expectations,
             require_startup_binding=True,
             strategy_goal=goal,
+            session_archive_prefix=True,
         )
         write_outputs(
             bridge_dir,
