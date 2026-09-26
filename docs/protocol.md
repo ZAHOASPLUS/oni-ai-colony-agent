@@ -118,6 +118,17 @@ change. `cycle` is the UI-facing, one-based integer cycle, while
 `cycle <= game_time_cycles < cycle + 1`. Unknown, zero, empty, and normal are
 distinct values.
 
+The twelve per-building telemetry payloads (`functional_building_geometry`,
+`_ports`, `_occupancy`, `_health`, `_flooded`, `_reachability`,
+`_power_network`, `_utility_network`, `_logic_ports`, `_utility_endpoint`,
+`_utility_topology`, `_utility_contents`) and their quality entries are
+published only when the game was started with
+`ONI_AI_EXTENDED_BUILDING_TELEMETRY=1` (read at each session start). They
+enumerate every completed building in the active world, made up about 78% of a
+cycle-6 snapshot and about 30 ms of main-thread time per read, and no decision
+code consumes them (code review 2026-09-26, L13). The operational
+`functional_buildings` payload is always published.
+
 ```json
 {
   "schema": "oni.state.v2",

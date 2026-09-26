@@ -36,6 +36,30 @@ namespace OniAiProbeMod.Probe
         private static Dictionary<string, object> cachedBuildings;
         private static int cachedBuildingsWorldId = int.MinValue;
         private static DateTimeOffset nextBuildingsRefreshAt = DateTimeOffset.MinValue;
+        // Code review 2026-09-26, L13: these twelve per-building payloads
+        // enumerate every completed building in the active world (including
+        // world-generated POI walls and props), made up about 78% of each
+        // snapshot (about 2.3 MB compact at cycle 6) and about 30 ms of main
+        // thread per read, and no decision code consumes them.  They are
+        // opt-in diagnostics now: start the game with
+        // ONI_AI_EXTENDED_BUILDING_TELEMETRY=1 to publish them again.
+        internal const string ExtendedBuildingTelemetryVariable = "ONI_AI_EXTENDED_BUILDING_TELEMETRY";
+        internal static readonly string[] ExtendedBuildingTelemetryKeys =
+        {
+            "functional_building_geometry",
+            "functional_building_ports",
+            "functional_building_occupancy",
+            "functional_building_health",
+            "functional_building_flooded",
+            "functional_building_reachability",
+            "functional_building_power_network",
+            "functional_building_utility_network",
+            "functional_building_logic_ports",
+            "functional_building_utility_endpoint",
+            "functional_building_utility_topology",
+            "functional_building_utility_contents"
+        };
+        private static bool extendedBuildingTelemetry = ReadExtendedBuildingTelemetrySwitch();
         private static readonly HashSet<int> TrackedDigCells = new HashSet<int>();
         private static List<int> cachedDigCandidates;
         private static int cachedDigWorldId = int.MinValue;
@@ -51,6 +75,7 @@ namespace OniAiProbeMod.Probe
 
         internal static void ResetSession()
         {
+            extendedBuildingTelemetry = ReadExtendedBuildingTelemetrySwitch();
             cachedBuildings = null;
             cachedBuildingsWorldId = int.MinValue;
             nextBuildingsRefreshAt = DateTimeOffset.MinValue;
@@ -66,6 +91,21 @@ namespace OniAiProbeMod.Probe
             nextBlueprintCandidateRefreshAt = DateTimeOffset.MinValue;
             blueprintCandidateScanOffset = 0;
             SurvivalTelemetryReader.ResetSession();
+        }
+
+        private static bool ReadExtendedBuildingTelemetrySwitch()
+        {
+            try
+            {
+                return string.Equals(
+                    Environment.GetEnvironmentVariable(ExtendedBuildingTelemetryVariable),
+                    "1",
+                    StringComparison.Ordinal);
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         internal static void TrackDigCell(int cell)
@@ -169,54 +209,43 @@ namespace OniAiProbeMod.Probe
                 "functional_buildings",
                 FunctionalBuildingTelemetryReader.Read,
                 metrics);
-            Dictionary<string, object> functionalBuildingGeometry = Timed(
-                "functional_building_geometry",
-                FunctionalBuildingGeometryTelemetryReader.Read,
-                metrics);
-            Dictionary<string, object> functionalBuildingPorts = Timed(
-                "functional_building_ports",
-                FunctionalBuildingPortsTelemetryReader.Read,
-                metrics);
-            Dictionary<string, object> functionalBuildingOccupancy = Timed(
-                "functional_building_occupancy",
-                FunctionalBuildingOccupancyTelemetryReader.Read,
-                metrics);
-            Dictionary<string, object> functionalBuildingHealth = Timed(
-                "functional_building_health",
-                FunctionalBuildingHealthTelemetryReader.Read,
-                metrics);
-            Dictionary<string, object> functionalBuildingFlooded = Timed(
-                "functional_building_flooded",
-                FunctionalBuildingFloodedTelemetryReader.Read,
-                metrics);
-            Dictionary<string, object> functionalBuildingReachability = Timed(
-                "functional_building_reachability",
-                FunctionalBuildingReachabilityTelemetryReader.Read,
-                metrics);
-            Dictionary<string, object> functionalBuildingPowerNetwork = Timed(
-                "functional_building_power_network",
-                FunctionalBuildingPowerNetworkTelemetryReader.Read,
-                metrics);
-            Dictionary<string, object> functionalBuildingUtilityNetwork = Timed(
-                "functional_building_utility_network",
-                FunctionalBuildingUtilityNetworkTelemetryReader.Read,
-                metrics);
-            Dictionary<string, object> functionalBuildingLogicPorts = Timed(
-                "functional_building_logic_ports",
-                FunctionalBuildingLogicPortsTelemetryReader.Read,
-                metrics);
-            Dictionary<string, object> functionalBuildingUtilityEndpoint = Timed(
-                "functional_building_utility_endpoint",
-                FunctionalBuildingUtilityEndpointTelemetryReader.Read,
-                metrics);
-            Dictionary<string, object> functionalBuildingUtilityTopology = Timed(
-                "functional_building_utility_topology",
-                FunctionalBuildingUtilityTopologyTelemetryReader.Read,
-                metrics);
-            Dictionary<string, object> functionalBuildingUtilityContents = Timed(
-                "functional_building_utility_contents",
-                FunctionalBuildingUtilityContentsTelemetryReader.Read,
-                metrics);
+            bool extended = extendedBuildingTelemetry;
+            Dictionary<string, object> functionalBuildingGeometry = extended
+                ? Timed("functional_building_geometry", FunctionalBuildingGeometryTelemetryReader.Read, metrics)
+                : null;
+            Dictionary<string, object> functionalBuildingPorts = extended
+                ? Timed("functional_building_ports", FunctionalBuildingPortsTelemetryReader.Read, metrics)
+                : null;
+            Dictionary<string, object> functionalBuildingOccupancy = extended
+                ? Timed("functional_building_occupancy", FunctionalBuildingOccupancyTelemetryReader.Read, metrics)
+                : null;
+            Dictionary<string, object> functionalBuildingHealth = extended
+                ? Timed("functional_building_health", FunctionalBuildingHealthTelemetryReader.Read, metrics)
+                : null;
+            Dictionary<string, object> functionalBuildingFlooded = extended
+                ? Timed("functional_building_flooded", FunctionalBuildingFloodedTelemetryReader.Read, metrics)
+                : null;
+            Dictionary<string, object> functionalBuildingReachability = extended
+                ? Timed("functional_building_reachability", FunctionalBuildingReachabilityTelemetryReader.Read, metrics)
+                : null;
+            Dictionary<string, object> functionalBuildingPowerNetwork = extended
+                ? Timed("functional_building_power_network", FunctionalBuildingPowerNetworkTelemetryReader.Read, metrics)
+                : null;
+            Dictionary<string, object> functionalBuildingUtilityNetwork = extended
+                ? Timed("functional_building_utility_network", FunctionalBuildingUtilityNetworkTelemetryReader.Read, metrics)
+                : null;
+            Dictionary<string, object> functionalBuildingLogicPorts = extended
+                ? Timed("functional_building_logic_ports", FunctionalBuildingLogicPortsTelemetryReader.Read, metrics)
+                : null;
+            Dictionary<string, object> functionalBuildingUtilityEndpoint = extended
+                ? Timed("functional_building_utility_endpoint", FunctionalBuildingUtilityEndpointTelemetryReader.Read, metrics)
+                : null;
+            Dictionary<string, object> functionalBuildingUtilityTopology = extended
+                ? Timed("functional_building_utility_topology", FunctionalBuildingUtilityTopologyTelemetryReader.Read, metrics)
+                : null;
+            Dictionary<string, object> functionalBuildingUtilityContents = extended
+                ? Timed("functional_building_utility_contents", FunctionalBuildingUtilityContentsTelemetryReader.Read, metrics)
+                : null;
             Dictionary<string, object> designations = Timed("designations", ReadDesignations, metrics);
             BlueprintReadResult blueprintState = Timed("blueprints", ReadBlueprintState, metrics);
             Dictionary<string, object> quality = BuildQuality(
@@ -277,48 +306,48 @@ namespace OniAiProbeMod.Probe
             functionalBuildings.Remove("_status");
             functionalBuildings.Remove("_source");
             functionalBuildings.Remove("_reason");
-            functionalBuildingGeometry.Remove("_status");
-            functionalBuildingGeometry.Remove("_source");
-            functionalBuildingGeometry.Remove("_reason");
-            functionalBuildingPorts.Remove("_status");
-            functionalBuildingPorts.Remove("_source");
-            functionalBuildingPorts.Remove("_reason");
-            functionalBuildingOccupancy.Remove("_status");
-            functionalBuildingOccupancy.Remove("_source");
-            functionalBuildingOccupancy.Remove("_reason");
-            functionalBuildingHealth.Remove("_status");
-            functionalBuildingHealth.Remove("_source");
-            functionalBuildingHealth.Remove("_reason");
-            functionalBuildingFlooded.Remove("_status");
-            functionalBuildingFlooded.Remove("_source");
-            functionalBuildingFlooded.Remove("_reason");
-            functionalBuildingReachability.Remove("_status");
-            functionalBuildingReachability.Remove("_source");
-            functionalBuildingReachability.Remove("_reason");
-            functionalBuildingPowerNetwork.Remove("_status");
-            functionalBuildingPowerNetwork.Remove("_source");
-            functionalBuildingPowerNetwork.Remove("_reason");
-            functionalBuildingUtilityNetwork.Remove("_status");
-            functionalBuildingUtilityNetwork.Remove("_source");
-            functionalBuildingUtilityNetwork.Remove("_reason");
-            functionalBuildingLogicPorts.Remove("_status");
-            functionalBuildingLogicPorts.Remove("_source");
-            functionalBuildingLogicPorts.Remove("_reason");
-            functionalBuildingUtilityEndpoint.Remove("_status");
-            functionalBuildingUtilityEndpoint.Remove("_source");
-            functionalBuildingUtilityEndpoint.Remove("_reason");
-            functionalBuildingUtilityTopology.Remove("_status");
-            functionalBuildingUtilityTopology.Remove("_source");
-            functionalBuildingUtilityTopology.Remove("_reason");
-            functionalBuildingUtilityContents.Remove("_status");
-            functionalBuildingUtilityContents.Remove("_source");
-            functionalBuildingUtilityContents.Remove("_reason");
+            functionalBuildingGeometry?.Remove("_status");
+            functionalBuildingGeometry?.Remove("_source");
+            functionalBuildingGeometry?.Remove("_reason");
+            functionalBuildingPorts?.Remove("_status");
+            functionalBuildingPorts?.Remove("_source");
+            functionalBuildingPorts?.Remove("_reason");
+            functionalBuildingOccupancy?.Remove("_status");
+            functionalBuildingOccupancy?.Remove("_source");
+            functionalBuildingOccupancy?.Remove("_reason");
+            functionalBuildingHealth?.Remove("_status");
+            functionalBuildingHealth?.Remove("_source");
+            functionalBuildingHealth?.Remove("_reason");
+            functionalBuildingFlooded?.Remove("_status");
+            functionalBuildingFlooded?.Remove("_source");
+            functionalBuildingFlooded?.Remove("_reason");
+            functionalBuildingReachability?.Remove("_status");
+            functionalBuildingReachability?.Remove("_source");
+            functionalBuildingReachability?.Remove("_reason");
+            functionalBuildingPowerNetwork?.Remove("_status");
+            functionalBuildingPowerNetwork?.Remove("_source");
+            functionalBuildingPowerNetwork?.Remove("_reason");
+            functionalBuildingUtilityNetwork?.Remove("_status");
+            functionalBuildingUtilityNetwork?.Remove("_source");
+            functionalBuildingUtilityNetwork?.Remove("_reason");
+            functionalBuildingLogicPorts?.Remove("_status");
+            functionalBuildingLogicPorts?.Remove("_source");
+            functionalBuildingLogicPorts?.Remove("_reason");
+            functionalBuildingUtilityEndpoint?.Remove("_status");
+            functionalBuildingUtilityEndpoint?.Remove("_source");
+            functionalBuildingUtilityEndpoint?.Remove("_reason");
+            functionalBuildingUtilityTopology?.Remove("_status");
+            functionalBuildingUtilityTopology?.Remove("_source");
+            functionalBuildingUtilityTopology?.Remove("_reason");
+            functionalBuildingUtilityContents?.Remove("_status");
+            functionalBuildingUtilityContents?.Remove("_source");
+            functionalBuildingUtilityContents?.Remove("_reason");
             Dictionary<string, object> dig = designations["dig"] as Dictionary<string, object>;
             dig?.Remove("_status");
             dig?.Remove("_tool_status");
             dig?.Remove("_source");
 
-            return new Dictionary<string, object>
+            Dictionary<string, object> state = new Dictionary<string, object>
             {
                 { "schema", "oni.state.v2" },
                 { "event", "state_snapshot" },
@@ -344,24 +373,39 @@ namespace OniAiProbeMod.Probe
                 { "research", research },
                 { "buildings", buildings },
                 { "functional_buildings", functionalBuildings },
-                { "functional_building_geometry", functionalBuildingGeometry },
-                { "functional_building_ports", functionalBuildingPorts },
-                { "functional_building_occupancy", functionalBuildingOccupancy },
-                { "functional_building_health", functionalBuildingHealth },
-                { "functional_building_flooded", functionalBuildingFlooded },
-                { "functional_building_reachability", functionalBuildingReachability },
-                { "functional_building_power_network", functionalBuildingPowerNetwork },
-                { "functional_building_utility_network", functionalBuildingUtilityNetwork },
-                { "functional_building_logic_ports", functionalBuildingLogicPorts },
-                { "functional_building_utility_endpoint", functionalBuildingUtilityEndpoint },
-                { "functional_building_utility_topology", functionalBuildingUtilityTopology },
-                { "functional_building_utility_contents", functionalBuildingUtilityContents },
                 { "designations", designations },
                 { "blueprints", blueprintState.Blueprints },
                 { "cells", blueprintState.Cells },
                 { "quality", quality },
                 { "read_metrics_ms", metrics }
             };
+            Dictionary<string, object>[] extendedPayloads =
+            {
+                functionalBuildingGeometry,
+                functionalBuildingPorts,
+                functionalBuildingOccupancy,
+                functionalBuildingHealth,
+                functionalBuildingFlooded,
+                functionalBuildingReachability,
+                functionalBuildingPowerNetwork,
+                functionalBuildingUtilityNetwork,
+                functionalBuildingLogicPorts,
+                functionalBuildingUtilityEndpoint,
+                functionalBuildingUtilityTopology,
+                functionalBuildingUtilityContents
+            };
+            for (int index = 0; index < ExtendedBuildingTelemetryKeys.Length; index++)
+            {
+                if (extended)
+                {
+                    state[ExtendedBuildingTelemetryKeys[index]] = extendedPayloads[index];
+                }
+                else
+                {
+                    quality.Remove(ExtendedBuildingTelemetryKeys[index]);
+                }
+            }
+            return state;
         }
 
         private static Dictionary<string, object> ReadGame()
