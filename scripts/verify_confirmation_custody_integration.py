@@ -2479,7 +2479,9 @@ def _is_canonical_done_state(state: Any, command_id: str) -> bool:
         return False
     if not _is_nonempty_string(first.get("path")) or first.get("path") != canonical_done_path:
         return False
-    if first.get("status") != CONFIRMATION_CONFIRMED:
+    # A committed mutating command's status is "confirmed"; CONFIRMATION_CONFIRMED
+    # ("snapshot_confirmed") is the certificate status checked separately below.
+    if first.get("status") != "confirmed":
         return False
     return (
         state.get("errors") == []

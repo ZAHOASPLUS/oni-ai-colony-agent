@@ -13,7 +13,12 @@ import tempfile
 import time
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
-from agent.command_custody import read_bytes_share_delete
+from agent.command_custody import (
+    CommandCustodyError,
+    lifecycle_custody,
+    read_bytes_share_delete,
+    read_stable_bytes,
+)
 from agent.command_queue import COMMAND_SCHEMA, ensure_command_dirs, write_json_atomic
 from agent.canonical_hash import canonical_hash as _contract_canonical_hash, loads_strict
 from agent.decision import DecisionFrameError, validate_decision_frame
@@ -1416,6 +1421,17 @@ def _rename_with_retry(source: pathlib.Path, target: pathlib.Path) -> None:
             delay = min(delay * 2, _MOVE_MAX_DELAY_SECONDS)
 
 
+def _source_unchanged(path: pathlib.Path, expected: Mapping[str, Any]) -> bool:
+    """Whether ``path`` still holds exactly the command read by the scan."""
+
+    try:
+        raw, _identity, _mtime_ns = read_stable_bytes(path, label="confirming command")
+        current = loads_strict(raw.decode("utf-8-sig"))
+    except (CommandCustodyError, ValueError, UnicodeError):
+        return False
+    return isinstance(current, dict) and _strict_json_equal(current, dict(expected))
+
+
 def commit_confirmed_outcomes(
     bridge_dir: pathlib.Path,
     document: Mapping[str, Any],
@@ -1429,10 +1445,26 @@ def commit_confirmed_outcomes(
     renames it to ``done`` with the immutable certificate embedded.  A crash
     between preparation and rename is recovered from the staged publication
     journal without rebuilding or weakening the certificate.
+
+    These are queue transitions, so they run under the shared lifecycle
+    custody like every other Python queue writer, and each write, rename or
+    unlink first proves the source still holds the scanned command; a source
+    replaced after the scan is left untouched and not reported committed
+    (code review 2026-09-26, L10 follow-up).
     """
 
     validate_action_outcomes(document)
     bridge_dir = bridge_dir.expanduser().resolve()
+    with lifecycle_custody(bridge_dir):
+        return _commit_confirmed_outcomes_locked(bridge_dir, document, publication_paths=publication_paths)
+
+
+def _commit_confirmed_outcomes_locked(
+    bridge_dir: pathlib.Path,
+    document: Mapping[str, Any],
+    *,
+    publication_paths: Optional[Sequence[pathlib.Path]] = None,
+) -> List[str]:
     dirs = ensure_command_dirs(bridge_dir)
     expected_publications = tuple(publication_paths or (bridge_dir / "action-outcomes.json",))
     if not _matching_published_documents(document, expected_publications):
@@ -1473,6 +1505,8 @@ def commit_confirmed_outcomes(
             expected = _confirmed_command_payload(source_command, raw_outcome)
             if expected is None or not _strict_json_equal(existing, expected):
                 continue
+            if not _source_unchanged(source_path, source_command):
+                continue
             try:
                 source_path.unlink()
             except FileNotFoundError:
@@ -1487,6 +1521,8 @@ def commit_confirmed_outcomes(
         payload = _confirmed_command_payload(command, raw_outcome)
         if payload is None:
             continue
+        if not _source_unchanged(source_path, command):
+            continue
         if payload.get("action") in _APPROVAL_BUNDLE_ACTIONS:
             # Publish approval authority before preparing or renaming the
             # confirming command.  A missing/pruned frame, injected I/O
@@ -1497,17 +1533,23 @@ def commit_confirmed_outcomes(
             if not _strict_json_equal(command, payload):
                 continue
         else:
+            if not _source_unchanged(source_path, command):
+                continue
             write_json_atomic(source_path, payload)
         if target_path.exists():
             # Never overwrite a conflicting done file.
             existing = _read_json_object(target_path)
             if existing is None or not _strict_json_equal(existing, payload):
                 continue
+            if not _source_unchanged(source_path, payload):
+                continue
             try:
                 source_path.unlink()
             except FileNotFoundError:
                 pass
             committed.append(command_id)
+            continue
+        if not _source_unchanged(source_path, payload):
             continue
         try:
             _rename_with_retry(source_path, target_path)
@@ -1526,6 +1568,11 @@ def recover_staged_confirmed_outcomes(bridge_dir: pathlib.Path) -> List[str]:
     """Idempotently finish the latest root/session-published confirmation transaction."""
 
     bridge_dir = bridge_dir.expanduser().resolve()
+    with lifecycle_custody(bridge_dir):
+        return _recover_staged_confirmed_outcomes_locked(bridge_dir)
+
+
+def _recover_staged_confirmed_outcomes_locked(bridge_dir: pathlib.Path) -> List[str]:
     document = _validated_staged_document(bridge_dir)
     if document is None:
         prepared = _prepared_confirming_command_ids(bridge_dir)
