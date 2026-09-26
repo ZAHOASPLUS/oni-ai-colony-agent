@@ -21,7 +21,7 @@ from agent.field_contracts import (
 )
 from agent.canonical_hash import canonical_hash
 from agent.incidents import IncidentTracker
-from agent.state_quality import parse_snapshot_timestamp
+from agent.state_quality import canonical_state_hash, parse_snapshot_timestamp
 
 
 AVAILABLE_ACTIONS: List[Dict[str, Any]] = [
@@ -810,6 +810,8 @@ def survival_certificate_blockers(
     certificate: Any,
     frame_source: Mapping[str, Any],
     incident_items: Sequence[Mapping[str, Any]],
+    *,
+    state: Optional[Mapping[str, Any]] = None,
 ) -> List[str]:
     """Validate the bounded frame certificate used at queue and approval time.
 
@@ -817,8 +819,80 @@ def survival_certificate_blockers(
     arbitration implementation. After shape checks this function runs the
     same pure reducer as :func:`arbitrate_survival_emergency` and compares
     every result field, including blockers and priority order.
+
+    The frame alone cannot prove the certificate's active alert set: an
+    edited or deleted witness together with a shortened active set reduces
+    consistently (review S1).  A selected certificate must therefore agree
+    with every alert record of its own snapshot, and when the caller passes
+    the snapshot ``state`` bound by the frame's ``state_hash``, the real
+    arbiter is re-run on it and must reproduce the certificate exactly.
     """
 
+    blockers = _survival_certificate_frame_blockers(certificate, frame_source, incident_items)
+    if state is not None:
+        blockers.extend(_survival_certificate_state_blockers(certificate, frame_source, incident_items, state))
+    return sorted(set(blockers))
+
+
+def _survival_certificate_state_blockers(
+    certificate: Any,
+    frame_source: Mapping[str, Any],
+    incident_items: Sequence[Mapping[str, Any]],
+    state: Mapping[str, Any],
+) -> List[str]:
+    try:
+        state_hash = canonical_state_hash(dict(state))
+    except (TypeError, ValueError, OverflowError):
+        return ["survival_certificate_state_unbound"]
+    if not isinstance(frame_source, Mapping) or state_hash != frame_source.get("state_hash"):
+        return ["survival_certificate_state_unbound"]
+    try:
+        expected = build_survival_arbitration_certificate(
+            state, [item for item in incident_items if isinstance(item, Mapping)]
+        )
+    except Exception:  # noqa: BLE001 - re-arbitration fails closed
+        return ["survival_certificate_rearbitration_failed"]
+    if not _strict_survival_equal(dict(certificate) if isinstance(certificate, Mapping) else certificate, expected):
+        return ["survival_certificate_rearbitration_mismatch"]
+    return []
+
+
+def _survival_certificate_active_set_blockers(
+    active_ids: Sequence[str],
+    frame_source: Mapping[str, Any],
+    incident_items: Sequence[Mapping[str, Any]],
+) -> List[str]:
+    """Bind a selected certificate's active set to its snapshot's records.
+
+    The rule tracker updates every canonical alert on every trusted snapshot,
+    so a record carrying the frame's snapshot states whether that alert was
+    active.  Such a record may not contradict the certificate.
+    """
+
+    snapshot_id = frame_source.get("snapshot_id") if isinstance(frame_source, Mapping) else None
+    session_id = frame_source.get("session_id") if isinstance(frame_source, Mapping) else None
+    pause_ids = set(_ranked_pause_alert_ids())
+    active = set(active_ids)
+    blockers: List[str] = []
+    for item in incident_items:
+        if not isinstance(item, Mapping):
+            continue
+        alert_id = item.get("incident_id")
+        if alert_id not in pause_ids:
+            continue
+        if item.get("snapshot_id") != snapshot_id or item.get("session_id") != session_id:
+            continue
+        telemetry_state = item.get("telemetry_state")
+        if (telemetry_state == "active") != (alert_id in active) or telemetry_state not in {"active", "inactive"}:
+            blockers.append(f"survival_certificate_active_alert_unbound:{alert_id}")
+    return blockers
+
+
+def _survival_certificate_frame_blockers(
+    certificate: Any,
+    frame_source: Mapping[str, Any],
+    incident_items: Sequence[Mapping[str, Any]],
+) -> List[str]:
     blockers: List[str] = []
     if not isinstance(certificate, Mapping) or set(certificate) != _SURVIVAL_CERTIFICATE_KEYS:
         return ["survival_certificate_shape_invalid"]
@@ -968,6 +1042,9 @@ def survival_certificate_blockers(
     selected = certificate.get("selected_incident_id")
     command_hint_hash = certificate.get("command_hint_hash")
     if status == "selected":
+        blockers.extend(
+            _survival_certificate_active_set_blockers(active_ids, frame_source, incident_items)
+        )
         if raw_blockers:
             blockers.append("survival_certificate_selected_with_blockers")
         if game_paused is not False:
@@ -985,9 +1062,16 @@ def survival_certificate_blockers(
 
 
 def survival_suggested_command_frame_blockers(
-    command: Mapping[str, Any], frame: Mapping[str, Any]
+    command: Mapping[str, Any],
+    frame: Mapping[str, Any],
+    *,
+    state: Optional[Mapping[str, Any]] = None,
 ) -> List[str]:
-    """Bind one suggested pause envelope to its certified alert episode."""
+    """Bind one suggested pause envelope to its certified alert episode.
+
+    ``state`` is the frame's own snapshot; when given, the certificate is
+    re-arbitrated against it (see :func:`survival_certificate_blockers`).
+    """
 
     if command.get("mode") != "suggested" or command.get("action") != "set_paused":
         return []
@@ -1011,7 +1095,7 @@ def survival_suggested_command_frame_blockers(
     certificate = incidents_projection.get("survival_emergency")
     frame_source = frame.get("source") if isinstance(frame.get("source"), Mapping) else {}
     blockers.extend(
-        survival_certificate_blockers(certificate, frame_source, incident_items)
+        survival_certificate_blockers(certificate, frame_source, incident_items, state=state)
     )
     if (
         incidents_projection.get("valid") is not True

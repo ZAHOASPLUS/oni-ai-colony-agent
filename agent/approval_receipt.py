@@ -7,7 +7,7 @@ import json
 import pathlib
 import re
 import sys
-from typing import Any, Dict, Mapping, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -179,8 +179,17 @@ def validate_approval_inputs(
     command: Mapping[str, Any],
     policy: Mapping[str, Any],
     frame: Mapping[str, Any],
+    *,
+    survival_state: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Validate the frame and policy that authorize one mutating V3 command."""
+    """Validate the frame and policy that authorize one mutating V3 command.
+
+    ``survival_state`` is the snapshot the frame was built from (the Bridge's
+    ``latest_state.json`` while it is still that snapshot).  When given, a
+    suggested survival pause is re-arbitrated against it instead of trusting
+    the frame's certificate alone (review S1); a state that is not the
+    frame's snapshot rejects the approval.
+    """
 
     _require(command.get("schema") == "oni.command.v3", "command schema must be oni.command.v3")
     _require(
@@ -234,6 +243,7 @@ def validate_approval_inputs(
         survival_blockers = agent_rules.survival_suggested_command_frame_blockers(
             command,
             frame,
+            state=survival_state,
         )
         _require(
             not survival_blockers,
@@ -250,10 +260,11 @@ def issue_approval_receipt(
     *,
     approved_by: str,
     approved_at: str,
+    survival_state: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     _require(approved_by == "local_human", "approved_by must be local_human")
     _parse_approval_time(approved_at)
-    source = validate_approval_inputs(command, policy, frame)
+    source = validate_approval_inputs(command, policy, frame, survival_state=survival_state)
     receipt: Dict[str, Any] = {
         "schema": APPROVAL_RECEIPT_SCHEMA,
         "command_id": command.get("id"),
@@ -268,7 +279,7 @@ def issue_approval_receipt(
     receipt["receipt_hash"] = canonical_hash(
         {key: value for key, value in receipt.items() if key != "receipt_hash"}
     )
-    validate_approval_receipt(command, policy, frame, receipt)
+    validate_approval_receipt(command, policy, frame, receipt, survival_state=survival_state)
     return receipt
 
 
@@ -279,6 +290,7 @@ def build_approved_command(
     *,
     approved_by: str,
     approved_at: str,
+    survival_state: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Return the exact approved document without a lossy JSON language round-trip."""
 
@@ -288,13 +300,14 @@ def build_approved_command(
         frame,
         approved_by=approved_by,
         approved_at=approved_at,
+        survival_state=survival_state,
     )
     approved = copy.deepcopy(dict(command))
     approved["status"] = "approved"
     approved["approved_at"] = approved_at
     approved["approved_by"] = approved_by
     approved["approval_receipt"] = receipt
-    validate_approval_receipt(approved, policy, frame)
+    validate_approval_receipt(approved, policy, frame, survival_state=survival_state)
     return approved
 
 
@@ -303,6 +316,8 @@ def validate_approval_receipt(
     policy: Mapping[str, Any],
     frame: Mapping[str, Any],
     receipt: Mapping[str, Any] | None = None,
+    *,
+    survival_state: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """Fail closed if an approved command, frame, policy, or receipt changed."""
 
@@ -326,7 +341,7 @@ def validate_approval_receipt(
     )
     source = candidate.get("source")
     _require(isinstance(source, Mapping) and set(source) == _SOURCE_KEYS, "approval_receipt source is invalid")
-    expected_source = validate_approval_inputs(command, policy, frame)
+    expected_source = validate_approval_inputs(command, policy, frame, survival_state=survival_state)
     _require(_strict_json_equal(source, expected_source), "approval_receipt source mismatch")
     _require(candidate.get("policy_hash") == canonical_hash(policy), "policy changed after approval")
     _require(
@@ -366,6 +381,11 @@ def _main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--command", required=True, type=pathlib.Path)
     parser.add_argument("--policy", required=True, type=pathlib.Path)
     parser.add_argument("--frame", required=True, type=pathlib.Path)
+    parser.add_argument(
+        "--state",
+        type=pathlib.Path,
+        help="the frame's snapshot (latest_state.json); re-arbitrates a suggested survival pause",
+    )
     parser.add_argument("--approved-by", default="local_human")
     parser.add_argument("--approved-at")
     args = parser.parse_args(argv)
@@ -374,6 +394,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
         command = _read_json(args.command, "command")
         policy = _read_json(args.policy, "policy")
         frame = _read_json(args.frame, "decision frame")
+        survival_state = _read_json(args.state, "state") if args.state is not None else None
         if args.mode in {"issue", "approve"}:
             _require(bool(args.approved_at), f"--approved-at is required in {args.mode} mode")
             if args.mode == "issue":
@@ -383,6 +404,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
                     frame,
                     approved_by=args.approved_by,
                     approved_at=str(args.approved_at),
+                    survival_state=survival_state,
                 )
             else:
                 output = build_approved_command(
@@ -391,6 +413,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
                     frame,
                     approved_by=args.approved_by,
                     approved_at=str(args.approved_at),
+                    survival_state=survival_state,
                 )
             # ASCII-only output: approve-command.ps1 captures this through the
             # console code page (GBK under Windows PowerShell 5.1), which
@@ -400,7 +423,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
             sys.stdout.write(json.dumps(output, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
             sys.stdout.write("\n")
         else:
-            validate_approval_receipt(command, policy, frame)
+            validate_approval_receipt(command, policy, frame, survival_state=survival_state)
             sys.stdout.write("approval receipt valid\n")
     except ApprovalReceiptError as exc:
         sys.stderr.write(f"approval receipt rejected: {exc}\n")
