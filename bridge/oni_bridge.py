@@ -37,6 +37,7 @@ from agent.decision_frame_archive import (
 )
 from agent.incidents import IncidentTracker
 from agent.llm_planner import colony_plan_definition_from_plan, generate_plan
+from agent.model_loop import ModelLoop
 from agent.colony_plan import (
     abort_colony_plan,
     advance_colony_plan,
@@ -2825,6 +2826,7 @@ def write_outputs(
     planned_queue_owner: Optional[
         Callable[[pathlib.Path, Mapping[str, Any], List[Mapping[str, Any]], Mapping[str, Any]], Mapping[str, Any]]
     ] = None,
+    model_loop: Optional[ModelLoop] = None,
 ) -> None:
     bridge_dir.mkdir(parents=True, exist_ok=True)
     # Finish any root+session publication that crashed after its durable commit
@@ -3012,6 +3014,11 @@ def write_outputs(
             allow_non_actionable_replay=replay_mode and allow_replay_suggestions,
             policy_override=policy,
         )
+        if model_loop is not None and not replay_mode:
+            # The explicit model loop publishes at most one model_selected
+            # command bound to this committed frame, after rule suggestions
+            # had their turn and before the post-sync control packet.
+            model_loop.step(bridge_dir, latest, decision_frame, policy, advice)
     # ControlPacket is a post-sync, non-executing commit marker.  Reuse the
     # exact state, frame, and already-loaded policy that entered this
     # generation: re-reading action-policy.json here could bind the queue and
@@ -3339,6 +3346,7 @@ def run_once(
     planned_queue_owner: Optional[
         Callable[[pathlib.Path, Mapping[str, Any], List[Mapping[str, Any]], Mapping[str, Any]], Mapping[str, Any]]
     ] = None,
+    model_loop: Optional[ModelLoop] = None,
 ) -> ReplayState:
     state_log = input_path or bridge_dir / "state.jsonl"
     if input_path is not None and allow_replay_suggestions:
@@ -3368,6 +3376,7 @@ def run_once(
             allow_replay_suggestions=allow_replay_suggestions,
             coordinator_observer=coordinator_observer,
             planned_queue_owner=planned_queue_owner,
+            model_loop=model_loop,
         )
     except Exception as exc:
         publish_bridge_fault(bridge_dir, exc)
@@ -3387,6 +3396,7 @@ def watch(
     planned_queue_owner: Optional[
         Callable[[pathlib.Path, Mapping[str, Any], List[Mapping[str, Any]], Mapping[str, Any]], Mapping[str, Any]]
     ] = None,
+    model_loop: Optional[ModelLoop] = None,
 ) -> None:
     state_log = bridge_dir / "state.jsonl"
     # Any failure leaves an explicit untrusted health before the Bridge
@@ -3408,6 +3418,7 @@ def watch(
             goal=goal,
             coordinator_observer=coordinator_observer,
             planned_queue_owner=planned_queue_owner,
+            model_loop=model_loop,
         )
 
         while True:
@@ -3424,6 +3435,7 @@ def watch(
                 goal=goal,
                 coordinator_observer=coordinator_observer,
                 planned_queue_owner=planned_queue_owner,
+                model_loop=model_loop,
             )
             if rotate_log(state_log):
                 runtime.rotation_count += 1
@@ -3487,6 +3499,12 @@ def parse_args() -> argparse.Namespace:
         help="explicit clone-gated planned queue owner config; never enabled by default",
     )
     parser.add_argument("--goal", default=STRATEGY_GOAL)
+    parser.add_argument(
+        "--model-loop", action="store_true",
+        help="let the configured model choose one catalogued candidate per decision; "
+             "every choice still needs local human approval (watch mode only)",
+    )
+    parser.add_argument("--model-deadline-seconds", type=float, default=90.0)
     parser.add_argument("--expected-validation-run-id")
     parser.add_argument("--expected-validation-process-id", type=int)
     parser.add_argument("--expected-startup-binding-sha256")
@@ -3543,6 +3561,19 @@ def main() -> None:
         raise SystemExit("coordinator and planned-owner configs are mutually exclusive")
     if planned_queue_owner is not None and args.input is not None:
         raise SystemExit("planned owner cannot be used with replay --input")
+    model_loop: Optional[ModelLoop] = None
+    if args.model_loop:
+        if args.once or args.input is not None:
+            raise SystemExit("--model-loop needs watch mode; its model call is asynchronous")
+        if planned_queue_owner is not None:
+            raise SystemExit("--model-loop and the planned owner are mutually exclusive queue owners")
+        if not 5.0 <= args.model_deadline_seconds <= 600.0:
+            raise SystemExit("--model-deadline-seconds must be between 5 and 600")
+        model_loop = ModelLoop(
+            secrets_dir=args.secrets_dir,
+            goal=args.goal,
+            deadline_seconds=args.model_deadline_seconds,
+        )
     if args.once or args.input:
         run_once(
             args.bridge_dir,
@@ -3565,6 +3596,7 @@ def main() -> None:
             startup_expectations=startup_expectations,
             coordinator_observer=coordinator_observer,
             planned_queue_owner=planned_queue_owner,
+            model_loop=model_loop,
         )
 
 

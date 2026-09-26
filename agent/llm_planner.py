@@ -97,13 +97,7 @@ def generate_plan(
         write_planner_outputs(bridge_dir, plan)
         return plan
 
-    config = dict(config_override) if config_override is not None else load_llm_config(secrets_dir)
-    config.setdefault("base_url", DEFAULT_BASE_URL)
-    config.setdefault("model", DEFAULT_MODEL)
-    if not config.get("config_error"):
-        config["config_error"] = base_url_error(str(config["base_url"]))
-    if config.get("config_error"):
-        config["api_key"] = None  # never send a key under an unsafe config
+    config = resolve_llm_config(secrets_dir, config_override)
     plan["llm"].update(config_health(config))
 
     if not advice:
@@ -513,6 +507,22 @@ def load_llm_config(secrets_dir: Optional[pathlib.Path]) -> Dict[str, Any]:
     return config
 
 
+def resolve_llm_config(
+    secrets_dir: Optional[pathlib.Path],
+    config_override: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Load (or copy an override of) one configuration and refuse unsafe ones."""
+
+    config = dict(config_override) if config_override is not None else load_llm_config(secrets_dir)
+    config.setdefault("base_url", DEFAULT_BASE_URL)
+    config.setdefault("model", DEFAULT_MODEL)
+    if not config.get("config_error"):
+        config["config_error"] = base_url_error(str(config["base_url"]))
+    if config.get("config_error"):
+        config["api_key"] = None  # never send a key under an unsafe config
+    return config
+
+
 def read_secret_file(path: pathlib.Path) -> Dict[str, Optional[str]]:
     """Read explicit configuration fields from one secrets file."""
 
@@ -633,9 +643,14 @@ def call_responses(config: Dict[str, Any], prompt_text: str) -> Dict[str, Any]:
     return execute_request(request)
 
 
-def execute_request(request: urllib.request.Request) -> Dict[str, Any]:
+def execute_request(
+    request: urllib.request.Request,
+    timeout: float = REQUEST_TIMEOUT_SECONDS,
+) -> Dict[str, Any]:
+    # ``timeout`` bounds each socket operation, not the whole request; callers
+    # that need a total deadline must enforce it themselves (review M5).
     try:
-        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             value = json.loads(response.read().decode("utf-8"))
             if not isinstance(value, dict):
                 raise ModelRequestError("invalid_response")

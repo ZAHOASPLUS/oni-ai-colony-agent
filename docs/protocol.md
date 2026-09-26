@@ -997,6 +997,33 @@ action membership or save-hash membership in the enabled local action policy.
 `noop` and `focus_note` retain their non-mutating approval compatibility and do
 not require a mutation approval receipt.
 
+`bridge/oni_bridge.py --model-loop` (watch mode only, explicit opt-in; code
+review 2026-09-26, M1) adds a third Bridge-side owner: `mode=model_selected`,
+`source.kind=model_choice`, a null `source_incident_id`, and ids of the form
+`cmd-model-<32 hex>`. Each generation `agent/candidates.py` derives at most
+five candidates from the trusted snapshot (`pause_game` while running;
+while paused up to two one-step `set_duplicant_chore_priority` raises for the
+Dig/Build groups, one horizontal `mark_dig_cells` run of at most four safe
+cells, and `resume_game` only on an observed empty canonical alert set), each
+built by the catalogued `agent/advanced_actions.py` builders, plus `wait`. A
+background request with a total deadline asks the model for exactly one
+`candidate_id` (structured output restricted to the offered ids, local
+validation authoritative); the chosen candidate's complete local contract is
+published only if the identical contract is still generated for the current
+state, the frame is trusted and proposal-ready, the local policy enables
+actions and suggestions for that save, no rule advice is open, no Colony Plan
+is active, and the post-sync pipeline gate is ready. Approval uses the same
+receipt path as `suggested`: the bound frame's `readiness.propose` must be
+exactly `ready=true, blockers=[]` (no `SUGGESTIONS_DISABLED` exception). Like
+`runtime_validation` and `planned`, a model-selected pending command is
+approved against its archived frame, expires only by TTL, and latches further
+mutation proposals (`mutation_pending_model_selection:<id>`); disabling
+suggestions rejects it like a suggested command. The loop records the
+command's later stage and result (confirmed, rejected with reason, failed with
+classification) and feeds the last five into the next prompt; `model-loop.json`
+shows the candidates, the request, the last choice, and the command awaiting
+approval. The model never supplies actions, arguments, or conditions.
+
 A mutating command must be approved against the exact immutable frame named by
 its `source_frame_id`; validating an arbitrary historical frame is forbidden.
 If only the moving root `decision-frame.json` is available and Bridge publishes

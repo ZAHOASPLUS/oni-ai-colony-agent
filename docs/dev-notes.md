@@ -442,6 +442,27 @@ cost rates with `ONI_AI_INPUT_COST_PER_1M` and
 `ONI_AI_OUTPUT_COST_PER_1M`. LLM output ranks existing incident IDs only and
 never writes `approved` commands.
 
+### Model loop (M1)
+
+`-ModelLoop` (watch mode only) lets the configured model pick one of at most
+five catalogued candidates per decision (`docs/protocol.md`, `model_selected`).
+The Bridge publishes the choice as one pending command; nothing runs until a
+human approves it:
+
+```powershell
+.\scripts\run-bridge.ps1 -ModelLoop -SecretsDir "C:\path\to\local-secrets" <startup expectation arguments>
+Get-Content "$HOME\Documents\Klei\OxygenNotIncluded\ai-bridge\model-loop.json"
+.\scripts\approve-command.ps1 -CommandId <awaiting_approval.command_id>
+```
+
+`model-loop.json` shows the candidates, the model's last choice and reason,
+the command awaiting approval, and the recent outcomes fed back to the model.
+The policy must enable actions and suggestions for the loaded save and allow the
+candidate actions (`set_paused`, `set_duplicant_chore_priority`,
+`mark_dig_cells`); raise `command_ttl_seconds` (at most 300) so there is time to
+read and approve. Priority and dig candidates exist only while the game is
+paused. A live clone run of this loop has not happened yet.
+
 ## Verification Ladder
 
 ```powershell

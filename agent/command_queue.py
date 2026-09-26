@@ -57,6 +57,12 @@ COMMAND_PIPELINE_ACTIVE_STAGES = (
 )
 COMMAND_PIPELINE_SCAN_STAGES = COMMAND_PIPELINE_ACTIVE_STAGES + ("failed",)
 OPERATOR_PENDING_MODES = {"runtime_validation", "planned"}
+MODEL_SELECTED_MODE = "model_selected"
+# Pending modes approved against their immutable archived source frame: they
+# expire only by TTL and latch further mutation proposals while pending.
+# Model-selected commands are Bridge-published (agent.model_loop) but bound the
+# same way, so a human can approve them across snapshots (review 2026-09-26, M1).
+ARCHIVED_FRAME_PENDING_MODES = OPERATOR_PENDING_MODES | {MODEL_SELECTED_MODE}
 # A failed mutation is a latch unless the executor proved it stopped before
 # dispatch (docs/protocol.md) or an operator explicitly reconciled it.
 _DEFINITE_FAILURE_CLASSIFICATIONS = frozenset({"behavior_fail", "rejected", "runtime_fail"})
@@ -384,27 +390,29 @@ def command_pipeline_readiness(
         if record["stage"] == "pending":
             raw_mode = record["command"].get("mode")
             mode = raw_mode if isinstance(raw_mode, str) else ""
-            if mutating and mode not in OPERATOR_PENDING_MODES | {"suggested"}:
+            if mutating and mode not in ARCHIVED_FRAME_PENDING_MODES | {"suggested"}:
                 # A readable mutating envelope with no supported owner must not
                 # disappear or be treated as queue capacity.  Keep it in place
                 # for explicit operator inspection and fail proposal closed.
                 proposal_blockers.append(f"mutation_pending_mode_invalid:{command_id}")
                 continue
-            if mutating and mode in OPERATOR_PENDING_MODES:
+            if mutating and mode in ARCHIVED_FRAME_PENDING_MODES:
+                owner = "model_selection" if mode == MODEL_SELECTED_MODE else "operator"
                 if _operator_pending_mutation_latches(record["command"]):
-                    # Operator-created runtime and Colony Plan commands retain
-                    # approval authority through their immutable archived
-                    # source frame.  A moving current frame/policy therefore
-                    # cannot make them safe to ignore or auto-replace.  TTL
-                    # expiry remains the sole automatic pending disposition.
-                    proposal_blockers.append(f"mutation_pending_operator:{command_id}")
+                    # Operator-created runtime and Colony Plan commands (and
+                    # model-selected commands) retain approval authority
+                    # through their immutable archived source frame.  A moving
+                    # current frame/policy therefore cannot make them safe to
+                    # ignore or auto-replace.  TTL expiry remains the sole
+                    # automatic pending disposition.
+                    proposal_blockers.append(f"mutation_pending_{owner}:{command_id}")
                 else:
                     # A supported owner label is not enough to make a command
-                    # approval-capable.  Malformed operator/planned envelopes
-                    # must retain the single-mutation latch instead of
-                    # disappearing from proposal readiness.
+                    # approval-capable.  Malformed envelopes must retain the
+                    # single-mutation latch instead of disappearing from
+                    # proposal readiness.
                     proposal_blockers.append(
-                        f"mutation_pending_operator_invalid:{command_id}"
+                        f"mutation_pending_{owner}_invalid:{command_id}"
                     )
                 continue
             binding_blockers = _pending_suggestion_binding_blockers(
@@ -623,7 +631,7 @@ def _operator_pending_mutation_latches(command: Mapping[str, Any]) -> bool:
         expires_at = expires_at.replace(tzinfo=current.tzinfo)
     return (
         command.get("schema") == COMMAND_SCHEMA
-        and command.get("mode") in OPERATOR_PENDING_MODES
+        and command.get("mode") in ARCHIVED_FRAME_PENDING_MODES
         and command.get("status") == "pending_human_approval"
         and command.get("requires_approval") is True
         and isinstance(action, str)
@@ -1159,7 +1167,9 @@ def _sync_pending_commands_locked(
             if not isinstance(command, dict):
                 continue
             mode = str(command.get("mode") or "")
-            if mode == "suggested":
+            if mode in {"suggested", MODEL_SELECTED_MODE}:
+                # Both are Bridge-originated proposals; disabling suggestions
+                # withdraws them (operator/planned commands stay).
                 move_to_rejected(path, dirs["rejected"], command, "suggestions_disabled")
             elif mode not in OPERATOR_PENDING_MODES:
                 action = str(command.get("action") or "")
@@ -1238,6 +1248,23 @@ def _sync_pending_commands_locked(
             mutating_created = True
 
     return created
+
+
+def trusted_proposal_state(state: Optional[Dict[str, Any]]) -> bool:
+    """Public form of the trusted-snapshot gate applied before any proposal."""
+
+    return _trusted_suggestion_state(state)
+
+
+def command_hint_is_current(state: Optional[Dict[str, Any]], hint: Any) -> bool:
+    """Whether a catalogued command hint is valid and its preconditions hold now."""
+
+    if not isinstance(state, dict):
+        return False
+    return _advice_command_is_current_and_valid(
+        state,
+        {"source_snapshot_id": state.get("snapshot_id"), "command": hint},
+    )
 
 
 def _trusted_suggestion_state(state: Optional[Dict[str, Any]]) -> bool:
@@ -1559,7 +1586,7 @@ def _expire_pending_commands_locked(
         action = str(command.get("action") or "")
         if (
             action not in NON_MUTATING_ACTIONS
-            and mode not in OPERATOR_PENDING_MODES
+            and mode not in ARCHIVED_FRAME_PENDING_MODES
             and mode != "suggested"
         ):
             # Ownership is ambiguous.  Preserve the exact readable envelope and

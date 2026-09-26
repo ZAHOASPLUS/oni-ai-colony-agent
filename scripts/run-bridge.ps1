@@ -12,6 +12,7 @@ param(
     [string]$BridgeDir = "$HOME\Documents\Klei\OxygenNotIncluded\ai-bridge",
     [switch]$Once,
     [switch]$EnableLlm,
+    [switch]$ModelLoop,
     [string]$SecretsDir = "",
     [string]$Goal = "Keep the colony alive with conservative, reversible actions.",
     [string]$ExpectedValidationRunId = "",
@@ -62,6 +63,9 @@ if ($Python) {
     if ($EnableLlm) {
         $PythonArgs += "--enable-llm"
     }
+    if ($ModelLoop) {
+        $PythonArgs += "--model-loop"
+    }
     if ($SecretsDir) {
         $PythonArgs += @("--secrets-dir", $SecretsDir)
     }
@@ -90,6 +94,9 @@ if ($Python) {
     }
     if ($EnableLlm) {
         $PythonArgs += "--enable-llm"
+    }
+    if ($ModelLoop) {
+        $PythonArgs += "--model-loop"
     }
     if ($SecretsDir) {
         $PythonArgs += @("--secrets-dir", $SecretsDir)

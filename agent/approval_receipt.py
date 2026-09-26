@@ -27,7 +27,9 @@ from agent.decision import DecisionFrameError, validate_decision_frame
 APPROVAL_RECEIPT_SCHEMA = "oni.approval-receipt.v1"
 NON_MUTATING_ACTIONS = frozenset({"noop", "focus_note"})
 OPERATOR_MUTATING_MODES = frozenset({"runtime_validation", "planned"})
-SUPPORTED_MUTATING_MODES = OPERATOR_MUTATING_MODES | {"suggested"}
+# Bridge-published model choice (agent.model_loop, review 2026-09-26 M1).
+MODEL_SELECTED_MODE = "model_selected"
+SUPPORTED_MUTATING_MODES = OPERATOR_MUTATING_MODES | {"suggested", MODEL_SELECTED_MODE}
 
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _RECEIPT_KEYS = frozenset(
@@ -164,6 +166,10 @@ def _validate_frame_proposal_authority(
         return
     if mode == "suggested":
         raise ApprovalReceiptError("suggested command requires a proposal-ready decision frame")
+    if mode == MODEL_SELECTED_MODE:
+        # A model choice is a Bridge proposal, so SUGGESTIONS_DISABLED is not
+        # an operator exemption for it.
+        raise ApprovalReceiptError("model-selected command requires a proposal-ready decision frame")
     raise ApprovalReceiptError(
         "operator command proposal blockers must be exactly SUGGESTIONS_DISABLED"
     )
