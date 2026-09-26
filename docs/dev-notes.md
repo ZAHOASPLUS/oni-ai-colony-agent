@@ -465,7 +465,11 @@ paused. The loop stands aside while a rule suggests a mutation (the arbitrated
 survival pause); other open rule findings, such as idle duplicants or a
 non-operational building, are passed to the model as context. `-ModelLoop`
 refuses `-EnableLlm`: that older ranker calls the model synchronously inside
-each generation. A live clone run of this loop has not happened yet.
+each generation. A live clone run of this loop has not happened yet; before
+one, `py -3 scripts\check_model_loop_on_recording.py
+<bundle>\sessions\<session>\state.jsonl --executor-check` runs it offline on a
+recorded session (real Bridge generation, a stand-in model, the real approval
+validators and the executor's own command checks).
 
 ## Verification Ladder
 
