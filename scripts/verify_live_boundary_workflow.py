@@ -8,7 +8,9 @@ import json
 import os
 import pathlib
 import py_compile
+import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -71,11 +73,39 @@ def run(command: list[str], expected: int | set[int] = 0) -> subprocess.Complete
     return completed
 
 
+_PS_PARAMETER = re.compile(r"-[A-Za-z][A-Za-z0-9]*(?::\$(?:true|false))?")
+
+
+def ps_command_text(script: pathlib.Path, arguments: tuple[str, ...]) -> str:
+    """Build a -Command invocation that binds switch values on PowerShell 5.1.
+
+    ``powershell.exe -File`` passes ``-Confirm:$false`` as the string
+    "$false", which Windows PowerShell 5.1 refuses to bind to a switch.
+    Parameter names (and switch values) are emitted verbatim; every other
+    argument is a single-quoted literal.  No fixture value starts with "-".
+    """
+
+    def quote(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
+    parts = ["&", quote(str(script))]
+    for argument in arguments:
+        parts.append(argument if _PS_PARAMETER.fullmatch(argument) else quote(argument))
+    return " ".join(parts)
+
+
 def ps(script: pathlib.Path, *arguments: str, expected: int | set[int] = 0) -> subprocess.CompletedProcess[str]:
     if not POWERSHELL:
         raise VerificationFailure("PowerShell executable is unavailable")
     return run(
-        [POWERSHELL, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script), *arguments],
+        [
+            POWERSHELL,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            ps_command_text(script, arguments),
+        ],
         expected=expected,
     )
 
@@ -93,13 +123,43 @@ def assert_true(condition: bool, message: str) -> None:
         raise VerificationFailure(message)
 
 
+FIXTURE_BASE_NAME = "Fixture-Base"
+
+
+def oni_save_bytes(
+    *,
+    is_auto_save: bool = False,
+    base_name: str = FIXTURE_BASE_NAME,
+    body: bytes = b"fixture-save-v1\x00\x01",
+) -> bytes:
+    """Bytes with ONI's save header layout (SaveGame.GetHeader) and a fake body."""
+    header = json.dumps(
+        {
+            "numberOfCycles": 6,
+            "numberOfDuplicants": 3,
+            "baseName": base_name,
+            "isAutoSave": is_auto_save,
+            "originalSaveName": "Original.sav",
+            "clusterId": "fixture",
+            "colonyGuid": "00000000-0000-0000-0000-00000000f1a7",
+        }
+    ).encode("utf-8")
+    return struct.pack("<IiIi", 744825, len(header), 1, 1) + header + body
+
+
+def clone_paths(fixture: dict[str, pathlib.Path], stem: str) -> tuple[pathlib.Path, pathlib.Path]:
+    """A clone lives in its own colony folder, named by its stem, beside the source colony."""
+    folder = fixture["save_dir"].parent / stem
+    return folder / f"{stem}.sav", folder / f"{stem}.png"
+
+
 def make_fixture(base: pathlib.Path, name: str) -> dict[str, pathlib.Path]:
     case = base / name
     oni = case / "oni-user"
     save_dir = oni / "save_files" / "FixtureColony"
     source = save_dir / "Original.sav"
     preview = save_dir / "Original.png"
-    write_bytes(source, b"fixture-save-v1\x00\x01")
+    write_bytes(source, oni_save_bytes())
     write_bytes(preview, b"fixture-preview-v1\x89PNG")
     write_bytes(oni / "kplayerprefs.yaml", b"SaveFilenameKey: Original\n")
     write_bytes(oni / "mods" / "mods.json", b'{"version":1,"mods":[]}\n')
@@ -227,7 +287,7 @@ def restore_clone(
     what_if: bool = False,
     expected: int | set[int] = 0,
 ) -> subprocess.CompletedProcess[str]:
-    target = fixture["save_dir"] / f"{stem}.sav"
+    target = clone_paths(fixture, stem)[0]
     arguments = [
         "-CloneManifest",
         str(manifest or fixture["runtime"] / run_id / "test-clone-manifest.json"),
@@ -420,8 +480,7 @@ def test_clone_pair_policy(base: pathlib.Path) -> dict[str, Any]:
     fixture = make_fixture(base, "clone-pair")
     pre = capture(fixture, "pair", "pre")
     create_clone(fixture, "clone-run", "CodexBoundaryTest")
-    target_save = fixture["save_dir"] / "CodexBoundaryTest.sav"
-    target_preview = fixture["save_dir"] / "CodexBoundaryTest.png"
+    target_save, target_preview = clone_paths(fixture, "CodexBoundaryTest")
     manifest = fixture["runtime"] / "clone-run" / "test-clone-manifest.json"
     assert_true(target_save.is_file() and target_preview.is_file() and manifest.is_file(), "clone pair/manifest missing")
     post = capture(fixture, "pair", "post")
@@ -463,13 +522,12 @@ def test_clone_pair_policy(base: pathlib.Path) -> dict[str, Any]:
 def test_whatif_restore_and_refusals(base: pathlib.Path) -> dict[str, Any]:
     whatif_create = make_fixture(base, "create-whatif")
     create_clone(whatif_create, "whatif-run", "WhatIfClone", what_if=True)
-    assert_true(not (whatif_create["save_dir"] / "WhatIfClone.sav").exists(), "create WhatIf wrote save")
+    assert_true(not clone_paths(whatif_create, "WhatIfClone")[0].parent.exists(), "create WhatIf wrote a clone folder")
     assert_true(not (whatif_create["runtime"] / "whatif-run").exists(), "create WhatIf wrote evidence")
 
     fixture = make_fixture(base, "restore")
     create_clone(fixture, "restore-run", "RestoreClone")
-    target_save = fixture["save_dir"] / "RestoreClone.sav"
-    target_preview = fixture["save_dir"] / "RestoreClone.png"
+    target_save, target_preview = clone_paths(fixture, "RestoreClone")
     write_bytes(target_save, b"post-action-save")
     write_bytes(target_preview, b"post-action-preview")
     before = (sha256(target_save), sha256(target_preview))
@@ -494,8 +552,7 @@ def test_whatif_restore_and_refusals(base: pathlib.Path) -> dict[str, Any]:
 
     positive = make_fixture(base, "restore-positive")
     create_clone(positive, "positive-run", "PositiveClone")
-    positive_save = positive["save_dir"] / "PositiveClone.sav"
-    positive_preview = positive["save_dir"] / "PositiveClone.png"
+    positive_save, positive_preview = clone_paths(positive, "PositiveClone")
     write_bytes(positive_save, b"post-action-positive-save")
     write_bytes(positive_preview, b"post-action-positive-preview")
     positive_before = (sha256(positive_save), sha256(positive_preview))
@@ -527,11 +584,11 @@ def test_process_and_path_guards(base: pathlib.Path) -> dict[str, Any]:
         ("bridge", "BridgeBlocked", "bridge-blocked"),
     ):
         create_clone(fixture, run_id, stem, process_fixture=process_fixture, expected={1})
-        assert_true(not (fixture["save_dir"] / f"{stem}.sav").exists(), "active-process guard allowed clone")
+        assert_true(not clone_paths(fixture, stem)[0].parent.exists(), "active-process guard allowed clone")
         assert_true(not (fixture["runtime"] / run_id).exists(), "active-process guard wrote evidence")
 
     create_clone(fixture, "guard-restore", "GuardRestore")
-    target = fixture["save_dir"] / "GuardRestore.sav"
+    target = clone_paths(fixture, "GuardRestore")[0]
     write_bytes(target, b"guard-restore-target")
     before = sha256(target)
     restore_clone(fixture, "guard-restore", "GuardRestore", process_fixture="game", expected={1})
@@ -554,6 +611,108 @@ def test_process_and_path_guards(base: pathlib.Path) -> dict[str, Any]:
     return {"game_guard": "passed", "bridge_guard": "passed", "live_override": "blocked"}
 
 
+def listing(directory: pathlib.Path) -> list[str]:
+    return sorted(str(path.relative_to(directory)) for path in directory.rglob("*"))
+
+
+def lower_path_id(path: pathlib.Path) -> str:
+    normalized = os.path.abspath(os.path.normpath(str(path))).lower()
+    return "sha256:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def test_clone_colony_isolation(base: pathlib.Path) -> dict[str, Any]:
+    """Review P0-1: a clone gets its own colony folder and autosaves are never cloned."""
+    fixture = make_fixture(base, "isolation")
+    source_listing = listing(fixture["save_dir"])
+    create_clone(fixture, "isolated-run", "IsolatedClone")
+    clone_save, clone_preview = clone_paths(fixture, "IsolatedClone")
+    assert_true(clone_save.is_file() and clone_preview.is_file(), "clone pair is not in its own colony folder")
+    assert_true(listing(clone_save.parent) == ["IsolatedClone.png", "IsolatedClone.sav"], "clone folder holds extra files")
+    assert_true(listing(fixture["save_dir"]) == source_listing, "clone creation wrote into the source colony folder")
+    manifest = json.loads(
+        (fixture["runtime"] / "isolated-run" / "test-clone-manifest.json").read_text(encoding="utf-8-sig")
+    )
+    save_root = fixture["oni"] / "save_files"
+    expected = {
+        ("target", "isolation"): "own_colony_folder",
+        ("target", "directory_path_id"): lower_path_id(clone_save.parent),
+        ("target", "save_base_path_id"): lower_path_id(save_root),
+        ("source", "colony_directory_path_id"): lower_path_id(fixture["save_dir"]),
+        ("source", "redirect_colony_directory_path_id"): lower_path_id(save_root / FIXTURE_BASE_NAME),
+    }
+    for (branch, key), value in expected.items():
+        assert_true(manifest[branch].get(key) == value, f"manifest {branch}.{key} is wrong")
+    assert_true(manifest["source"]["header"]["is_auto_save"] is False, "manifest header flag is wrong")
+
+    refusals: dict[str, str] = {}
+
+    def refused(case: dict[str, pathlib.Path], label: str, run_id: str, stem: str) -> None:
+        before = listing(case["oni"])
+        create_clone(case, run_id, stem, expected={1})
+        assert_true(listing(case["oni"]) == before, f"{label}: refused clone still wrote ONI data")
+        assert_true(not (case["runtime"] / run_id).exists(), f"{label}: refused clone wrote evidence")
+        refusals[label] = "refused_zero_write"
+
+    header = make_fixture(base, "autosave-header")
+    write_bytes(header["source"], oni_save_bytes(is_auto_save=True))
+    refused(header, "autosave_header", "autosave-header", "HeaderClone")
+
+    folder = make_fixture(base, "autosave-folder")
+    autosave = folder["save_dir"] / "auto_save" / "Original Cycle 6.sav"
+    write_bytes(autosave, oni_save_bytes())
+    write_bytes(autosave.with_suffix(".png"), b"fixture-preview-v1\x89PNG")
+    folder["source"] = autosave
+    refused(folder, "auto_save_folder", "autosave-folder", "FolderClone")
+
+    for label, content in {
+        "unparseable_header": b"fixture-save-v1\x00\x01",
+        "missing_flag": struct.pack("<IiIi", 744825, 2, 1, 1) + b"{}",
+        "case_variant_flag": (
+            lambda raw: struct.pack("<IiIi", 744825, len(raw), 1, 1) + raw
+        )(b'{"baseName":"B","isAutoSave":false,"IsAutoSave":true}'),
+    }.items():
+        case = make_fixture(base, f"header-{label}")
+        write_bytes(case["source"], content)
+        refused(case, label, f"header-{label}", "HeaderClone")
+
+    existing = make_fixture(base, "existing-folder")
+    write_bytes(clone_paths(existing, "ExistingClone")[0].parent / "keep.txt", b"keep")
+    refused(existing, "clone_folder_exists", "existing-folder", "ExistingClone")
+
+    same = make_fixture(base, "same-folder")
+    refused(same, "clone_folder_is_source_colony", "same-folder", "FixtureColony")
+    redirect = make_fixture(base, "redirect-folder")
+    refused(redirect, "clone_folder_is_redirect_colony", "redirect-folder", FIXTURE_BASE_NAME)
+
+    flat = make_fixture(base, "flat-layout")
+    flat_source = flat["oni"] / "save_files" / "Flat.sav"
+    write_bytes(flat_source, oni_save_bytes())
+    write_bytes(flat_source.with_suffix(".png"), b"fixture-preview-v1\x89PNG")
+    flat["source"] = flat_source
+    refused(flat, "source_not_in_colony_folder", "flat-layout", "FlatClone")
+
+    cloud = make_fixture(base, "cloud-layout")
+    cloud_dir = cloud["oni"] / "cloud_save_files" / "76561190000000000" / "CloudColony"
+    write_bytes(cloud_dir / "Original.sav", oni_save_bytes())
+    write_bytes(cloud_dir / "Original.png", b"fixture-preview-v1\x89PNG")
+    cloud["source"], cloud["save_dir"] = cloud_dir / "Original.sav", cloud_dir
+    create_clone(cloud, "cloud-run", "CloudClone")
+    assert_true(clone_paths(cloud, "CloudClone")[0].is_file(), "cloud clone is not beside its source colony")
+
+    legacy = make_fixture(base, "legacy-manifest")
+    create_clone(legacy, "legacy-run", "LegacyClone")
+    legacy_manifest = legacy["runtime"] / "legacy-run" / "test-clone-manifest.json"
+    payload = json.loads(legacy_manifest.read_text(encoding="utf-8-sig"))
+    del payload["target"]["isolation"]
+    write_json(legacy_manifest, payload)
+    legacy_save = clone_paths(legacy, "LegacyClone")[0]
+    write_bytes(legacy_save, b"post-action-legacy")
+    restore_clone(legacy, "legacy-run", "LegacyClone", expected={1})
+    assert_true(legacy_save.read_bytes() == b"post-action-legacy", "legacy-layout manifest was restored")
+    refusals["restore_without_isolation"] = "refused"
+    return {"own_colony_folder": "passed", "cloud_layout": "passed", **refusals}
+
+
 def sanitize_error(error: BaseException, fixture_root: pathlib.Path) -> str:
     text = str(error).replace(str(fixture_root), "<fixture_root>").replace(str(ROOT), "<workspace>")
     return text[:500]
@@ -570,6 +729,7 @@ def main() -> int:
         ("named_clone_pair_policy", test_clone_pair_policy),
         ("whatif_restore_and_manifest_refusals", test_whatif_restore_and_refusals),
         ("process_and_live_path_guards", test_process_and_path_guards),
+        ("clone_colony_isolation_and_autosave_refusals", test_clone_colony_isolation),
     ]
     results: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="oni-live-boundary-") as temporary:

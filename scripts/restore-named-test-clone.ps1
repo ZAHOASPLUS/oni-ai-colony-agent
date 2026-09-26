@@ -16,11 +16,44 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 
+function Expand-ShortPathSegments([string]$FullPath) {
+    # An 8.3 alias (DOCUME~1) names the same directory as its long name, so
+    # string comparisons and path ids must use the long spelling (review
+    # section 6).  Only the existing prefix can be expanded; a missing tail
+    # is kept verbatim.  Aliases always contain "~".
+    if ($FullPath.IndexOf('~') -lt 0) {
+        return $FullPath
+    }
+    $root = [IO.Path]::GetPathRoot($FullPath)
+    $parts = $FullPath.Substring($root.Length).Split([char[]]@('\', '/'), [StringSplitOptions]::RemoveEmptyEntries)
+    $current = $root
+    for ($index = 0; $index -lt $parts.Count; $index++) {
+        $found = @()
+        if ([IO.Directory]::Exists($current)) {
+            # FindFirstFile matches a literal segment against long and short
+            # names and returns the long name.
+            $found = @([IO.Directory]::GetFileSystemEntries($current, $parts[$index]))
+        }
+        if ($found.Count -eq 0) {
+            return [IO.Path]::Combine($current, [string]::Join('\', $parts[$index..($parts.Count - 1)]))
+        }
+        $exact = @($found | Where-Object { [IO.Path]::GetFileName($_) -ieq $parts[$index] })
+        if ($exact.Count -eq 1) {
+            $current = $exact[0]
+        } elseif ($found.Count -eq 1) {
+            $current = $found[0]
+        } else {
+            throw 'A path segment is ambiguous.'
+        }
+    }
+    return $current
+}
+
 function Get-NormalizedFullPath([string]$LiteralPath) {
     if ([string]::IsNullOrWhiteSpace($LiteralPath)) {
         throw 'A required path was empty.'
     }
-    $full = [IO.Path]::GetFullPath($LiteralPath)
+    $full = Expand-ShortPathSegments ([IO.Path]::GetFullPath($LiteralPath))
     $root = [IO.Path]::GetPathRoot($full)
     if ($full.Length -gt $root.Length) {
         $full = $full.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
@@ -125,15 +158,25 @@ function Get-Sha256([string]$LiteralPath) {
 }
 
 function Move-ReplaceFile([string]$Source, [string]$Destination) {
+    # .NET Core (PowerShell 7) has File.Move(src, dst, overwrite).  Windows
+    # PowerShell 5.1 runs on .NET Framework, which lacks it; there File.Replace
+    # (Win32 ReplaceFile) swaps an existing destination atomically on the same
+    # volume.  Both callers stage the source next to an existing destination.
     $overwriteMove = [IO.File].GetMethods() | Where-Object {
         $_.Name -ceq 'Move' -and
         $_.GetParameters().Count -eq 3 -and
         $_.GetParameters()[2].ParameterType -eq [bool]
     } | Select-Object -First 1
-    if ($null -eq $overwriteMove) {
-        throw 'Atomic overwrite requires a PowerShell runtime backed by a three-argument File.Move implementation.'
+    if ($null -ne $overwriteMove) {
+        [void]$overwriteMove.Invoke($null, [object[]]@($Source, $Destination, $true))
+        return
     }
-    [IO.File]::Move($Source, $Destination, $true)
+    if (-not (Test-Path -LiteralPath $Destination -PathType Leaf)) {
+        throw 'Atomic replacement requires an existing destination file.'
+    }
+    # [NullString]::Value: a PowerShell $null would bind as "" and make
+    # ReplaceFile reject an empty backup path.
+    [IO.File]::Replace($Source, $Destination, [NullString]::Value, $true)
 }
 
 function Get-StableFileState([string]$LiteralPath) {
@@ -361,8 +404,17 @@ if ([string]$manifest.oni_root_id -cne (Get-PathId $resolvedOniRoot) -or
 Assert-CanonicalHash $manifest.target_stem_id 'target_stem_id'
 Assert-ManifestFileState $manifest.source.save 'source.save'
 Assert-ManifestFileState $manifest.source.preview 'source.preview'
-foreach ($name in @('directory_path_id', 'save_path_id', 'preview_path_id', 'save_sha256', 'preview_sha256')) {
+foreach ($name in @('save_base_path_id', 'directory_path_id', 'save_path_id', 'preview_path_id', 'save_sha256', 'preview_sha256')) {
     Assert-CanonicalHash $manifest.target.$name "target.$name"
+}
+foreach ($name in @('colony_directory_path_id', 'redirect_colony_directory_path_id')) {
+    Assert-CanonicalHash $manifest.source.$name "source.$name"
+}
+# Review P0-1: only clones created in their own colony folder may be
+# restored (and so reused); a manifest from the old same-folder layout is
+# refused.
+if ([string]$manifest.target.isolation -cne 'own_colony_folder') {
+    throw 'Clone manifest does not describe a clone in its own colony folder.'
 }
 if ([string]$manifest.target.save_sha256 -cne [string]$manifest.source.save.sha256 -or
     [string]$manifest.target.preview_sha256 -cne [string]$manifest.source.preview.sha256) {
@@ -382,8 +434,10 @@ foreach ($path in @($resolvedSource, $resolvedTarget)) {
 }
 $sourceDirectory = [IO.Path]::GetDirectoryName($resolvedSource)
 $targetDirectory = [IO.Path]::GetDirectoryName($resolvedTarget)
-if (-not (Test-SamePath $sourceDirectory $targetDirectory)) {
-    throw 'Source and target must be siblings in the same ONI save directory.'
+$saveBase = [IO.Path]::GetDirectoryName($sourceDirectory)
+if ((Test-PathsOverlap $sourceDirectory $targetDirectory) -or
+    -not (Test-SamePath ([IO.Path]::GetDirectoryName($targetDirectory)) $saveBase)) {
+    throw 'The target must sit in its own colony folder beside the source colony folder.'
 }
 $allowedRoot = $null
 foreach ($relativeRoot in @('save_files', 'cloud_save_files')) {
@@ -402,6 +456,7 @@ if ($null -eq $allowedRoot) {
     throw 'Source and target are outside the same allowed ONI save root.'
 }
 Assert-NoReparsePath $sourceDirectory $allowedRoot
+Assert-NoReparsePath $targetDirectory $allowedRoot
 
 $sourcePreview = [IO.Path]::ChangeExtension($resolvedSource, '.png')
 $targetPreview = [IO.Path]::ChangeExtension($resolvedTarget, '.png')
@@ -413,7 +468,11 @@ foreach ($path in @($sourcePreview, $targetPreview)) {
 }
 $targetStem = [IO.Path]::GetFileNameWithoutExtension($resolvedTarget)
 if ((Get-TextId $targetStem) -cne [string]$manifest.target_stem_id -or
-    (Get-PathId $sourceDirectory) -cne [string]$manifest.target.directory_path_id -or
+    (Get-PathId $targetDirectory) -cne [string]$manifest.target.directory_path_id -or
+    (Get-PathId $saveBase) -cne [string]$manifest.target.save_base_path_id -or
+    (Get-PathId $sourceDirectory) -cne [string]$manifest.source.colony_directory_path_id -or
+    (Get-PathId $targetDirectory) -ceq [string]$manifest.source.redirect_colony_directory_path_id -or
+    [IO.Path]::GetFileName($targetDirectory) -cne $targetStem -or
     (Get-PathId $resolvedSource) -cne [string]$manifest.source.save.path_id -or
     (Get-PathId $sourcePreview) -cne [string]$manifest.source.preview.path_id -or
     (Get-PathId $resolvedTarget) -cne [string]$manifest.target.save_path_id -or

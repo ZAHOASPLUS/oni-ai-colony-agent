@@ -510,8 +510,34 @@ def sha256_file(path: pathlib.Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def _expand_short_names(text: str) -> str:
+    """Spell an existing prefix with long names instead of 8.3 aliases.
+
+    ``C:\\Users\\user\\DOCUME~1`` and ``...\\Documents`` are one directory; string
+    comparisons and path ids must not treat them as disjoint (review section
+    6).  GetLongPathNameW expands aliases without following junctions, so the
+    reparse-point checks still see every segment.  Aliases always contain "~".
+    """
+    if os.name != "nt" or "~" not in text:
+        return text
+    head, tail = text, []
+    while not os.path.exists(head):
+        parent, name = os.path.split(head)
+        if parent == head or not name:
+            return text
+        tail.append(name)
+        head = parent
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetLongPathNameW(head, buffer, len(buffer))
+    if not length or length >= len(buffer):
+        raise ConfigError("a path could not be expanded to its long form")
+    return os.path.join(buffer.value, *reversed(tail))
+
+
 def normalized(path: pathlib.Path | str) -> pathlib.Path:
-    return pathlib.Path(os.path.abspath(os.path.normpath(str(pathlib.Path(path).expanduser()))))
+    return pathlib.Path(
+        _expand_short_names(os.path.abspath(os.path.normpath(str(pathlib.Path(path).expanduser()))))
+    )
 
 
 def protected_documents_root() -> pathlib.Path:
@@ -3750,13 +3776,21 @@ def validate_environment(
         raise ConfigError("source and loader must use the exact .sav extension")
     source_root = save_root_for(source, roots.oni_root)
     loader_root = save_root_for(loader, roots.oni_root)
+    # Review P0-1: the loader clone has its own colony folder, named by its
+    # stem, beside the source colony; ONI's autosave rotation in the source
+    # folder would delete the user's same-GUID autosaves.
+    clone_target = clone.get("target") if isinstance(clone.get("target"), dict) else {}
     if (
         not same_path(source_root, loader_root)
-        or not same_path(source.parent, loader.parent)
+        or paths_overlap(source.parent, loader.parent)
+        or not same_path(source.parent.parent, loader.parent.parent)
+        or loader.parent.name != args.loader_stem
         or same_path(source, loader)
         or loader.stem != args.loader_stem
+        or clone_target.get("isolation") != "own_colony_folder"
+        or clone_target.get("directory_path_id") != path_id(loader.parent, contract="lower")
     ):
-        raise ConfigError("source/loader are not the exact sibling named-clone pair")
+        raise ConfigError("source/loader are not a named clone in its own colony folder")
     source_preview = source.with_suffix(".png")
     loader_preview = loader.with_suffix(".png")
     for item in (source, source_preview, loader, loader_preview):

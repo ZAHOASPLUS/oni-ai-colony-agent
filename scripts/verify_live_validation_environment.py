@@ -172,11 +172,39 @@ def run(command: list[str], expected: int | set[int] = 0, timeout: int = 90) -> 
     return completed
 
 
+_PS_PARAMETER = re.compile(r"-[A-Za-z][A-Za-z0-9]*(?::\$(?:true|false))?")
+
+
+def ps_command_text(script: pathlib.Path, arguments: tuple[str, ...]) -> str:
+    """Build a -Command invocation that binds switch values on PowerShell 5.1.
+
+    ``powershell.exe -File`` passes ``-Confirm:$false`` as the string
+    "$false", which Windows PowerShell 5.1 refuses to bind to a switch.
+    Parameter names (and switch values) are emitted verbatim; every other
+    argument is a single-quoted literal.  No fixture value starts with "-".
+    """
+
+    def quote(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
+    parts = ["&", quote(str(script))]
+    for argument in arguments:
+        parts.append(argument if _PS_PARAMETER.fullmatch(argument) else quote(argument))
+    return " ".join(parts)
+
+
 def ps(script: pathlib.Path, *arguments: str, expected: int | set[int] = 0) -> subprocess.CompletedProcess[str]:
     if not POWERSHELL:
         raise VerificationFailure("PowerShell is unavailable")
     return run(
-        [POWERSHELL, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script), *arguments],
+        [
+            POWERSHELL,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            ps_command_text(script, arguments),
+        ],
         expected=expected,
     )
 
@@ -278,6 +306,13 @@ def make_bridge(root: pathlib.Path, *, stamp: int, old: bool) -> None:
         write_bytes(root / "old-runtime-marker.txt", b"immutable-old-bridge\n", stamp=stamp + 100)
 
 
+def oni_save_bytes(body: bytes) -> bytes:
+    """Bytes with ONI's save header layout (SaveGame.GetHeader), non-autosave."""
+    header = json.dumps({"baseName": "Fixture Base", "isAutoSave": False}).encode("utf-8")
+    fields = (744825, len(header), 1, 1)  # buildVersion, headerSize, headerVersion, compression
+    return b"".join(value.to_bytes(4, "little") for value in fields) + header + body
+
+
 def make_fixture(
     base: pathlib.Path,
     name: str,
@@ -286,6 +321,7 @@ def make_fixture(
     with_archive_root: bool = True,
     with_extra_save_pair: bool = False,
     with_old_probe: bool = True,
+    establish_golden: bool = True,
 ) -> dict[str, pathlib.Path | str]:
     case = base / name
     oni = case / "oni-user"
@@ -296,7 +332,7 @@ def make_fixture(
     source = save_dir / "Original.sav"
     source_preview = save_dir / "Original.png"
     stamp = 1_725_000_000_123_456_700
-    write_bytes(source, b"immutable-source-save-v1\x00", stamp=stamp)
+    write_bytes(source, oni_save_bytes(b"immutable-source-save-v1\x00"), stamp=stamp)
     write_bytes(source_preview, b"immutable-source-preview-v1\x89PNG", stamp=stamp + 100)
     extra_save = save_dir / "ExistingSecondary.sav"
     extra_preview = save_dir / "ExistingSecondary.png"
@@ -413,6 +449,13 @@ def make_fixture(
         "loader_stem": f"{run_id}-loader",
     }
     capture_pre(fixture)
+    if establish_golden:
+        # The fixture's originals are verified by construction; record them as
+        # the cross-run golden baseline every prepare checks (review S2).
+        pre_path = fixture_paths(fixture)["pre"]
+        workflow.establish_golden_baseline(
+            evidence, json.loads(pre_path.read_text(encoding="utf-8-sig")), pre_path
+        )
     create_loader_clone(fixture)
     return fixture
 
@@ -459,13 +502,14 @@ def create_loader_clone(fixture: dict[str, pathlib.Path | str]) -> None:
 def fixture_paths(fixture: dict[str, pathlib.Path | str]) -> dict[str, pathlib.Path]:
     run_id = str(fixture["run_id"])
     loader_stem = str(fixture["loader_stem"])
-    save_dir = pathlib.Path(fixture["save_dir"])
+    # The loader clone has its own colony folder beside the source colony.
+    loader_dir = pathlib.Path(fixture["save_dir"]).parent / loader_stem
     evidence = pathlib.Path(fixture["evidence"])
     return {
         "pre": pathlib.Path(fixture["boundaries"]) / run_id / "pre-boundary.json",
         "clone": pathlib.Path(fixture["runtime"]) / run_id / "test-clone-manifest.json",
-        "loader": save_dir / f"{loader_stem}.sav",
-        "loader_preview": save_dir / f"{loader_stem}.png",
+        "loader": loader_dir / f"{loader_stem}.sav",
+        "loader_preview": loader_dir / f"{loader_stem}.png",
         "environment": evidence / run_id / "environment",
         "manifest": evidence / run_id / "environment" / "environment-manifest.json",
     }
@@ -1143,11 +1187,29 @@ def prepare_configured_runtime(
     return {"bridge": bridge, "archived_old": archived_old, "probe": probe}
 
 
+# The Mod's validation-session autosave guard as reported in every snapshot
+# (lane/mod-csharp); finalize refuses a final tip without it enforced.
+ENFORCED_AUTOSAVE: dict[str, Any] = {
+    "status": "enforced",
+    "guard_active": True,
+    "activation_reason": "fresh_startup_binding",
+    "cycle_interval": 0,
+    "interval_at_session_start": 1,
+    "enforced_interval": 0,
+    "enforcement_count": 1,
+    "suppressed_autosave_count": 0,
+    "suppression_patch_installed": True,
+    "source": "fixture",
+    "failure": None,
+}
+
+
 def simulate_runtime(
     fixture: dict[str, pathlib.Path | str],
     *,
     evict_forward_frame: bool = False,
     evict_forward_certificate: bool = False,
+    autosave_guard: Mapping[str, Any] | None = ENFORCED_AUTOSAVE,
 ) -> dict[str, Any]:
     oni = pathlib.Path(fixture["oni"])
     run_id = str(fixture["run_id"])
@@ -1178,7 +1240,8 @@ def simulate_runtime(
     write_bytes(paths["loader"], b"mutated-loader-save")
     write_bytes(paths["loader_preview"], b"mutated-loader-preview")
 
-    derivative = pathlib.Path(fixture["save_dir"]) / f"{run_id}-lineage.sav"
+    # ONI saves the lineage checkpoint beside the active (loader) save.
+    derivative = paths["loader"].parent / f"{run_id}-lineage.sav"
     derivative_preview = derivative.with_suffix(".png")
     write_bytes(derivative, f"lineage-final-save:{run_id}".encode("utf-8"))
     write_bytes(derivative_preview, b"lineage-final-preview")
@@ -1264,6 +1327,7 @@ def simulate_runtime(
                 "covered_world_ids": [final_world_id],
                 "complete_for_populated_worlds": True,
             },
+            **({"autosave": copy.deepcopy(dict(autosave_guard))} if autosave_guard is not None else {}),
             "cycle": 10,
             "game": {"paused": True},
             "duplicants": {"total": 3, "stressed": 0, "idle": 0},
@@ -2597,6 +2661,142 @@ def test_finalize_archive_absent_and_max_path(base: pathlib.Path) -> dict[str, A
         "environment_legacy_limit": workflow.MAX_LEGACY_PATH_UTF16_UNITS,
         "temporary_artifact_count": 0,
     }
+
+
+def test_loader_colony_isolation_refusals(base: pathlib.Path) -> dict[str, Any]:
+    """Review P0-1: prepare accepts only a loader clone in its own colony folder."""
+    results: dict[str, str] = {}
+    fixture = make_fixture(base, "isolation-sibling", run_id="g0-isolation-sibling")
+    paths = fixture_paths(fixture)
+    sibling = pathlib.Path(fixture["save_dir"]) / paths["loader"].name
+    shutil.copy2(paths["loader"], sibling)
+    shutil.copy2(paths["loader_preview"], sibling.with_suffix(".png"))
+    blocked = json.loads(
+        core(fixture, "prepare", "--loader-save", str(sibling), what_if=True, expected={2}).stdout
+    )
+    assert_true("own colony folder" in str(blocked.get("error")), "loader in the source colony folder was not refused as non-isolated")
+    results["loader_in_source_colony_folder"] = "refused"
+
+    legacy = make_fixture(base, "isolation-legacy", run_id="g0-isolation-legacy")
+    clone_path = fixture_paths(legacy)["clone"]
+    clone = json.loads(clone_path.read_text(encoding="utf-8-sig"))
+    del clone["target"]["isolation"]
+    write_json(clone_path, clone)
+    blocked = json.loads(core(legacy, "prepare", what_if=True, expected={2}).stdout)
+    assert_true("isolated non-autosave clone" in str(blocked.get("error")), "legacy clone manifest was not refused as non-isolated")
+    results["manifest_without_isolation"] = "refused"
+
+    occupied = make_fixture(base, "isolation-occupied", run_id="g0-isolation-occupied")
+    occupied_paths = fixture_paths(occupied)
+    # A pre-boundary that already saw saves in the loader folder: the clone
+    # folder was not new when the run started.
+    loader_dir = occupied_paths["loader"].parent
+    stray = loader_dir / "stray.sav"
+    stray.write_bytes(b"stray")
+    stray.with_suffix(".png").write_bytes(b"stray-preview")
+    parked = pathlib.Path(occupied["case"]) / "parked-loader"
+    parked.mkdir()
+    for path in (occupied_paths["loader"], occupied_paths["loader_preview"]):
+        os.replace(path, parked / path.name)
+    occupied_paths["pre"].unlink()
+    capture_pre(occupied)
+    for path in (occupied_paths["loader"], occupied_paths["loader_preview"]):
+        os.replace(parked / path.name, path)
+    blocked = json.loads(core(occupied, "prepare", what_if=True, expected={2}).stdout)
+    assert_true(
+        "loader colony folder already held saves" in str(blocked.get("error")),
+        "pre-boundary with an occupied loader folder was not refused",
+    )
+    results["loader_folder_seen_in_pre_boundary"] = "refused"
+    return results
+
+
+def next_run_fixture(
+    fixture: dict[str, pathlib.Path | str], run_id: str
+) -> dict[str, pathlib.Path | str]:
+    """A later run on the same ONI root and evidence root, with its own pre and clone."""
+    later = dict(fixture)
+    later["run_id"] = run_id
+    later["loader_stem"] = f"{run_id}-loader"
+    capture_pre(later)
+    create_loader_clone(later)
+    return later
+
+
+def test_golden_baseline_cross_run(base: pathlib.Path) -> dict[str, Any]:
+    results: dict[str, str] = {}
+    fixture = make_fixture(base, "golden-drift", with_extra_save_pair=True)
+    golden = workflow.golden_baseline_path(pathlib.Path(fixture["evidence"]))
+    golden_before = sha256(golden)
+    stable = next_run_fixture(fixture, "g0-golden-stable")
+    plan = json.loads(core(stable, "prepare", what_if=True).stdout)
+    assert_true(plan.get("golden_baseline") == "verified", "unchanged originals did not verify")
+    results["unchanged_originals_next_run"] = "verified"
+
+    # An original save lost between runs (as the Cycle 6 autosave was on
+    # 2026-09-13) must not become the next run's baseline.
+    pathlib.Path(fixture["extra_save"]).unlink()
+    pathlib.Path(fixture["extra_preview"]).unlink()
+    drifted = next_run_fixture(fixture, "g0-golden-drifted")
+    before = file_inventory(pathlib.Path(fixture["evidence"]))
+    blocked = json.loads(core(drifted, "prepare", apply=True, expected={2}).stdout)
+    assert_true("drifted from the golden baseline" in str(blocked.get("error")), "missing original was re-baselined")
+    assert_true(file_inventory(pathlib.Path(fixture["evidence"])) == before, "drift refusal wrote evidence")
+    assert_true(sha256(golden) == golden_before, "drift refusal replaced the golden baseline")
+    results["missing_original_next_run"] = "refused_zero_write"
+
+    changed = make_fixture(base, "golden-changed")
+    write_bytes(pathlib.Path(changed["source_preview"]).with_name("Original.png"), b"changed-original-preview")
+    changed_later = next_run_fixture(changed, "g0-golden-changed")
+    blocked = json.loads(core(changed_later, "prepare", what_if=True, expected={2}).stdout)
+    assert_true("drifted from the golden baseline" in str(blocked.get("error")), "changed original was re-baselined")
+    results["changed_original_next_run"] = "refused"
+
+    blocked = json.loads(
+        core(changed_later, "prepare", "--establish-golden-baseline", what_if=True, expected={2}).stdout
+    )
+    assert_true("already exists" in str(blocked.get("error")), "existing golden baseline was replaced")
+    results["re_establish_existing"] = "refused"
+
+    fresh = make_fixture(base, "golden-fresh", establish_golden=False)
+    blocked = json.loads(core(fresh, "prepare", what_if=True, expected={2}).stdout)
+    assert_true("no golden baseline" in str(blocked.get("error")), "prepare ran without a golden baseline")
+    fresh_golden = workflow.golden_baseline_path(pathlib.Path(fresh["evidence"]))
+    assert_true(not fresh_golden.exists(), "refusal wrote a golden baseline")
+    result = json.loads(core(fresh, "prepare", "--establish-golden-baseline", apply=True).stdout)
+    assert_true(result.get("golden_baseline") == "established", "explicit establishment failed")
+    manifest = json.loads(fixture_paths(fresh)["manifest"].read_text(encoding="utf-8-sig"))
+    binding = manifest["bindings"]["golden_baseline"]
+    assert_true(
+        binding["sha256"] == sha256(fresh_golden) and binding["established_by_this_run"] is True,
+        "environment manifest does not bind the golden baseline",
+    )
+    results["explicit_establishment"] = "bound_in_manifest"
+    return results
+
+
+def test_autosave_guard_finalize_refusals(base: pathlib.Path) -> dict[str, Any]:
+    """finalize refuses a run whose final Probe snapshot lacks an enforced autosave guard."""
+    results: dict[str, str] = {}
+    for index, (label, guard) in enumerate((
+        ("guard_missing", None),
+        ("guard_violated", {**ENFORCED_AUTOSAVE, "status": "violated"}),
+        ("autosave_interval_nonzero", {**ENFORCED_AUTOSAVE, "cycle_interval": 3}),
+        ("suppression_patch_missing", {**ENFORCED_AUTOSAVE, "suppression_patch_installed": False}),
+    )):
+        # Short names: the runtime bootstrap keeps every path within 259 units.
+        fixture = make_fixture(base, f"as-{index}", run_id=f"g0-as{index}")
+        prepare_fixture(fixture)
+        simulate_runtime(fixture, autosave_guard=guard)
+        before = file_inventory(pathlib.Path(fixture["oni"]))
+        blocked = json.loads(core(fixture, "finalize", what_if=True, expected={2}).stdout)
+        assert_true(
+            "autosave guard is not enforced" in str(blocked.get("error")),
+            f"{label}: finalize was not refused for the autosave guard",
+        )
+        assert_true(file_inventory(pathlib.Path(fixture["oni"])) == before, f"{label}: refusal changed the fixture")
+        results[label] = "refused_zero_write"
+    return results
 
 
 def test_tamper_refusals(base: pathlib.Path) -> dict[str, Any]:
@@ -9334,6 +9534,9 @@ def main() -> int:
         ("success_whatif_recursive_restore_post_compare", test_success_and_whatif),
         ("finalize_archive_absent_near_max_path", test_finalize_archive_absent_and_max_path),
         ("tamper_refusals", test_tamper_refusals),
+        ("golden_baseline_cross_run_refusals", test_golden_baseline_cross_run),
+        ("loader_colony_isolation_refusals", test_loader_colony_isolation_refusals),
+        ("autosave_guard_finalize_refusals", test_autosave_guard_finalize_refusals),
         ("priority_pair_report_bundle_freeze_tamper_refusals", test_priority_evidence_tamper_refusals),
         ("normal_shutdown_evidence_finalizer_refusals", test_shutdown_evidence_finalizer_refusals),
         ("startup_consumption_preflight_custody_refusals", test_startup_consumption_preflight_custody_refusals),

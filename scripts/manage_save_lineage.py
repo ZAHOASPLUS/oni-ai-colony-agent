@@ -123,8 +123,33 @@ def validate_save_hash(value: Any, label: str) -> str:
     return text
 
 
+# The Mod reports its validation-session autosave guard as a top-level
+# snapshot object ``autosave`` (status, guard_active, cycle_interval,
+# suppression_patch_installed, ...).  ONI's autosave rotation deletes the
+# oldest same-colony saves in the active save folder (review P0-1), so a live
+# run may only proceed on a snapshot whose guard is enforced with autosave
+# disabled.  A missing object means a Mod build without the guard: refused.
+def autosave_guard_blockers(state: Dict[str, Any]) -> List[str]:
+    guard = state.get("autosave")
+    if not isinstance(guard, dict):
+        return ["autosave_guard_missing"]
+    blockers: List[str] = []
+    if guard.get("status") != "enforced":
+        blockers.append("autosave_guard_not_enforced")
+    if guard.get("guard_active") is not True:
+        blockers.append("autosave_guard_inactive")
+    interval = guard.get("cycle_interval")
+    if type(interval) is not int or interval != 0:
+        blockers.append("autosave_cycle_interval_not_zero")
+    if guard.get("suppression_patch_installed") is not True:
+        blockers.append("autosave_suppression_patch_missing")
+    return blockers
+
+
 def validate_snapshot(state: Dict[str, Any], expected_mod_version: str) -> Dict[str, Any]:
     require(state.get("event") == "state_snapshot", "latest_state.json is not a state snapshot")
+    guard_blockers = autosave_guard_blockers(state)
+    require(not guard_blockers, "latest state autosave guard is not enforced: " + ", ".join(guard_blockers))
     session_id = str(state.get("session_id") or "")
     snapshot_id = str(state.get("snapshot_id") or "")
     require(bool(session_id), "latest state has no session_id")

@@ -15,6 +15,7 @@ import hashlib
 import json
 import pathlib
 import shutil
+import struct
 import sys
 import tempfile
 
@@ -72,7 +73,13 @@ def main() -> int:
         clone_preview = clone_dir / "named-test-clone.png"
         source_save = source_dir / "original.sav"
         source_preview = source_dir / "original.png"
-        clone_save.write_bytes(b"oni-readonly-clone-save-20260913\n")
+        # The launch guard parses ONI's save header: buildVersion, headerSize,
+        # headerVersion, compression, then GameInfo JSON (non-autosave).
+        header = json.dumps({"baseName": "Readonly Fixture Base", "isAutoSave": False}).encode("utf-8")
+        clone_save.write_bytes(
+            struct.pack("<IiIi", 744825, len(header), 1, 1) + header
+            + b"oni-readonly-clone-save-20260913\n"
+        )
         clone_preview.write_bytes(b"PNG-fixture-preview-20260913\n")
         source_save.write_bytes(b"immutable-source-placeholder\n")
         source_preview.write_bytes(b"immutable-source-preview-placeholder\n")
@@ -85,6 +92,8 @@ def main() -> int:
             "source": {
                 "save": {"path_id": path_id(source_save)},
                 "preview": {"path_id": path_id(source_preview)},
+                "colony_directory_path_id": path_id(source_dir),
+                "redirect_colony_directory_path_id": path_id(work / "Readonly Fixture Base"),
             },
             "target": {
                 "save_sha256": clone_save_hash,

@@ -617,10 +617,12 @@ def make_fixture(
     save_dir = oni / "save_files" / "FixtureColony"
     source = save_dir / "Original.sav"
     loader_stem = f"{run_id}-loader"
-    loader = save_dir / f"{loader_stem}.sav"
+    # The loader clone has its own colony folder beside the source colony.
+    loader_dir = save_dir.parent / loader_stem
+    loader = loader_dir / f"{loader_stem}.sav"
     stamp = 1_725_000_000_000_000_000
 
-    for directory in (oni, evidence, boundary, environment, managed, save_dir):
+    for directory in (oni, evidence, boundary, environment, managed, save_dir, loader_dir):
         directory.mkdir(parents=True, exist_ok=True)
     main_assembly = managed / "Assembly-CSharp.dll"
     firstpass_assembly = managed / "Assembly-CSharp-firstpass.dll"
@@ -733,7 +735,8 @@ def make_fixture(
             "preview": {"sha256": core.sha256_file(source.with_suffix(".png"))},
         },
         "target": {
-            "directory_path_id": core.path_id(save_dir, contract="lower"),
+            "isolation": "own_colony_folder",
+            "directory_path_id": core.path_id(loader_dir, contract="lower"),
             "save_path_id": core.path_id(loader, contract="lower"),
             "preview_path_id": core.path_id(loader.with_suffix(".png"), contract="lower"),
             "save_sha256": core.sha256_file(loader),
@@ -4593,8 +4596,21 @@ def scenario_loader_and_confirmation(base: pathlib.Path) -> dict[str, str]:
         pathlib.Path(nonbound_case["loader"]).with_suffix(".png").read_bytes()
     )
     nonbound.loader_save = str(nonbound_path)
-    expect_blocked(lambda: core.configure(nonbound), "sibling named-clone pair")
+    expect_blocked(lambda: core.configure(nonbound), "in its own colony folder")
+
+    # Review P0-1: the old layout (loader beside the source, in the source
+    # colony folder) is refused.
+    sibling_case = make_fixture(base, "sibling-loader")
+    sibling = arguments(sibling_case)
+    sibling_path = pathlib.Path(sibling_case["source"]).with_name(pathlib.Path(sibling_case["loader"]).name)
+    sibling_path.write_bytes(pathlib.Path(sibling_case["loader"]).read_bytes())
+    sibling_path.with_suffix(".png").write_bytes(
+        pathlib.Path(sibling_case["loader"]).with_suffix(".png").read_bytes()
+    )
+    sibling.loader_save = str(sibling_path)
+    expect_blocked(lambda: core.configure(sibling), "in its own colony folder")
     return {
+        "loader_in_source_colony_folder": "blocked",
         "wrong_loader": "blocked",
         "relative_loader": "blocked",
         "unc_loader": "blocked",

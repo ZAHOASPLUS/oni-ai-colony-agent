@@ -25,9 +25,12 @@ function Full([string]$p){if([string]::IsNullOrWhiteSpace($p)){throw 'path is re
 function Hash([string]$p){'sha256:'+(Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLowerInvariant()}
 function ExpectedHash([string]$h){if([string]::IsNullOrWhiteSpace($h)-or $h-notmatch '^(?i:sha256:)?[0-9a-f]{64}$'){throw 'ExpectedGameExeSha256 must be a 64-hex SHA-256, optionally prefixed with sha256:'};'sha256:'+($h-replace '^(?i:sha256:)','').ToLowerInvariant()}
 function Assert-NoReparse([string]$p){$cursor=Full $p;while($true){if(Test-Path -LiteralPath $cursor){$item=Get-Item -LiteralPath $cursor -Force -ErrorAction Stop;if(($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne 0){throw 'path contains a reparse point'}};$parent=[IO.Directory]::GetParent($cursor);if($null-eq $parent){break};$cursor=$parent.FullName}}
-function Norm([string]$p){(Full $p).TrimEnd('\')}
+# Long: expand 8.3 aliases along the existing prefix so the overlap checks
+# compare real directories rather than spellings (review section 6).
+function Long([string]$p){$full=Full $p;$root=[IO.Path]::GetPathRoot($full);$parts=$full.Substring($root.Length).Split([char[]]@('\','/'),[StringSplitOptions]::RemoveEmptyEntries);$cur=$root;for($i=0;$i-lt $parts.Count;$i++){$found=@();if([IO.Directory]::Exists($cur)){$found=@([IO.Directory]::GetFileSystemEntries($cur,$parts[$i]))};if($found.Count-eq 0){return [IO.Path]::Combine($cur,[string]::Join('\',$parts[$i..($parts.Count-1)]))};$exact=@($found|Where-Object{[IO.Path]::GetFileName($_)-ieq $parts[$i]});if($exact.Count-eq 1){$cur=$exact[0]}elseif($found.Count-eq 1){$cur=$found[0]}else{throw 'ambiguous path segment'}};$cur}
+function Norm([string]$p){(Long $p).TrimEnd('\')}
 function Same([string]$a,[string]$b){[string]::Equals((Norm $a),(Norm $b),[StringComparison]::OrdinalIgnoreCase)}
-function Desc([string]$p,[string]$r){(Full $p).StartsWith((Norm $r)+'\',[StringComparison]::OrdinalIgnoreCase)}
+function Desc([string]$p,[string]$r){(Norm $p).StartsWith((Norm $r)+'\',[StringComparison]::OrdinalIgnoreCase)}
 function Owner([int]$ProcessId){$x=Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction Stop;$o=$x|Invoke-CimMethod -MethodName GetOwner -ErrorAction SilentlyContinue;if($o.ReturnValue -eq 0){"$($o.Domain)\$($o.User)"}else{''}}
 function Identity([int]$ProcessId){$x=Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue;if($null -eq $x){return $null};if([string]::IsNullOrWhiteSpace($x.ExecutablePath)){throw 'process image path unavailable'};$proc=Get-Process -Id $ProcessId -ErrorAction Stop;if($null -eq $proc.StartTime){throw 'process creation time unavailable'};$c=$proc.StartTime.ToUniversalTime();[pscustomobject]@{pid=$ProcessId;path=(Full $x.ExecutablePath);name=[string]$x.Name;creation_utc=$c.ToString('o');owner=(Owner $ProcessId)}}
 function Parse-CreationUtc([object]$Value){
@@ -43,7 +46,9 @@ if([string]::IsNullOrWhiteSpace($documents)-or -not(Desc $documents $profile)){t
 if(-not(Test-Path -LiteralPath $localLow -PathType Container)){throw 'actual LocalLow path unavailable'}
 if($ExpectedUserName -and $env:USERNAME -cne $ExpectedUserName){throw "logged-in user mismatch: $env:USERNAME"}
 $BridgeDir=Full $BridgeDir;if(-not(Desc $BridgeDir $profile)){throw 'BridgeDir must be inside actual USERPROFILE'};if(-not(Test-Path -LiteralPath $BridgeDir -PathType Container)){throw 'BridgeDir must already exist'};Assert-NoReparse $BridgeDir
-if($ForbiddenRoot-and(Same $profile $ForbiddenRoot-or Desc $profile $ForbiddenRoot-or Desc $ForbiddenRoot $profile)){throw 'actual profile overlaps ForbiddenRoot'}
+# Each call is parenthesised: in command mode `Same $a $b-or Desc ...` binds
+# "$b-or" and the rest as extra arguments, so the old check never fired.
+if($ForbiddenRoot-and((Same $profile $ForbiddenRoot)-or(Desc $profile $ForbiddenRoot)-or(Desc $ForbiddenRoot $profile))){throw 'actual profile overlaps ForbiddenRoot'}
 if(-not $StateFile){$StateFile=Join-Path $BridgeDir 'live-profile-process.json'};$StateFile=Full $StateFile;if(-not(Desc $StateFile $BridgeDir)){throw 'StateFile must be inside BridgeDir'};Assert-NoReparse (Split-Path $StateFile -Parent)
 if($Action -eq 'Inventory'){$game=$null;$gameHash=$null;if($GameExe){$game=Full $GameExe;if(Test-Path -LiteralPath $game -PathType Leaf){$gameHash=Hash $game}};[ordered]@{schema='oni.live-profile-inventory.v1';recorded_at_utc=[DateTime]::UtcNow.ToString('o');user_name=$env:USERNAME;user_profile=$profile;documents=$documents;local_low=$localLow;local_app_data=$localApp;bridge_dir=$BridgeDir;state_file=$StateFile;game_exe=$game;game_exe_exists=[bool]($gameHash);game_exe_sha256=$gameHash;steam_launch_required=$true}|ConvertTo-Json -Depth 5;return}
 if($Action -eq 'AwaitSteam'){

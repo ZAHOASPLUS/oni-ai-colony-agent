@@ -91,6 +91,10 @@ JOURNAL_ENTRY_KEYS = frozenset(
 BOUNDARY_SCHEMA = "oni.live-safety-boundary.v1"
 POST_BOUNDARY_COMPARISON_SCHEMA = "oni.live-safety-boundary-comparison.v2"
 CLONE_SCHEMA = "oni.named-test-clone.v1"
+GOLDEN_BASELINE_SCHEMA = "oni.original-saves-golden-baseline.v1"
+# One cross-run baseline per evidence root; every run's pre-boundary is
+# checked against it instead of becoming the next run's baseline (review S2).
+GOLDEN_BASELINE_RELATIVE = pathlib.PurePosixPath("golden-baseline/original-saves.json")
 LINEAGE_SCHEMA = "oni.test-save-lineage.v1"
 BOOTSTRAP_SCHEMA = "oni.v27-runtime-bootstrap.v1"
 PAIR_REPORT_SCHEMA = "oni.priority-pair-lineage-finalization.v1"
@@ -679,8 +683,34 @@ def sha256_file(path: pathlib.Path) -> str:
     return str(_stable_file_snapshot(path)["sha256"])
 
 
+def _expand_short_names(text: str) -> str:
+    """Spell an existing prefix with long names instead of 8.3 aliases.
+
+    ``C:\\Users\\user\\DOCUME~1`` and ``...\\Documents`` are one directory; string
+    comparisons and path ids must not treat them as disjoint (review section
+    6).  GetLongPathNameW expands aliases without following junctions, so the
+    reparse-point checks still see every segment.  Aliases always contain "~".
+    """
+    if os.name != "nt" or "~" not in text:
+        return text
+    head, tail = text, []
+    while not os.path.exists(head):
+        parent, name = os.path.split(head)
+        if parent == head or not name:
+            return text
+        tail.append(name)
+        head = parent
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetLongPathNameW(head, buffer, len(buffer))
+    if not length or length >= len(buffer):
+        raise WorkflowError("a path could not be expanded to its long form")
+    return os.path.join(buffer.value, *reversed(tail))
+
+
 def normalized(path: pathlib.Path | str) -> pathlib.Path:
-    return pathlib.Path(os.path.abspath(os.path.normpath(str(pathlib.Path(path).expanduser()))))
+    return pathlib.Path(
+        _expand_short_names(os.path.abspath(os.path.normpath(str(pathlib.Path(path).expanduser()))))
+    )
 
 
 def canonical_path_text(path: pathlib.Path | str) -> str:
@@ -2141,6 +2171,29 @@ def _expected_pipeline_startup_expectations(
     return expected
 
 
+# The Mod reports its validation-session autosave guard as a top-level
+# snapshot object ``autosave`` (status, guard_active, cycle_interval,
+# suppression_patch_installed, ...).  ONI's autosave rotation deletes the
+# oldest same-colony saves in the active save folder (review P0-1), so a live
+# run may only proceed on a snapshot whose guard is enforced with autosave
+# disabled.  A missing object means a Mod build without the guard: refused.
+def autosave_guard_blockers(state: Mapping[str, Any]) -> list[str]:
+    guard = state.get("autosave")
+    if not isinstance(guard, Mapping):
+        return ["autosave_guard_missing"]
+    blockers: list[str] = []
+    if guard.get("status") != "enforced":
+        blockers.append("autosave_guard_not_enforced")
+    if guard.get("guard_active") is not True:
+        blockers.append("autosave_guard_inactive")
+    interval = guard.get("cycle_interval")
+    if type(interval) is not int or interval != 0:
+        blockers.append("autosave_cycle_interval_not_zero")
+    if guard.get("suppression_patch_installed") is not True:
+        blockers.append("autosave_suppression_patch_missing")
+    return blockers
+
+
 def command_pipeline_gate(
     bridge: pathlib.Path,
     *,
@@ -2206,6 +2259,11 @@ def command_pipeline_gate(
         "expected pipeline save hash",
     ):
         raise WorkflowError("command pipeline raw tip does not bind the final lineage save")
+    guard_blockers = autosave_guard_blockers(raw_state)
+    if guard_blockers:
+        raise WorkflowError(
+            "final Probe snapshot autosave guard is not enforced: " + ", ".join(guard_blockers)
+        )
 
     try:
         publication = priority_pair_contract.validate_enriched_latest_against_raw(
@@ -2575,8 +2633,16 @@ def validate_clone_inputs(
         raise WorkflowError("source and loader must use the exact .sav extension")
     source_root = save_root_for(source_save, roots.oni_root)
     loader_root = save_root_for(loader_save, roots.oni_root)
-    if not same_path(source_root, loader_root) or source_save.parent != loader_save.parent:
-        raise WorkflowError("source and loader must be siblings in one save root")
+    # Review P0-1: the loader clone lives in its own colony folder, named by
+    # its stem, beside the source colony folder.  In the source folder ONI's
+    # autosave rotation deletes the user's same-GUID autosaves.
+    if (
+        not same_path(source_root, loader_root)
+        or paths_overlap(source_save.parent, loader_save.parent)
+        or not same_path(source_save.parent.parent, loader_save.parent.parent)
+        or loader_save.parent.name != loader_stem
+    ):
+        raise WorkflowError("loader must sit in its own colony folder beside the source colony")
     if source_save == loader_save or loader_save.stem != loader_stem:
         raise WorkflowError("loader save identity does not match its declared stem")
     source_preview = source_save.with_suffix(".png")
@@ -2616,6 +2682,15 @@ def validate_clone_inputs(
         ):
             raise WorkflowError(f"clone manifest {label} no longer matches")
     if (
+        target.get("isolation") != "own_colony_folder"
+        or source.get("colony_directory_path_id") != path_id(source_save.parent, contract="lower")
+        or source.get("redirect_colony_directory_path_id")
+        in {None, path_id(loader_save.parent, contract="lower")}
+        or target.get("save_base_path_id") != path_id(loader_save.parent.parent, contract="lower")
+        or (source.get("header") or {}).get("is_auto_save") is not False
+    ):
+        raise WorkflowError("clone manifest does not describe an isolated non-autosave clone")
+    if (
         clone.get("target_stem_id") != text_id(loader_stem)
         or target.get("directory_path_id") != path_id(loader_save.parent, contract="lower")
         or target.get("save_path_id") != path_id(loader_save, contract="lower")
@@ -2636,7 +2711,116 @@ def validate_clone_inputs(
     }
     if path_id(loader_save, contract="lower") in pre_save_ids or path_id(loader_preview, contract="lower") in pre_save_ids:
         raise WorkflowError("loader pair already existed in the pre-boundary report")
+    loader_folder_id = path_id(loader_save.parent, contract="lower")
+    if any(
+        isinstance(item, dict) and item.get("parent_path_id") == loader_folder_id
+        for item in (pre.get("saves") or {}).get("entries", [])
+    ):
+        raise WorkflowError("loader colony folder already held saves in the pre-boundary report")
     return pre, clone
+
+
+def golden_baseline_path(evidence_root: pathlib.Path) -> pathlib.Path:
+    return normalized(evidence_root) / pathlib.Path(*GOLDEN_BASELINE_RELATIVE.parts)
+
+
+def golden_save_entries(pre: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The identity and content of every save/preview in a boundary report."""
+    return sorted(
+        (
+            {
+                "path_id": str(item["path_id"]),
+                "length": int(item["length"]),
+                "sha256": str(item["sha256"]),
+            }
+            for item in boundary_compare.entries(pre, "saves", "pre")
+        ),
+        key=lambda item: item["path_id"],
+    )
+
+
+def build_golden_baseline(pre: Mapping[str, Any], pre_path: pathlib.Path) -> dict[str, Any]:
+    entries = golden_save_entries(pre)
+    return {
+        "schema": GOLDEN_BASELINE_SCHEMA,
+        "established_at": now_iso(),
+        "oni_root_id": pre["oni_root_id"],
+        "path_disclosure": "identifiers_only",
+        "established_from": {
+            "run_id": pre["run_id"],
+            "captured_at": pre["captured_at"],
+            "pre_boundary_path_id": path_id(pre_path, contract="lower"),
+            "pre_boundary_sha256": sha256_file(pre_path),
+        },
+        "saves": {"count": len(entries), "entries": entries},
+    }
+
+
+def establish_golden_baseline(
+    evidence_root: pathlib.Path,
+    pre: Mapping[str, Any],
+    pre_path: pathlib.Path,
+) -> pathlib.Path:
+    """Publish the golden baseline once; an existing one is never replaced."""
+    path = golden_baseline_path(evidence_root)
+    assert_no_reparse(path.parent, normalized(evidence_root), allow_missing_leaf=True)
+    if os.path.lexists(path):
+        raise WorkflowError("golden baseline already exists; archive it deliberately before re-baselining")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json_atomic(path, build_golden_baseline(pre, pre_path), create_only=True)
+    return path
+
+
+def verify_golden_baseline(
+    golden: Mapping[str, Any],
+    pre: Mapping[str, Any],
+    oni_root: pathlib.Path,
+) -> int:
+    """Refuse any original save that is missing or changed since the baseline.
+
+    New saves are allowed (the user may keep playing); a missing or changed
+    golden entry is a hard failure, never a new baseline (review S2: run17's
+    pre-boundary silently re-baselined the deleted Cycle 6 autosave).
+    """
+    saves = golden.get("saves")
+    if (
+        golden.get("schema") != GOLDEN_BASELINE_SCHEMA
+        or golden.get("path_disclosure") != "identifiers_only"
+        or golden.get("oni_root_id") != path_id(oni_root, contract="lower")
+        or golden.get("oni_root_id") != pre.get("oni_root_id")
+        or not isinstance(saves, Mapping)
+        or set(saves) != {"count", "entries"}
+        or not isinstance(saves.get("entries"), list)
+        or saves.get("count") != len(saves["entries"])
+    ):
+        raise WorkflowError("golden baseline does not bind this ONI root")
+    expected: dict[str, tuple[int, str]] = {}
+    for item in saves["entries"]:
+        if (
+            not isinstance(item, Mapping)
+            or set(item) != {"path_id", "length", "sha256"}
+            or type(item.get("length")) is not int
+            or item["length"] < 0
+        ):
+            raise WorkflowError("golden baseline entry is invalid")
+        identifier = require_hash(item.get("path_id"), "golden baseline path_id")
+        if identifier in expected:
+            raise WorkflowError("golden baseline repeats a path_id")
+        expected[identifier] = (item["length"], require_hash(item.get("sha256"), "golden baseline sha256"))
+    current = {item["path_id"]: (item["length"], item["sha256"]) for item in golden_save_entries(pre)}
+    missing = sorted(identifier for identifier in expected if identifier not in current)
+    changed = sorted(
+        identifier
+        for identifier, state in expected.items()
+        if identifier in current and current[identifier] != state
+    )
+    if missing or changed:
+        raise WorkflowError(
+            "original saves drifted from the golden baseline "
+            f"({len(missing)} missing, {len(changed)} changed); "
+            "the pre-boundary is not accepted as a new baseline"
+        )
+    return len(expected)
 
 
 def manifest_config_records(oni_root: pathlib.Path) -> list[dict[str, Any]]:
@@ -3056,6 +3240,26 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
     pre, clone = validate_clone_inputs(
         roots, pre_path, clone_path, source_save, loader_save, args.loader_stem
     )
+    golden_path = golden_baseline_path(roots.evidence_root)
+    assert_no_reparse(
+        golden_path if golden_path.parent.exists() else golden_path.parent,
+        roots.evidence_root,
+        allow_missing_leaf=True,
+    )
+    establish_golden = bool(getattr(args, "establish_golden_baseline", False))
+    if os.path.lexists(golden_path):
+        if establish_golden:
+            raise WorkflowError("golden baseline already exists; archive it deliberately before re-baselining")
+        golden_count = verify_golden_baseline(
+            load_json(golden_path, "golden baseline"), pre, roots.oni_root
+        )
+    elif not establish_golden:
+        raise WorkflowError(
+            "no golden baseline of the original saves; after verifying the originals, "
+            "run prepare once with --establish-golden-baseline"
+        )
+    else:
+        golden_count = len(golden_save_entries(pre))
     environment_dir = roots.environment_dir
     if environment_dir.exists() or os.path.lexists(environment_dir):
         raise WorkflowError("environment evidence directory already exists")
@@ -3149,12 +3353,22 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             "schema": "oni.live-validation-environment-plan.v1",
             "status": "would_prepare",
             "run_id": roots.run_id,
+            "golden_baseline": "would_establish" if establish_golden else "verified",
+            "golden_baseline_entry_count": golden_count,
             "write_count": 0,
             "config_binding_count": len(configs),
             "probe_file_count": int(probe_snapshot.get("file_count", 0)),
             "old_bridge_file_count": int(bridge_snapshot.get("file_count", 0)),
         }
 
+    if establish_golden:
+        establish_golden_baseline(roots.evidence_root, pre, pre_path)
+    manifest["bindings"]["golden_baseline"] = {
+        "path_id": path_id(golden_path, contract="lower"),
+        "sha256": sha256_file(golden_path),
+        "entry_count": golden_count,
+        "established_by_this_run": establish_golden,
+    }
     stage = environment_dir.parent / f".prep-{uuid.uuid4().hex[:16]}"
     if stage.exists() or os.path.lexists(stage):
         raise WorkflowError("prepare staging path already exists")
@@ -3206,6 +3420,8 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         "schema": "oni.live-validation-environment-prepare-result.v1",
         "status": "prepared",
         "run_id": roots.run_id,
+        "golden_baseline": "established" if establish_golden else "verified",
+        "golden_baseline_entry_count": golden_count,
         "environment_manifest_sha256": sha256_file(environment_dir / "environment-manifest.json"),
         "config_binding_count": len(configs),
         "probe_file_count": int(probe_snapshot.get("file_count", 0)),
@@ -11929,6 +12145,14 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     prepare_parser = subparsers.add_parser("prepare", help="Bind and back up the immutable pre-run environment.")
     add_common(prepare_parser)
+    prepare_parser.add_argument(
+        "--establish-golden-baseline",
+        action="store_true",
+        help=(
+            "Record this run's pre-boundary saves as the cross-run golden baseline "
+            "(only when none exists; verify the original saves first)."
+        ),
+    )
     prepare_parser.set_defaults(func=prepare)
     finalize_parser = subparsers.add_parser("finalize", help="Transactionally restore and post-compare the environment.")
     add_common(finalize_parser)
