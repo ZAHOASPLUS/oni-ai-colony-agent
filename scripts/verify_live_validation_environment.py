@@ -321,6 +321,7 @@ def make_fixture(
     with_archive_root: bool = True,
     with_extra_save_pair: bool = False,
     with_old_probe: bool = True,
+    establish_golden: bool = True,
 ) -> dict[str, pathlib.Path | str]:
     case = base / name
     oni = case / "oni-user"
@@ -448,6 +449,13 @@ def make_fixture(
         "loader_stem": f"{run_id}-loader",
     }
     capture_pre(fixture)
+    if establish_golden:
+        # The fixture's originals are verified by construction; record them as
+        # the cross-run golden baseline every prepare checks (review S2).
+        pre_path = fixture_paths(fixture)["pre"]
+        workflow.establish_golden_baseline(
+            evidence, json.loads(pre_path.read_text(encoding="utf-8-sig")), pre_path
+        )
     create_loader_clone(fixture)
     return fixture
 
@@ -2681,6 +2689,70 @@ def test_loader_colony_isolation_refusals(base: pathlib.Path) -> dict[str, Any]:
         "pre-boundary with an occupied loader folder was not refused",
     )
     results["loader_folder_seen_in_pre_boundary"] = "refused"
+    return results
+
+
+def next_run_fixture(
+    fixture: dict[str, pathlib.Path | str], run_id: str
+) -> dict[str, pathlib.Path | str]:
+    """A later run on the same ONI root and evidence root, with its own pre and clone."""
+    later = dict(fixture)
+    later["run_id"] = run_id
+    later["loader_stem"] = f"{run_id}-loader"
+    capture_pre(later)
+    create_loader_clone(later)
+    return later
+
+
+def test_golden_baseline_cross_run(base: pathlib.Path) -> dict[str, Any]:
+    results: dict[str, str] = {}
+    fixture = make_fixture(base, "golden-drift", with_extra_save_pair=True)
+    golden = workflow.golden_baseline_path(pathlib.Path(fixture["evidence"]))
+    golden_before = sha256(golden)
+    stable = next_run_fixture(fixture, "g0-golden-stable")
+    plan = json.loads(core(stable, "prepare", what_if=True).stdout)
+    assert_true(plan.get("golden_baseline") == "verified", "unchanged originals did not verify")
+    results["unchanged_originals_next_run"] = "verified"
+
+    # An original save lost between runs (as the Cycle 6 autosave was on
+    # 2026-09-13) must not become the next run's baseline.
+    pathlib.Path(fixture["extra_save"]).unlink()
+    pathlib.Path(fixture["extra_preview"]).unlink()
+    drifted = next_run_fixture(fixture, "g0-golden-drifted")
+    before = file_inventory(pathlib.Path(fixture["evidence"]))
+    blocked = json.loads(core(drifted, "prepare", apply=True, expected={2}).stdout)
+    assert_true("drifted from the golden baseline" in str(blocked.get("error")), "missing original was re-baselined")
+    assert_true(file_inventory(pathlib.Path(fixture["evidence"])) == before, "drift refusal wrote evidence")
+    assert_true(sha256(golden) == golden_before, "drift refusal replaced the golden baseline")
+    results["missing_original_next_run"] = "refused_zero_write"
+
+    changed = make_fixture(base, "golden-changed")
+    write_bytes(pathlib.Path(changed["source_preview"]).with_name("Original.png"), b"changed-original-preview")
+    changed_later = next_run_fixture(changed, "g0-golden-changed")
+    blocked = json.loads(core(changed_later, "prepare", what_if=True, expected={2}).stdout)
+    assert_true("drifted from the golden baseline" in str(blocked.get("error")), "changed original was re-baselined")
+    results["changed_original_next_run"] = "refused"
+
+    blocked = json.loads(
+        core(changed_later, "prepare", "--establish-golden-baseline", what_if=True, expected={2}).stdout
+    )
+    assert_true("already exists" in str(blocked.get("error")), "existing golden baseline was replaced")
+    results["re_establish_existing"] = "refused"
+
+    fresh = make_fixture(base, "golden-fresh", establish_golden=False)
+    blocked = json.loads(core(fresh, "prepare", what_if=True, expected={2}).stdout)
+    assert_true("no golden baseline" in str(blocked.get("error")), "prepare ran without a golden baseline")
+    fresh_golden = workflow.golden_baseline_path(pathlib.Path(fresh["evidence"]))
+    assert_true(not fresh_golden.exists(), "refusal wrote a golden baseline")
+    result = json.loads(core(fresh, "prepare", "--establish-golden-baseline", apply=True).stdout)
+    assert_true(result.get("golden_baseline") == "established", "explicit establishment failed")
+    manifest = json.loads(fixture_paths(fresh)["manifest"].read_text(encoding="utf-8-sig"))
+    binding = manifest["bindings"]["golden_baseline"]
+    assert_true(
+        binding["sha256"] == sha256(fresh_golden) and binding["established_by_this_run"] is True,
+        "environment manifest does not bind the golden baseline",
+    )
+    results["explicit_establishment"] = "bound_in_manifest"
     return results
 
 
@@ -9419,6 +9491,7 @@ def main() -> int:
         ("success_whatif_recursive_restore_post_compare", test_success_and_whatif),
         ("finalize_archive_absent_near_max_path", test_finalize_archive_absent_and_max_path),
         ("tamper_refusals", test_tamper_refusals),
+        ("golden_baseline_cross_run_refusals", test_golden_baseline_cross_run),
         ("loader_colony_isolation_refusals", test_loader_colony_isolation_refusals),
         ("priority_pair_report_bundle_freeze_tamper_refusals", test_priority_evidence_tamper_refusals),
         ("normal_shutdown_evidence_finalizer_refusals", test_shutdown_evidence_finalizer_refusals),
