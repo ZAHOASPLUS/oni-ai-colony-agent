@@ -272,6 +272,11 @@ CERTIFYING_FIELD_CONTRACTS: Dict[str, Dict[str, Any]] = {
         "units": ("count",),
         "scopes": ("active_world_registered_buildings",),
     },
+    "buildings.flush_toilet": {
+        "semantics": ("raw_count",),
+        "units": ("count",),
+        "scopes": ("active_world_registered_buildings",),
+    },
     "buildings.manual_generator": {
         "semantics": ("raw_count",),
         "units": ("count",),
@@ -1436,16 +1441,14 @@ def _read_industry_deliverable(
     return actual >= required, actual_path or required_path, "observed", evidence_paths
 
 
-def _read_functional_building_operational(
+def _trusted_functional_payload(
     state: Optional[Mapping[str, Any]],
-    prefab_id: str | Sequence[str],
-) -> Tuple[Optional[bool], Optional[str], str]:
-    """Project trusted functional-building telemetry to one prefab tri-state.
+) -> Tuple[Optional[Mapping[str, Any]], Optional[str], str]:
+    """Return the contract-valid functional-building payload or its status.
 
-    The legacy completed-prefab count is intentionally separate.  A wholly
-    absent functional field preserves old snapshot compatibility, while any
-    present-but-unusable functional claim fails closed instead of falling back
-    to that count.
+    A wholly absent functional field preserves old snapshot compatibility
+    (path ``None``), while any present-but-unusable functional claim fails
+    closed instead of falling back to a legacy count.
     """
 
     path = "functional_buildings"
@@ -1479,27 +1482,88 @@ def _read_functional_building_operational(
         # This is defensive; the shared contract has already validated the
         # payload shape before this value is consumed.
         return None, path, "contract_mismatch"
+    return payload, path, "observed"
+
+
+def _operational_tri_state(values: Sequence[Any]) -> Tuple[Optional[bool], str]:
+    if any(value is False for value in values):
+        return False, "observed"
+    if values and all(value is True for value in values):
+        return True, "observed"
+    return None, "unknown"
+
+
+def _read_functional_building_operational(
+    state: Optional[Mapping[str, Any]],
+    prefab_id: str | Sequence[str],
+) -> Tuple[Optional[bool], Optional[str], str]:
+    """Project trusted functional-building telemetry to one prefab tri-state.
+
+    The legacy completed-prefab count is intentionally separate.
+    """
+
+    payload, path, status = _trusted_functional_payload(state)
+    if payload is None:
+        return None, path, status
     prefab_ids = (prefab_id,) if isinstance(prefab_id, str) else tuple(prefab_id)
     values = [
         instance.get("operational")
-        for instance in instances
+        for instance in payload["instances"]
         if isinstance(instance, Mapping) and instance.get("prefab_id") in prefab_ids
     ]
-    if not values:
-        return None, path, "unknown"
-    if any(value is False for value in values):
-        return False, path, "observed"
-    if all(value is True for value in values):
-        return True, path, "observed"
-    return None, path, "unknown"
+    operational, operational_status = _operational_tri_state(values)
+    return operational, path, operational_status
+
+
+_TOILET_PREFAB_IDS = ("Outhouse", "FlushToilet")
+
+
+def _read_functional_toilets(state: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Count Outhouse and FlushToilet instances in the trusted functional view.
+
+    The Probe's functional reader lists every completed instance of the
+    prefabs it supports.  A flush-toilet count of zero is only an observation
+    when the reader shows it covers FlushToilet: either it emitted at least one
+    FlushToilet instance or its optional ``prefab_ids`` list names it.
+    """
+
+    payload, path, status = _trusted_functional_payload(state)
+    result: Dict[str, Any] = {
+        "path": path,
+        "quality": status,
+        "outhouses": None,
+        "flush_toilets": None,
+        "operational": None,
+        "operational_quality": status,
+    }
+    if payload is None:
+        return result
+    toilets = [
+        instance
+        for instance in payload["instances"]
+        if isinstance(instance, Mapping) and instance.get("prefab_id") in _TOILET_PREFAB_IDS
+    ]
+    flush = [instance for instance in toilets if instance.get("prefab_id") == "FlushToilet"]
+    declared = payload.get("prefab_ids")
+    flush_covered = bool(flush) or (isinstance(declared, list) and "FlushToilet" in declared)
+    result["outhouses"] = len(toilets) - len(flush)
+    result["flush_toilets"] = len(flush) if flush_covered else None
+    if toilets:
+        result["operational"], result["operational_quality"] = _operational_tri_state(
+            [instance.get("operational") for instance in toilets]
+        )
+    else:
+        result["operational_quality"] = "absent"
+    return result
 
 
 def _read_functional_outhouse_operational(
     state: Optional[Mapping[str, Any]],
 ) -> Tuple[Optional[bool], Optional[str], str]:
-    """Compatibility wrapper for the sanitation objective."""
+    """Compatibility wrapper: operational state of every trusted toilet."""
 
-    return _read_functional_building_operational(state, "Outhouse")
+    toilets = _read_functional_toilets(state)
+    return toilets["operational"], toilets["path"], toilets["operational_quality"]
 
 
 def _read_strict_primary(
@@ -1776,9 +1840,11 @@ def collect_metrics(state: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     )
     diffuser, diffuser_path, diffuser_quality = _read_int(state, ("buildings.oxygen_diffuser",))
     outhouse, outhouse_path, outhouse_quality = _read_int(state, ("buildings.outhouse",))
-    functional_outhouse_operational, functional_outhouse_path, functional_outhouse_quality = (
-        _read_functional_outhouse_operational(state)
-    )
+    flush_toilet, flush_toilet_path, flush_toilet_quality = _read_int(state, ("buildings.flush_toilet",))
+    functional_toilets = _read_functional_toilets(state)
+    functional_outhouse_operational = functional_toilets["operational"]
+    functional_outhouse_path = functional_toilets["path"]
+    functional_outhouse_quality = functional_toilets["operational_quality"]
     functional_diffuser_operational, functional_diffuser_path, functional_diffuser_quality = (
         _read_functional_building_operational(state, ("OxygenDiffuser", "MineralDeoxidizer"))
     )
@@ -1978,6 +2044,7 @@ def collect_metrics(state: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         "idle": idle_path,
         "diffuser": diffuser_path,
         "outhouse": outhouse_path,
+        "flush_toilet": flush_toilet_path,
         "functional_outhouse_operational": functional_outhouse_path,
         "functional_diffuser_operational": functional_diffuser_path,
         "functional_generator_operational": functional_generator_path,
@@ -2030,6 +2097,7 @@ def collect_metrics(state: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         "idle": idle_quality,
         "diffuser": diffuser_quality,
         "outhouse": outhouse_quality,
+        "flush_toilet": flush_toilet_quality,
         "functional_outhouse_operational": functional_outhouse_quality,
         "functional_diffuser_operational": functional_diffuser_quality,
         "functional_generator_operational": functional_generator_quality,
@@ -2091,6 +2159,9 @@ def collect_metrics(state: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         "idle": idle,
         "oxygen_diffusers": diffuser,
         "outhouses": outhouse,
+        "flush_toilets": flush_toilet,
+        "functional_outhouses": functional_toilets["outhouses"],
+        "functional_flush_toilets": functional_toilets["flush_toilets"],
         "functional_outhouse_operational": functional_outhouse_operational,
         "functional_diffuser_operational": functional_diffuser_operational,
         "functional_generator_operational": functional_generator_operational,
@@ -2641,26 +2712,57 @@ def _evaluate_strategy_impl(
         )
     )
 
-    sanitation_inputs_observed = all(
-        metrics["qualities"].get(key) == "observed" for key in ("outhouse", "duplicants")
-    )
+    # Sanitation counts every toilet the colony can use: Outhouses and flush
+    # toilets (review M7).  A count comes from the observed completed-prefab
+    # counters or, when those are unusable, from the trusted functional
+    # instance view.  Too few Outhouses is only a risk when the flush toilets
+    # were observed too; otherwise they may cover the colony and the
+    # objective stays unknown instead of reporting an emergency.
+    duplicants_observed = metrics["qualities"].get("duplicants") == "observed"
     functional_outhouse_path = metrics["paths"].get("functional_outhouse_operational")
     functional_outhouse_quality = metrics["qualities"].get("functional_outhouse_operational")
     functional_field_present = functional_outhouse_path is not None
-    functional_outhouse_unknown = functional_field_present and functional_outhouse_quality != "observed"
+    functional_trusted = metrics.get("functional_outhouses") is not None
     functional_outhouse_failure = (
-        functional_field_present
+        functional_trusted
         and functional_outhouse_quality == "observed"
         and metrics["functional_outhouse_operational"] is False
     )
-    functional_outhouse_proof_observed = (
-        not functional_field_present or functional_outhouse_quality == "observed"
+    functional_outhouse_unknown = functional_field_present and (
+        not functional_trusted or functional_outhouse_quality == "unknown"
     )
-    sanitation_inputs_observed = sanitation_inputs_observed and functional_outhouse_proof_observed
-    sanitation_count_unknown = metrics["outhouses"] is None or expected_outhouses is None
-    sanitation_unknown = functional_outhouse_unknown or sanitation_count_unknown
-    sanitation_coverage_risk = (
-        not sanitation_count_unknown and metrics["outhouses"] < expected_outhouses
+    count_conflict = False
+    outhouse_count = metrics["outhouses"]
+    flush_count = metrics.get("flush_toilets")
+    if functional_trusted:
+        if outhouse_count is None:
+            outhouse_count = metrics["functional_outhouses"]
+        elif outhouse_count != metrics["functional_outhouses"]:
+            count_conflict = True
+    functional_flush = metrics.get("functional_flush_toilets")
+    if functional_flush is not None:
+        if flush_count is None:
+            flush_count = functional_flush
+        elif flush_count != functional_flush:
+            count_conflict = True
+    sanitation_count_unknown = outhouse_count is None or expected_outhouses is None
+    outhouses_cover = not sanitation_count_unknown and outhouse_count >= expected_outhouses
+    toilet_total = (
+        outhouse_count + flush_count
+        if outhouse_count is not None and flush_count is not None
+        else None
+    )
+    sanitation_coverage_risk = bool(
+        not sanitation_count_unknown
+        and not outhouses_cover
+        and toilet_total is not None
+        and toilet_total < expected_outhouses
+    )
+    flush_unobserved = bool(
+        not sanitation_count_unknown and not outhouses_cover and toilet_total is None
+    )
+    sanitation_unknown = (
+        functional_outhouse_unknown or count_conflict or sanitation_count_unknown or flush_unobserved
     )
     sanitation_status = (
         "blocked"
@@ -2672,26 +2774,38 @@ def _evaluate_strategy_impl(
         else "at_risk"
         if sanitation_coverage_risk
         else "satisfied"
-        if sanitation_inputs_observed
+        if duplicants_observed
         else "unknown"
     )
+    toilet_label = (
+        f"{outhouse_count} outhouse(s) and {flush_count} flush toilet(s)"
+        if flush_count is not None
+        else f"{outhouse_count} outhouse(s)"
+    )
     sanitation_reason = (
-        "Observed functional Outhouse telemetry reports operational=false for at least one Outhouse; "
+        "Observed functional toilet telemetry reports operational=false for at least one Outhouse or flush toilet; "
         "sanitation cannot be treated as satisfied."
         if functional_outhouse_failure
-        else "Functional Outhouse telemetry is present but unknown or contract-invalid; sanitation remains unknown "
+        else "Functional toilet telemetry is present but unknown or contract-invalid; sanitation remains unknown "
         "until a fresh, complete active-world observation is available."
         if functional_outhouse_unknown
-        else f"At least {expected_outhouses} outhouse(s) are required for {dupes} duplicants; observed {metrics['outhouses']}."
+        else "The completed-prefab toilet counts disagree with the functional instance view; sanitation remains unknown."
+        if count_conflict
+        else f"At least {expected_outhouses} toilet(s) are required for {dupes} duplicants; observed {toilet_label}."
         if sanitation_coverage_risk
         else (
-            "Outhouse coverage meets the conservative early-colony target; observed functional "
-            "Outhouse telemetry reports operational=true."
-            if functional_field_present and metrics["functional_outhouse_operational"] is True
-            else "Outhouse coverage meets the conservative early-colony target."
+            f"Observed {outhouse_count} outhouse(s), fewer than the {expected_outhouses} required for {dupes} "
+            "duplicants, and flush toilets are not observed; sanitation remains unknown."
+        )
+        if flush_unobserved
+        else (
+            "Toilet coverage meets the conservative early-colony target; observed functional "
+            "toilet telemetry reports operational=true."
+            if functional_trusted and metrics["functional_outhouse_operational"] is True
+            else "Toilet coverage meets the conservative early-colony target."
         )
         if not sanitation_unknown
-        else "Duplicant count or outhouse count is unavailable."
+        else "Duplicant count or toilet count is unavailable."
     )
     objectives.append(
         _objective(
@@ -2706,13 +2820,14 @@ def _evaluate_strategy_impl(
                 for p in (
                     metrics["paths"]["duplicants"],
                     metrics["paths"]["outhouse"],
+                    metrics["paths"].get("flush_toilet"),
                     functional_outhouse_path,
                 )
                 if p
             ],
-            completion=("Outhouse coverage >= one per four duplicants",),
+            completion=("Outhouse plus flush toilet coverage >= one per four duplicants",),
             recommended=_action_for_objective("sanitation", sanitation_status, sanitation_reason),
-            telemetry=("duplicants.total", "buildings.outhouse", "functional_buildings"),
+            telemetry=("duplicants.total", "buildings.outhouse", "buildings.flush_toilet", "functional_buildings"),
         )
     )
 

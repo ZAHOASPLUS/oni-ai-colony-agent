@@ -51,6 +51,9 @@ FUNCTIONAL_BUILDING_PREFAB_IDS = (
     "MineralDeoxidizer",
     "Outhouse",
     "ManualGenerator",
+    # Accepted ahead of the Probe reader so a producer that adds flush
+    # toilets does not invalidate the whole payload; sanitation counts both.
+    "FlushToilet",
 )
 FUNCTIONAL_BUILDING_GEOMETRY_CONTRACT_ID = "oni.qc.buildings.functional_geometry_instances.v1"
 FUNCTIONAL_BUILDING_GEOMETRY_SOURCE = (
@@ -908,6 +911,9 @@ _FUNCTIONAL_BUILDING_INSTANCE_KEYS = frozenset(
 _FUNCTIONAL_BUILDING_PAYLOAD_KEYS = frozenset(
     {"schema", "captured_at", "world_id", "complete", "instances"}
 )
+# Optional: the sorted prefab ids the producer enumerates, so a consumer can
+# tell "none exist" from "not tracked" for a prefab without instances.
+_FUNCTIONAL_BUILDING_OPTIONAL_PAYLOAD_KEYS = frozenset({"prefab_ids"})
 _FUNCTIONAL_BUILDING_MAX_INSTANCES = 10_000
 
 
@@ -918,8 +924,20 @@ def _functional_buildings_payload_blockers(value: Any) -> list[str]:
         return ["functional_buildings_type_mismatch"]
 
     blockers: list[str] = []
-    if set(value) != _FUNCTIONAL_BUILDING_PAYLOAD_KEYS:
+    keys = set(value)
+    if not _FUNCTIONAL_BUILDING_PAYLOAD_KEYS <= keys or not keys <= (
+        _FUNCTIONAL_BUILDING_PAYLOAD_KEYS | _FUNCTIONAL_BUILDING_OPTIONAL_PAYLOAD_KEYS
+    ):
         blockers.append("functional_buildings_payload_shape_invalid")
+    if "prefab_ids" in value:
+        declared = value.get("prefab_ids")
+        if (
+            not isinstance(declared, list)
+            or not declared
+            or any(item not in FUNCTIONAL_BUILDING_PREFAB_IDS for item in declared)
+            or declared != sorted(set(declared))
+        ):
+            blockers.append("functional_buildings_prefab_ids_invalid")
     if value.get("schema") != FUNCTIONAL_BUILDINGS_SCHEMA:
         blockers.append("functional_buildings_schema_invalid")
     captured_at = value.get("captured_at")
