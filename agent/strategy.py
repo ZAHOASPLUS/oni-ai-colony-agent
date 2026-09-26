@@ -1511,6 +1511,9 @@ def _read_functional_building_operational(
         for instance in payload["instances"]
         if isinstance(instance, Mapping) and instance.get("prefab_id") in prefab_ids
     ]
+    if not values:
+        # The trusted view is complete: none of these prefabs exists.
+        return None, path, "absent"
     operational, operational_status = _operational_tri_state(values)
     return operational, path, operational_status
 
@@ -2555,7 +2558,9 @@ def _evaluate_strategy_impl(
     oxygen_demand = metrics["oxygen_demand_kg_per_cycle"]
     functional_diffuser_path = metrics["paths"].get("functional_diffuser_operational")
     functional_diffuser_quality = metrics["qualities"].get("functional_diffuser_operational")
-    functional_diffuser_present = functional_diffuser_path is not None
+    # A complete functional view without any diffuser is not unknown
+    # telemetry: the oxygen balance alone decides (review M7).
+    functional_diffuser_present = functional_diffuser_path is not None and functional_diffuser_quality != "absent"
     functional_diffuser_failure = (
         functional_diffuser_present
         and functional_diffuser_quality == "observed"
@@ -2875,7 +2880,7 @@ def _evaluate_strategy_impl(
     power_known = metrics["battery_percent"] is not None or metrics["critical_power_covered"] is not None
     functional_generator_path = metrics["paths"].get("functional_generator_operational")
     functional_generator_quality = metrics["qualities"].get("functional_generator_operational")
-    functional_generator_present = functional_generator_path is not None
+    functional_generator_present = functional_generator_path is not None and functional_generator_quality != "absent"
     functional_generator_failure = (
         functional_generator_present
         and functional_generator_quality == "observed"

@@ -28,7 +28,12 @@ from agent.strategy import (
     report_rate_proof_verifier,
     with_report_rates,
 )
-from scripts.verify_strategy import base_state, objective, trusted_fixture_proof
+from scripts.verify_strategy import (
+    add_functional_bootstrap_buildings,
+    base_state,
+    objective,
+    trusted_fixture_proof,
+)
 
 
 def _raw_quality(period: str, entry: str, sign: str, unit: str, scope: str) -> dict:
@@ -144,6 +149,20 @@ class ReportRateTests(unittest.TestCase):
         state = probe_shaped_state(positive_kg=300.0, negative_kg=-240.0)
         oxygen = objective(evaluate_strategy(state, report_rates=True), "oxygen_security")
         self.assertEqual(oxygen["status"], "satisfied")
+
+    def test_complete_view_without_a_diffuser_does_not_hide_the_balance(self) -> None:
+        # The live colony has no OxygenDiffuser/MineralDeoxidizer; a complete
+        # functional view listing none is an observation, not unknown data.
+        state = add_functional_bootstrap_buildings(
+            probe_shaped_state(positive_kg=300.0, negative_kg=-240.0), generator=[True]
+        )
+        result = evaluate_strategy(state, report_rates=True)
+        self.assertEqual(result["metrics"]["qualities"]["functional_diffuser_operational"], "absent")
+        self.assertEqual(objective(result, "oxygen_security")["status"], "satisfied")
+        unknown = add_functional_bootstrap_buildings(
+            probe_shaped_state(positive_kg=300.0, negative_kg=-240.0), diffuser=[None]
+        )
+        self.assertEqual(objective(evaluate_strategy(unknown, report_rates=True), "oxygen_security")["status"], "unknown")
 
     def test_energy_counters_become_watts_when_present(self) -> None:
         state = probe_shaped_state(energy=(720_000.0, -600_000.0))
