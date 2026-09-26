@@ -248,10 +248,11 @@ class AsyncConfirmationTests(unittest.TestCase):
 
 class PriorityControllerTests(unittest.TestCase):
     def setUp(self):
-        # Receipts are isolated under the candidate and cannot address runtime.
-        self.temporary = tempfile.TemporaryDirectory(prefix="m28-test-", dir=ROOT)
+        # Receipts are isolated in a private temporary directory: they cannot
+        # address the runtime Bridge directory or remain in the workspace.
+        self.temporary = tempfile.TemporaryDirectory(prefix="m28-test-")
         self.directory = pathlib.Path(self.temporary.name).resolve()
-        self.assertTrue(self.directory.is_relative_to(ROOT.resolve()))
+        self.assertFalse(self.directory.is_relative_to(ROOT.resolve()))
         self.addCleanup(self.temporary.cleanup)
         self.store = DurableIntentStore(self.directory)
 

@@ -20,8 +20,9 @@ class StopWatch(Exception):
 
 class RotationObservabilityTests(unittest.TestCase):
     def exercise(self, *, append_tail: bool, missing: bool = False):
-        evidence = ROOT / "reports" / "l19" / "l20" / "main"
-        with tempfile.TemporaryDirectory(prefix="rotation-metrics-", dir=evidence) as tmp:
+        # The system temp directory: the ~21 MB fixture logs must not land in
+        # the workspace evidence tree (review 2026-09-26, section 7).
+        with tempfile.TemporaryDirectory(prefix="rotation-metrics-") as tmp:
             root = pathlib.Path(tmp)
             log = root / "state.jsonl"
             session = "offline-rotation-observability"
