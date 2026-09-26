@@ -23,7 +23,9 @@ namespace OniAiProbeMod.Probe
             "OxygenDiffuser",
             "MineralDeoxidizer",
             "Outhouse",
-            "ManualGenerator"
+            "ManualGenerator",
+            // Sanitation counts flush toilets as well as outhouses (review M7).
+            "FlushToilet"
         };
 
         internal static Dictionary<string, object> Read()

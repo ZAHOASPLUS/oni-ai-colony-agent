@@ -8,6 +8,7 @@
   "completeness": "complete",
   "mutating_condition_allowed": false,
   "supported_prefab_ids": [
+    "FlushToilet",
     "ManualGenerator",
     "MineralDeoxidizer",
     "Outhouse",
