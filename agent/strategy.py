@@ -2158,6 +2158,253 @@ def _action_for_objective(
     ]
 
 
+# Report-derived window rates (review M7).  The Probe publishes the game's own
+# daily-report counters (``ReportManager``) as raw observed values and leaves
+# every ``production.*``/``consumption.*`` window rate null.  The last closed
+# report is a complete one-cycle window: the game closes it at night time and
+# opens the next one, so ``positive`` is what the colony produced during that
+# cycle and ``-negative`` what it consumed.  The derivation below runs in this
+# process and the verifier recomputes it from the same raw counters, so a JSON
+# producer cannot manufacture a rate by self-declaring proof metadata.
+REPORT_RATE_POLICY_VERSION = "oni.report-rate.v1"
+REPORT_RATE_AUTHORITY = "oni.evidence-window.v1"
+_REPORT_CYCLE_SECONDS = 600.0
+_REPORT_COUNTER_MAXIMUM = 1_000_000_000_000.0
+# counter key, report entry, positive/negative field, raw unit, raw scope,
+# production path, consumption path, derived unit, divisor to the derived unit.
+_REPORT_RATE_SPECS: Tuple[Tuple[str, str, str, str, str, str, str, str, str, float], ...] = (
+    (
+        "oxygen_created",
+        "OxygenCreated",
+        "positive_kg",
+        "negative_kg",
+        "kg",
+        "save_report_manager_oxygen_created",
+        "production.oxygen_kg_per_cycle",
+        "consumption.oxygen_kg_per_cycle",
+        "kg/cycle",
+        1.0,
+    ),
+    # Not yet emitted by the Probe; accepted with the same raw contract when
+    # the report reader adds it.  Joules per 600 s cycle become watts.
+    (
+        "energy_created",
+        "EnergyCreated",
+        "positive_joules",
+        "negative_joules",
+        "J",
+        "save_report_manager_energy_created",
+        "production.power_watts",
+        "consumption.power_watts",
+        "W",
+        _REPORT_CYCLE_SECONDS,
+    ),
+)
+REPORT_RATE_PATHS = frozenset(
+    path for spec in _REPORT_RATE_SPECS for path in (spec[6], spec[7])
+)
+REPORT_RATE_POLICY_HASH = "sha256:" + hashlib.sha256(
+    repr(
+        (
+            REPORT_RATE_POLICY_VERSION,
+            "previous_closed_report_is_one_cycle;open_day=closed_day+1;open_day in {cycle,cycle+1};closed_day>=2",
+            tuple(spec[:10] for spec in _REPORT_RATE_SPECS),
+        )
+    ).encode("utf-8")
+).hexdigest()
+
+
+def _report_raw_quality_ok(
+    state: Dict[str, Any],
+    path: str,
+    *,
+    semantic: str,
+    unit: str,
+    scope: str,
+    completeness: str,
+    source: str,
+) -> bool:
+    return quality_contract_matches(
+        field_quality(state, path),
+        semantics=(semantic,),
+        units=(unit,),
+        scopes=(scope,),
+        completeness=(completeness,),
+        sources=(source,),
+    )
+
+
+def _report_day(state: Dict[str, Any], period: str) -> Optional[int]:
+    closed = period == "previous_closed"
+    path = f"report_counters.{period}.report_day"
+    if not _report_raw_quality_ok(
+        state,
+        path,
+        semantic="raw_closed_report_epoch" if closed else "raw_open_report_epoch",
+        unit="report_day",
+        scope="save",
+        completeness="complete",
+        source="ReportManager.reports[last].day" if closed else "ReportManager.TodaysReport.day",
+    ):
+        return None
+    value = safe_get(state, path)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
+def _derive_report_rate_fields(state: Any) -> Dict[str, Tuple[float, Dict[str, Any]]]:
+    """Return ``path -> (value, quality)`` for every derivable report rate."""
+
+    if not isinstance(state, Mapping):
+        return {}
+    state_dict = state if isinstance(state, dict) else dict(state)
+    closed_day = _report_day(state_dict, "previous_closed")
+    open_day = _report_day(state_dict, "current")
+    cycle = state_dict.get("cycle")
+    if (
+        closed_day is None
+        or open_day is None
+        # Day 1 starts at world generation, not at a night-time rollover.
+        or closed_day < 2
+        or open_day != closed_day + 1
+        or field_quality(state_dict, "cycle").get("status") != "observed"
+        or isinstance(cycle, bool)
+        or not isinstance(cycle, int)
+        # The open report is today's (or, after night time, tomorrow's), so
+        # the closed one is the latest complete cycle, not an old one.
+        or open_day not in (cycle, cycle + 1)
+    ):
+        return {}
+    derived: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+    for (
+        counter,
+        entry_name,
+        positive_key,
+        negative_key,
+        raw_unit,
+        raw_scope,
+        production_path,
+        consumption_path,
+        unit,
+        divisor,
+    ) in _REPORT_RATE_SPECS:
+        prefix = f"report_counters.previous_closed.{counter}"
+        source_prefix = f"ReportManager.reports[last].reportEntries[{entry_name}]"
+        values: Dict[str, float] = {}
+        for key, sign in ((positive_key, "positive"), (negative_key, "negative")):
+            path = f"{prefix}.{key}"
+            if not _report_raw_quality_ok(
+                state_dict,
+                path,
+                semantic=f"raw_closed_report_{sign}_counter",
+                unit=raw_unit,
+                scope=raw_scope,
+                completeness="complete_for_instrumented_report_events",
+                source=f"{source_prefix}.{sign.capitalize()}",
+            ):
+                break
+            number = _number(safe_get(state_dict, path))
+            if number is None or abs(number) > _REPORT_COUNTER_MAXIMUM:
+                break
+            if (sign == "positive" and number < 0.0) or (sign == "negative" and number > 0.0):
+                break
+            values[sign] = number
+        else:
+            inputs = {
+                "policy_version": REPORT_RATE_POLICY_VERSION,
+                "counter": counter,
+                "closed_report_day": closed_day,
+                "open_report_day": open_day,
+                "cycle": cycle,
+                "positive": values["positive"],
+                "negative": values["negative"],
+            }
+            input_hash = "sha256:" + hashlib.sha256(
+                repr(sorted(inputs.items())).encode("utf-8")
+            ).hexdigest()
+            for path, value in (
+                (production_path, values["positive"] / divisor),
+                (consumption_path, -values["negative"] / divisor + 0.0),
+            ):
+                derived[path] = (
+                    value,
+                    {
+                        "status": "observed",
+                        "source": source_prefix,
+                        "semantic": "window_rate",
+                        "unit": unit,
+                        "scope": "all_populated_worlds",
+                        "completeness": "complete",
+                        "authority": REPORT_RATE_AUTHORITY,
+                        "captured_at": "snapshot.ts",
+                        "input_hash": input_hash,
+                        "policy_hash": REPORT_RATE_POLICY_HASH,
+                        "policy_version": REPORT_RATE_POLICY_VERSION,
+                        "window": {"kind": "closed_daily_report", "report_day": closed_day},
+                    },
+                )
+    return derived
+
+
+def with_report_rates(state: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return a copy of ``state`` carrying the report-derived window rates.
+
+    A rate the producer itself marks observed is left untouched; only the
+    reserved null/unsupported rate fields are filled.  The input is never
+    mutated.
+    """
+
+    result = dict(state)
+    derived = _derive_report_rate_fields(result)
+    if not derived:
+        return result
+    quality = dict(result.get("quality")) if isinstance(result.get("quality"), Mapping) else {}
+    copied_groups: Dict[str, Dict[str, Any]] = {}
+    for path, (value, entry) in derived.items():
+        existing = quality.get(path)
+        if isinstance(existing, Mapping) and existing.get("status") == "observed":
+            continue
+        group, _, leaf = path.partition(".")
+        if group not in copied_groups:
+            original = result.get(group)
+            copied_groups[group] = dict(original) if isinstance(original, Mapping) else {}
+            result[group] = copied_groups[group]
+        copied_groups[group][leaf] = value
+        quality[path] = copy.deepcopy(entry)
+    result["quality"] = quality
+    return result
+
+
+def report_rate_proof_verifier(state: Mapping[str, Any], path: str, entry: Mapping[str, Any]) -> bool:
+    """Accept a rate only if it equals the in-process report derivation."""
+
+    if path not in REPORT_RATE_PATHS:
+        return False
+    expected = _derive_report_rate_fields(state).get(path)
+    if expected is None:
+        return False
+    expected_value, expected_entry = expected
+    state_dict = state if isinstance(state, dict) else dict(state)
+    actual_value = safe_get(state_dict, path)
+    return bool(
+        dict(entry) == expected_entry
+        and isinstance(actual_value, float)
+        and actual_value == expected_value
+    )
+
+
+def _with_report_rate_verifier(
+    verifier: Optional[TrustedProofVerifier],
+) -> TrustedProofVerifier:
+    def combined(state: Mapping[str, Any], path: str, entry: Mapping[str, Any]) -> bool:
+        if path in REPORT_RATE_PATHS and entry.get("policy_version") == REPORT_RATE_POLICY_VERSION:
+            return report_rate_proof_verifier(state, path, entry)
+        return bool(verifier is not None and verifier(state, path, entry) is True)
+
+    return combined
+
+
 def _evaluate_strategy_impl(
     state: Optional[Mapping[str, Any]],
     *,
@@ -2165,6 +2412,7 @@ def _evaluate_strategy_impl(
     now: Optional[dt.datetime] = None,
     previous_phase: Optional[str] = None,
     trusted_proof_verifier: Optional[TrustedProofVerifier] = None,
+    report_rates: bool = False,
 ) -> Dict[str, Any]:
     """Evaluate one snapshot, defaulting all self-declared proofs to untrusted.
 
@@ -2172,10 +2420,20 @@ def _evaluate_strategy_impl(
     than state metadata.  The live Bridge does not provide one yet; future
     derivation code must recompute input hashes and allowlist policy hashes
     before any window rate or certified assertion can satisfy a gate.
+
+    ``report_rates=True`` derives the oxygen (and, when present, energy)
+    window rates from the last closed daily report and installs the matching
+    in-process verifier for those paths only; other proof-required fields
+    still go to ``trusted_proof_verifier``.  The strategy's identity and state
+    hash stay those of the input snapshot.
     """
 
     if trusted_proof_verifier is not None and not callable(trusted_proof_verifier):
         raise StrategyError("trusted_proof_verifier must be callable")
+    identity_source = state if isinstance(state, Mapping) else None
+    if report_rates and isinstance(state, Mapping):
+        state = with_report_rates(state)
+        trusted_proof_verifier = _with_report_rate_verifier(trusted_proof_verifier)
     value = (
         _ProofBoundState(state, trusted_proof_verifier)
         if isinstance(state, Mapping) and trusted_proof_verifier is not None
@@ -2183,7 +2441,7 @@ def _evaluate_strategy_impl(
         if isinstance(state, Mapping)
         else None
     )
-    identity = _state_identity(value)
+    identity = _state_identity(identity_source)
     metrics = collect_metrics(value)
     stale = _state_is_stale(value)
     quality = quality_summary(dict(value) if isinstance(value, Mapping) else None)
@@ -2271,6 +2529,12 @@ def _evaluate_strategy_impl(
         if stale
         else "Observed functional OxygenDiffuser telemetry reports operational=false; oxygen production cannot be treated as safe."
         if functional_diffuser_failure
+        else (
+            f"Observed oxygen production {oxygen_production:.1f} kg/cycle is below consumption "
+            f"{oxygen_demand:.1f} kg/cycle; the colony is losing breathable oxygen."
+        )
+        if oxygen_production is not None and oxygen_demand is not None and oxygen_production < oxygen_demand
+        and not metrics["low_oxygen_alert"]
         else "Observed oxygen stock/rate margin or the conservative visible-cell oxygen diagnostic is unsafe, or a breathing alert is active."
         if oxygen_risk
         else "Functional OxygenDiffuser telemetry is present but unknown or contract-invalid; oxygen remains uncertified until a fresh complete observation is available."
@@ -3416,6 +3680,7 @@ def evaluate_strategy(
     now: Optional[dt.datetime] = None,
     previous_phase: Optional[str] = None,
     trusted_proof_verifier: Optional[TrustedProofVerifier] = None,
+    report_rates: bool = False,
 ) -> Dict[str, Any]:
     """Evaluate one snapshot with an evaluation-scoped quality-status cache."""
 
@@ -3427,6 +3692,7 @@ def evaluate_strategy(
             now=now,
             previous_phase=previous_phase,
             trusted_proof_verifier=trusted_proof_verifier,
+            report_rates=report_rates,
         )
     finally:
         _QUALITY_STATUS_CACHE.reset(cache_token)
@@ -3634,5 +3900,7 @@ __all__ = [
     "build_strategy_markdown",
     "collect_metrics",
     "evaluate_strategy",
+    "report_rate_proof_verifier",
+    "with_report_rates",
     "validate_strategy",
 ]
