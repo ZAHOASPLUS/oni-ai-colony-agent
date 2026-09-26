@@ -11,6 +11,7 @@ import re
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -99,10 +100,19 @@ def generate_plan(
     config = dict(config_override) if config_override is not None else load_llm_config(secrets_dir)
     config.setdefault("base_url", DEFAULT_BASE_URL)
     config.setdefault("model", DEFAULT_MODEL)
+    if not config.get("config_error"):
+        config["config_error"] = base_url_error(str(config["base_url"]))
+    if config.get("config_error"):
+        config["api_key"] = None  # never send a key under an unsafe config
     plan["llm"].update(config_health(config))
 
     if not advice:
         plan["llm"]["status"] = "no_open_incidents"
+        write_planner_outputs(bridge_dir, plan)
+        return plan
+
+    if config.get("config_error"):
+        plan["llm"]["status"] = str(config["config_error"])
         write_planner_outputs(bridge_dir, plan)
         return plan
 
@@ -446,72 +456,113 @@ def validate_ranking_output(
     return list(ranked), None
 
 
+_SECRET_KEY_NAMES = frozenset({"OPENAI_API_KEY", "ONI_AI_API_KEY", "API_KEY", "KEY"})
+_SECRET_FIELD_NAMES = {
+    "base_url": frozenset({"OPENAI_BASE_URL", "ONI_AI_BASE_URL", "BASE_URL", "URL"}),
+    "model": frozenset({"OPENAI_MODEL", "ONI_AI_MODEL", "MODEL"}),
+    "wire_api": frozenset({"OPENAI_WIRE_API", "ONI_AI_WIRE_API", "WIRE_API"}),
+    "input_cost_per_million": frozenset({"ONI_AI_INPUT_COST_PER_1M", "INPUT_COST_PER_MILLION"}),
+    "output_cost_per_million": frozenset({"ONI_AI_OUTPUT_COST_PER_1M", "OUTPUT_COST_PER_MILLION"}),
+}
+_LOCAL_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
 def load_llm_config(secrets_dir: Optional[pathlib.Path]) -> Dict[str, Any]:
+    """Load one self-consistent model configuration.
+
+    The API key and the endpoint always come from the same source, so a key
+    can never be sent to a URL found in an unrelated file: the environment
+    wins when it holds a key; otherwise exactly one secrets file may provide
+    a key, together with its own endpoint/model.  Only explicit ``NAME=value``
+    lines or JSON fields are read; bare URL or token-looking lines are not
+    guessed (code review 2026-09-26, M6).
+    """
+
     config: Dict[str, Any] = {
-        "api_key": os.environ.get("OPENAI_API_KEY") or os.environ.get("ONI_AI_API_KEY"),
-        "base_url": os.environ.get("OPENAI_BASE_URL") or os.environ.get("ONI_AI_BASE_URL"),
-        "model": os.environ.get("OPENAI_MODEL") or os.environ.get("ONI_AI_MODEL"),
-        "wire_api": os.environ.get("OPENAI_WIRE_API") or os.environ.get("ONI_AI_WIRE_API"),
         "input_cost_per_million": os.environ.get("ONI_AI_INPUT_COST_PER_1M"),
         "output_cost_per_million": os.environ.get("ONI_AI_OUTPUT_COST_PER_1M"),
     }
-    if secrets_dir and secrets_dir.exists():
+    environment_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("ONI_AI_API_KEY")
+    if environment_key:
+        config.update(
+            {
+                "api_key": environment_key,
+                "base_url": os.environ.get("OPENAI_BASE_URL") or os.environ.get("ONI_AI_BASE_URL"),
+                "model": os.environ.get("OPENAI_MODEL") or os.environ.get("ONI_AI_MODEL"),
+                "wire_api": os.environ.get("OPENAI_WIRE_API") or os.environ.get("ONI_AI_WIRE_API"),
+                "config_source": "environment",
+            }
+        )
+    elif secrets_dir and secrets_dir.exists():
+        candidates = []
         for path in sorted(secrets_dir.glob("*")):
-            if not path.is_file() or path.suffix.lower() not in {".md", ".txt", ".env", ".json"}:
-                continue
-            merge_secret_file(config, path)
-    config["base_url"] = config["base_url"] or DEFAULT_BASE_URL
-    config["model"] = config["model"] or DEFAULT_MODEL
+            if path.is_file() and path.suffix.lower() in {".md", ".txt", ".env", ".json"}:
+                values = read_secret_file(path)
+                if values.get("api_key"):
+                    candidates.append(values)
+        if len(candidates) > 1:
+            config["config_error"] = "secrets_ambiguous"
+        elif candidates:
+            values = candidates[0]
+            config.update({key: value for key, value in values.items() if value})
+            config["config_source"] = "secrets_dir"
+    config["base_url"] = str(config.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
+    config["model"] = config.get("model") or DEFAULT_MODEL
+    if config.get("config_error"):
+        config["api_key"] = None
     return config
 
 
-def merge_secret_file(config: Dict[str, Any], path: pathlib.Path) -> None:
+def read_secret_file(path: pathlib.Path) -> Dict[str, Optional[str]]:
+    """Read explicit configuration fields from one secrets file."""
+
+    values: Dict[str, Optional[str]] = {}
     text = path.read_text(encoding="utf-8-sig", errors="replace")
     if path.suffix.lower() == ".json":
         try:
-            value = json.loads(text)
+            document = json.loads(text)
         except json.JSONDecodeError:
-            value = None
-        if isinstance(value, dict):
-            config["api_key"] = config["api_key"] or first_present(value, "OPENAI_API_KEY", "api_key", "key")
-            config["base_url"] = config["base_url"] or first_present(value, "OPENAI_BASE_URL", "base_url", "url")
-            config["model"] = config["model"] or first_present(value, "OPENAI_MODEL", "model")
-            config["wire_api"] = config["wire_api"] or first_present(value, "OPENAI_WIRE_API", "wire_api")
-            config["input_cost_per_million"] = config["input_cost_per_million"] or first_present(
-                value, "ONI_AI_INPUT_COST_PER_1M", "input_cost_per_million"
+            document = None
+        if isinstance(document, dict):
+            values["api_key"] = first_present(document, "OPENAI_API_KEY", "api_key", "key")
+            values["base_url"] = first_present(document, "OPENAI_BASE_URL", "base_url", "url")
+            values["model"] = first_present(document, "OPENAI_MODEL", "model")
+            values["wire_api"] = first_present(document, "OPENAI_WIRE_API", "wire_api")
+            values["input_cost_per_million"] = first_present(
+                document, "ONI_AI_INPUT_COST_PER_1M", "input_cost_per_million"
             )
-            config["output_cost_per_million"] = config["output_cost_per_million"] or first_present(
-                value, "ONI_AI_OUTPUT_COST_PER_1M", "output_cost_per_million"
+            values["output_cost_per_million"] = first_present(
+                document, "ONI_AI_OUTPUT_COST_PER_1M", "output_cost_per_million"
             )
-            return
+            return values
 
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        if stripped.startswith(("http://", "https://")):
-            config["base_url"] = stripped.rstrip("/")
-            continue
-        if not config.get("api_key") and re.match(r"^[A-Za-z0-9._\-]{30,}$", stripped):
-            config["api_key"] = stripped.strip("'\"`")
-            continue
         match = re.match(r"\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?\s*[:=]\s*(.+?)\s*$", line)
         if not match:
             continue
-        key = match.group(1).upper()
+        name = match.group(1).upper()
         value = match.group(2).strip().strip("'\"`")
-        if key in {"OPENAI_API_KEY", "ONI_AI_API_KEY", "API_KEY", "KEY"} and not config.get("api_key"):
-            config["api_key"] = value
-        elif key in {"OPENAI_BASE_URL", "ONI_AI_BASE_URL", "BASE_URL", "URL"}:
-            config["base_url"] = value
-        elif key in {"OPENAI_MODEL", "ONI_AI_MODEL", "MODEL"}:
-            config["model"] = value
-        elif key in {"OPENAI_WIRE_API", "ONI_AI_WIRE_API", "WIRE_API"}:
-            config["wire_api"] = value
-        elif key in {"ONI_AI_INPUT_COST_PER_1M", "INPUT_COST_PER_MILLION"}:
-            config["input_cost_per_million"] = value
-        elif key in {"ONI_AI_OUTPUT_COST_PER_1M", "OUTPUT_COST_PER_MILLION"}:
-            config["output_cost_per_million"] = value
+        if name in _SECRET_KEY_NAMES:
+            values.setdefault("api_key", value)
+            continue
+        for field, names in _SECRET_FIELD_NAMES.items():
+            if name in names:
+                values.setdefault(field, value)
+    return values
+
+
+def base_url_error(base_url: str) -> Optional[str]:
+    """Refuse endpoints that would send the key in clear text."""
+
+    parsed = urllib.parse.urlsplit(base_url)
+    if parsed.scheme == "https" and parsed.hostname:
+        return None
+    if parsed.scheme == "http" and parsed.hostname in _LOCAL_HTTP_HOSTS:
+        return None
+    return "base_url_insecure"
 
 
 def first_present(mapping: Dict[str, Any], *keys: str) -> Optional[str]:
@@ -523,8 +574,11 @@ def first_present(mapping: Dict[str, Any], *keys: str) -> Optional[str]:
 
 
 def config_health(config: Dict[str, Any]) -> Dict[str, Any]:
+    host = urllib.parse.urlsplit(str(config.get("base_url") or DEFAULT_BASE_URL)).hostname
     return {
         "api_key_present": bool(config.get("api_key")),
+        # Endpoint host (never the key) for auditing where requests go.
+        "base_url_host": str(host or "")[:200],
         "model": str(config.get("model") or DEFAULT_MODEL)[:200],
         "wire_api": "responses" if str(config.get("wire_api") or "").lower().startswith("responses") else "chat_completions",
         "request_timeout_seconds": REQUEST_TIMEOUT_SECONDS,

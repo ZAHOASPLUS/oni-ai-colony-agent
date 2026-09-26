@@ -51,7 +51,6 @@ BUILD_PATTERN = re.compile(r"\bBuild:\s*(\S+)(?:\s+\(([^)]+)\))?", re.IGNORECASE
 PROBE_MARKER_PATTERN = re.compile(r"\[ONI AI Probe\]|ONI AI Probe:oni-ai-colony-agent", re.IGNORECASE)
 KEY_NAMES = {"OPENAI_API_KEY", "ONI_AI_API_KEY", "API_KEY", "KEY"}
 KEY_LINE_PATTERN = re.compile(r"^\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?\s*[:=]\s*(.*?)\s*$")
-BARE_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._\-]{30,}$")
 MAX_SECRET_FILE_BYTES = 2 * 1024 * 1024
 MAX_LOG_TAIL_BYTES = 2 * 1024 * 1024
 MAX_JSON_BYTES = 8 * 1024 * 1024
@@ -461,9 +460,9 @@ def secret_file_has_key(path: pathlib.Path) -> bool:
         if not stripped or stripped.startswith("#"):
             continue
         match = KEY_LINE_PATTERN.match(line)
+        # Mirrors agent.llm_planner.read_secret_file: only explicit NAME=value
+        # lines count; bare token-looking lines are never used as keys.
         if match and match.group(1).upper() in KEY_NAMES and match.group(2).strip().strip("'\"`"):
-            return True
-        if BARE_KEY_PATTERN.fullmatch(stripped.strip("'\"`")):
             return True
     return False
 
