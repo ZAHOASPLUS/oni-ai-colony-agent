@@ -205,6 +205,13 @@ namespace OniAiProbeMod.Probe
                 activeWorld.id == activeWorldId;
         }
 
+        private static List<object> SortedPrefabIds()
+        {
+            List<string> ids = new List<string>(SupportedPrefabIds);
+            ids.Sort(StringComparer.Ordinal);
+            return new List<object>(ids);
+        }
+
         private static bool IsSupportedPrefab(string prefabId)
         {
             for (int index = 0; index < SupportedPrefabIds.Length; index++)
@@ -266,6 +273,9 @@ namespace OniAiProbeMod.Probe
                 { "world_id", activeWorldId },
                 { "complete", complete },
                 { "instances", jsonInstances },
+                // The prefabs this reader enumerates, so a consumer can tell
+                // "none built" from "not tracked" for a prefab without instances.
+                { "prefab_ids", SortedPrefabIds() },
                 { "_status", status },
                 { "_source", Source }
             };

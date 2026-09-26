@@ -68,6 +68,31 @@ namespace FunctionalBuildingsHarness
             Require(declared.SequenceEqual(supported.OrderBy(id => id, StringComparer.Ordinal)),
                 "the contract's supported_prefab_ids differ from the reader: " + string.Join(",", declared));
             Passed(passed, "contract_matches_reader");
+
+            // Every payload (observed or error) declares the sorted coverage list.
+            MethodInfo payload = reader.GetMethod("Payload", AnyStatic);
+            Type instanceType = reader.GetNestedType("FunctionalBuildingInstance", BindingFlags.NonPublic);
+            object noInstances = Activator.CreateInstance(typeof(List<>).MakeGenericType(instanceType));
+            string[] allowedKeys = contract["payload_keys"].Concat(contract["optional_payload_keys"])
+                .Select(item => (string)item)
+                .OrderBy(key => key, StringComparer.Ordinal)
+                .ToArray();
+            foreach (bool complete in new[] { true, false })
+            {
+                var emitted = (Dictionary<string, object>)payload.Invoke(null, new object[]
+                {
+                    DateTimeOffset.UtcNow, 0, complete, noInstances,
+                    complete ? "observed" : "error", complete ? null : "harness"
+                });
+                string[] publicKeys = emitted.Keys
+                    .Where(key => !key.StartsWith("_", StringComparison.Ordinal))
+                    .OrderBy(key => key, StringComparer.Ordinal)
+                    .ToArray();
+                Require(publicKeys.SequenceEqual(allowedKeys), "payload keys differ from the contract: " + string.Join(",", publicKeys));
+                string[] prefabIds = ((List<object>)emitted["prefab_ids"]).Cast<string>().ToArray();
+                Require(prefabIds.Length > 0 && prefabIds.SequenceEqual(declared), "prefab_ids is not the sorted supported list");
+            }
+            Passed(passed, "payload_declares_sorted_prefab_ids");
             return passed;
         }
 

@@ -46,6 +46,15 @@ class FunctionalBuildingsHarnessTests(unittest.TestCase):
         self.assertIn("supported_ids_are_game_buildings", cases)
         self.assertIn("contract_matches_reader", cases)
 
+    def test_payload_declares_sorted_prefab_ids(self):
+        self.assertIn("payload_declares_sorted_prefab_ids", self.run_harness()["cases"])
+        contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
+        # The shape the Python consumer accepts: non-empty, sorted, unique.
+        ids = contract["supported_prefab_ids"]
+        self.assertEqual(ids, sorted(set(ids)))
+        self.assertIn("FlushToilet", ids)
+        self.assertEqual(contract["optional_payload_keys"], ["prefab_ids"])
+
 
 if __name__ == "__main__":
     unittest.main()
