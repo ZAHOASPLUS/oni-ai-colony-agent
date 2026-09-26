@@ -462,6 +462,7 @@ namespace OniAiProbeMod.Probe
                 !string.Equals(expectedGameBuild, ProbeSession.GameBuild, StringComparison.Ordinal) ||
                 !string.Equals(expectedModVersion, Mod.ModVersion, StringComparison.Ordinal) ||
                 !IsExplicitOffsetTimestamp(createdAt) ||
+                !IsFreshForThisProcess(createdAt) ||
                 !string.Equals(candidateDocumentHash, ComputeDocumentHash(document), StringComparison.Ordinal) ||
                 !string.Equals(candidateDllHash, HashExecutingAssembly(), StringComparison.Ordinal))
             {
@@ -562,6 +563,36 @@ namespace OniAiProbeMod.Probe
             {
                 throw new InvalidDataException("Startup binding length is outside Int64.", error);
             }
+        }
+
+        // Code review 2026-09-26: a binding left behind by an earlier run was
+        // accepted days later (two 09-13 processes read the 09-09 file).  The
+        // launcher writes it shortly before the game starts; allow the manual
+        // launch steps in between, reject anything older or from the future.
+        private static readonly TimeSpan BindingMaxAgeBeforeProcessStart = TimeSpan.FromHours(12);
+        private static readonly TimeSpan BindingMaxClockSkew = TimeSpan.FromMinutes(5);
+
+        private static bool IsFreshForThisProcess(string createdAt)
+        {
+            if (!DateTimeOffset.TryParse(
+                    createdAt,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind,
+                    out DateTimeOffset created))
+            {
+                return false;
+            }
+            DateTimeOffset processStart;
+            try
+            {
+                processStart = new DateTimeOffset(Process.GetCurrentProcess().StartTime);
+            }
+            catch
+            {
+                return false;
+            }
+            TimeSpan age = processStart - created;
+            return age >= -BindingMaxClockSkew && age <= BindingMaxAgeBeforeProcessStart;
         }
 
         private static bool IsExplicitOffsetTimestamp(string value)
