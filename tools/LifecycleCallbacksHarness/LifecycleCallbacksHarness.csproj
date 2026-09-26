@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RollForward>Major</RollForward>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <NoWarn>$(NoWarn);CS0618;CS0649;CS0414;CS0169</NoWarn>
+    <ONIManagedDir Condition="'$(ONIManagedDir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\OxygenNotIncluded\OxygenNotIncluded_Data\Managed</ONIManagedDir>
+  </PropertyGroup>
+
+  <!-- Compile the exact Mod sources so the harness exercises the current
+       Harmony lifecycle callbacks' exception boundaries and fault reporting. -->
+  <ItemGroup>
+    <Compile Include="..\..\mod\Source\**\*.cs" LinkBase="ModSource" />
+    <Reference Include="0Harmony"><HintPath>$(ONIManagedDir)\0Harmony.dll</HintPath><Private>true</Private></Reference>
+    <Reference Include="Assembly-CSharp"><HintPath>$(ONIManagedDir)\Assembly-CSharp.dll</HintPath><Private>true</Private></Reference>
+    <Reference Include="Assembly-CSharp-firstpass"><HintPath>$(ONIManagedDir)\Assembly-CSharp-firstpass.dll</HintPath><Private>true</Private></Reference>
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(ONIManagedDir)\UnityEngine.CoreModule.dll</HintPath><Private>true</Private></Reference>
+    <Reference Include="Newtonsoft.Json"><HintPath>$(ONIManagedDir)\Newtonsoft.Json.dll</HintPath><Private>true</Private></Reference>
+  </ItemGroup>
+</Project>

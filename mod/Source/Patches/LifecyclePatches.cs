@@ -243,25 +243,71 @@ namespace OniAiProbeMod.Patches
             }
         }
 
+        // Code review 2026-09-26 (P2): an exception escaping a Harmony callback
+        // propagates into the patched game method, so a Probe bug could fail
+        // the player's load or save.  Every lifecycle callback catches, records
+        // the failure, and raises the sticky safety fault: the executor stops,
+        // because the Probe's session and save tracking can no longer be trusted.
+        internal static void ReportCallbackFailure(string stage, Exception error)
+        {
+            try
+            {
+                ProbeWriter.WriteError("lifecycle_" + stage, error);
+            }
+            catch
+            {
+                // The fault below must still be raised.
+            }
+            try
+            {
+                ProbeWriter.RegisterLifecycleFault();
+            }
+            catch
+            {
+                // Never let the report itself reach the game.
+            }
+        }
+
         private static void OnGameStarted()
         {
-            if (saveLoadInProgress)
+            try
             {
-                return;
+                if (saveLoadInProgress)
+                {
+                    return;
+                }
+                ProbeRunner.EnsureStarted("game_lifecycle_patch");
             }
-            ProbeRunner.EnsureStarted("game_lifecycle_patch");
+            catch (Exception ex)
+            {
+                ReportCallbackFailure("game_start", ex);
+            }
         }
 
         private static void OnGameStopped()
         {
-            ProbeRunner.Stop("game_lifecycle_patch");
+            try
+            {
+                ProbeRunner.Stop("game_lifecycle_patch");
+            }
+            catch (Exception ex)
+            {
+                ReportCallbackFailure("game_stop", ex);
+            }
         }
 
         private static void OnSaveLoadStarting(string filename)
         {
             saveLoadInProgress = true;
-            ProbeRunner.Stop("save_loader_load_start");
-            ProbeSession.PrepareSaveLoad(filename);
+            try
+            {
+                ProbeRunner.Stop("save_loader_load_start");
+                ProbeSession.PrepareSaveLoad(filename);
+            }
+            catch (Exception ex)
+            {
+                ReportCallbackFailure("save_load_start", ex);
+            }
         }
 
         private static void OnSaveLoadFinished(bool __result)
@@ -277,6 +323,10 @@ namespace OniAiProbeMod.Patches
                     ProbeSession.CancelPreparedSaveLoad();
                 }
             }
+            catch (Exception ex)
+            {
+                ReportCallbackFailure("save_load_finish", ex);
+            }
             finally
             {
                 saveLoadInProgress = false;
@@ -289,17 +339,26 @@ namespace OniAiProbeMod.Patches
             bool updateSavePointer,
             out ProbeSession.SaveWriteContext __state)
         {
-            // Serialize interval 0 into every save a validation session writes,
-            // so a checkpoint clone cannot autosave when it is loaded later.
-            AutosaveGuard.EnforceNow();
-            __state = ProbeSession.BeginSaveWrite(filename);
-            ProbeWriter.WriteEvent("save_write_started", new Dictionary<string, object>
+            // A null context makes CompleteSaveWrite report the save as unverified.
+            __state = null;
+            try
             {
-                { "is_auto_save", isAutoSave },
-                { "update_save_pointer", updateSavePointer },
-                { "requested_save_path_id", __state.RequestedPathId },
-                { "before_save_id_hash", __state.BeforeSaveIdHash }
-            });
+                // Serialize interval 0 into every save a validation session writes,
+                // so a checkpoint clone cannot autosave when it is loaded later.
+                AutosaveGuard.EnforceNow();
+                __state = ProbeSession.BeginSaveWrite(filename);
+                ProbeWriter.WriteEvent("save_write_started", new Dictionary<string, object>
+                {
+                    { "is_auto_save", isAutoSave },
+                    { "update_save_pointer", updateSavePointer },
+                    { "requested_save_path_id", __state.RequestedPathId },
+                    { "before_save_id_hash", __state.BeforeSaveIdHash }
+                });
+            }
+            catch (Exception ex)
+            {
+                ReportCallbackFailure("save_write_start", ex);
+            }
         }
 
         private static void OnSaveFinished(
@@ -309,25 +368,32 @@ namespace OniAiProbeMod.Patches
             string __result,
             ProbeSession.SaveWriteContext __state)
         {
-            ProbeSession.SaveWriteCompletion completion = ProbeSession.CompleteSaveWrite(
-                __state,
-                __result,
-                updateSavePointer);
-            ProbeWriter.WriteEvent("save_write_completed", new Dictionary<string, object>
+            try
             {
-                { "success", completion.Success },
-                { "is_auto_save", isAutoSave },
-                { "update_save_pointer", updateSavePointer },
-                { "file_rewrite_observed", completion.FileRewriteObserved },
-                { "save_file_readable", completion.SaveFileReadable },
-                { "failure_reason", completion.FailureReason },
-                { "requested_save_path_id", completion.RequestedPathId },
-                { "result_save_path_id", completion.ResultPathId },
-                { "active_save_path_id", completion.ActivePathId },
-                { "before_save_id_hash", completion.BeforeSaveIdHash },
-                { "written_save_id_hash", completion.WrittenSaveIdHash },
-                { "active_save_id_hash", completion.ActiveSaveIdHash }
-            });
+                ProbeSession.SaveWriteCompletion completion = ProbeSession.CompleteSaveWrite(
+                    __state,
+                    __result,
+                    updateSavePointer);
+                ProbeWriter.WriteEvent("save_write_completed", new Dictionary<string, object>
+                {
+                    { "success", completion.Success },
+                    { "is_auto_save", isAutoSave },
+                    { "update_save_pointer", updateSavePointer },
+                    { "file_rewrite_observed", completion.FileRewriteObserved },
+                    { "save_file_readable", completion.SaveFileReadable },
+                    { "failure_reason", completion.FailureReason },
+                    { "requested_save_path_id", completion.RequestedPathId },
+                    { "result_save_path_id", completion.ResultPathId },
+                    { "active_save_path_id", completion.ActivePathId },
+                    { "before_save_id_hash", completion.BeforeSaveIdHash },
+                    { "written_save_id_hash", completion.WrittenSaveIdHash },
+                    { "active_save_id_hash", completion.ActiveSaveIdHash }
+                });
+            }
+            catch (Exception ex)
+            {
+                ReportCallbackFailure("save_write_finish", ex);
+            }
         }
     }
 }

@@ -237,6 +237,15 @@ namespace OniAiProbeMod.Probe
             }
         }
 
+        /// <summary>
+        /// A Harmony lifecycle callback failed: session and save tracking are no
+        /// longer trustworthy, so stop the controllers for the rest of the process.
+        /// </summary>
+        internal static void RegisterLifecycleFault()
+        {
+            RegisterSafetyFault("lifecycle_callback_failed", true, true);
+        }
+
         private static long RegisterSafetyFault(
             string category,
             bool processSticky,
