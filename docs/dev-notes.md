@@ -461,7 +461,9 @@ The policy must enable actions and suggestions for the loaded save and allow the
 candidate actions (`set_paused`, `set_duplicant_chore_priority`,
 `mark_dig_cells`); raise `command_ttl_seconds` (at most 300) so there is time to
 read and approve. Priority and dig candidates exist only while the game is
-paused. A live clone run of this loop has not happened yet.
+paused. `-ModelLoop` refuses `-EnableLlm`: that older ranker calls the model
+synchronously inside each generation. A live clone run of this loop has not
+happened yet.
 
 ## Verification Ladder
 

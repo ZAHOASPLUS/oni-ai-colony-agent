@@ -3623,6 +3623,10 @@ def main() -> None:
             raise SystemExit("--model-loop needs watch mode; its model call is asynchronous")
         if planned_queue_owner is not None:
             raise SystemExit("--model-loop and the planned owner are mutually exclusive queue owners")
+        if args.enable_llm:
+            # The --enable-llm ranker calls the model synchronously inside the
+            # generation (review M5) and would stall the loop's frames.
+            raise SystemExit("--model-loop and --enable-llm are mutually exclusive; the model loop makes the model call")
         if not 5.0 <= args.model_deadline_seconds <= 600.0:
             raise SystemExit("--model-deadline-seconds must be between 5 and 600")
         model_loop = ModelLoop(

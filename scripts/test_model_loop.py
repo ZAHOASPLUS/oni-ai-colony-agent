@@ -276,6 +276,18 @@ class ModelLoopTests(unittest.TestCase):
         self.assertIsNone(fields["power.battery_count"])  # reader error
         self.assertIsNone(fields["report_counters.previous_closed.oxygen_created.negative_kg"])  # no quality entry
 
+    def test_cli_refuses_the_model_loop_outside_watch_mode_or_with_the_ranker(self):
+        for extra, message in ((["--once"], "needs watch mode"),
+                               (["--enable-llm"], "mutually exclusive")):
+            result = subprocess.run(
+                [sys.executable, "-B", str(ROOT / "bridge" / "oni_bridge.py"), "--bridge-dir",
+                 str(self.bridge / "cli"), "--model-loop", *extra],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(message, result.stderr)
+        self.assertFalse((self.bridge / "cli").exists())
+
     def publish_one(self) -> tuple[ModelLoop, pathlib.Path]:
         loop = self.loop(FakeModel())
         self.tick(loop)
