@@ -61,7 +61,7 @@ from agent.llm_planner import (
     parse_json_content,
     resolve_llm_config,
 )
-from agent.state_quality import canonical_state_hash, safe_get
+from agent.state_quality import canonical_state_hash, field_status, safe_get
 
 
 MODEL_LOOP_SCHEMA = "oni.model-loop.v1"
@@ -130,22 +130,40 @@ def validate_choice_output(
     return {"candidate_id": candidate_id, "reason": display_text(reason, MAX_REASON_CHARS)}, None
 
 
+SUMMARY_FIELDS = (
+    "cycle",
+    "game.paused",
+    "duplicants.total",
+    "duplicants.idle",
+    "duplicants.stressed",
+    "resources.food_kcal",
+    "resources.oxygen_kg_estimate",
+    "resources.water_kg_estimate",
+    "alerts",
+    "research.current",
+    # Oxygen balance from the game's daily report (negative_kg is
+    # consumption) and the power picture, so the model can see a colony
+    # losing air before an alert fires.
+    "report_counters.previous_closed.report_day",
+    "report_counters.previous_closed.oxygen_created.positive_kg",
+    "report_counters.previous_closed.oxygen_created.negative_kg",
+    "report_counters.current.report_day",
+    "report_counters.current.oxygen_created.positive_kg",
+    "report_counters.current.oxygen_created.negative_kg",
+    "power.generator_count",
+    "power.battery_count",
+    "power.active_load_watts",
+    "power.active_rated_generation_watts",
+)
+
+
 def colony_summary(state: Mapping[str, Any]) -> Dict[str, Any]:
     snapshot = dict(state)
+    # Only values the Probe marks observed reach the model: an unsupported,
+    # stale or failed reader shows as null rather than as a number.
     fields = {
-        path: compact_value(safe_get(snapshot, path), depth=0)
-        for path in (
-            "cycle",
-            "game.paused",
-            "duplicants.total",
-            "duplicants.idle",
-            "duplicants.stressed",
-            "resources.food_kcal",
-            "resources.oxygen_kg_estimate",
-            "resources.water_kg_estimate",
-            "alerts",
-            "research.current",
-        )
+        path: compact_value(safe_get(snapshot, path), depth=0) if field_status(snapshot, path) == "observed" else None
+        for path in SUMMARY_FIELDS
     }
     by_instance = safe_get(snapshot, "duplicants.by_instance_id")
     duplicants = []
@@ -194,6 +212,7 @@ def build_choice_payload(
             "Choose wait when no candidate helps the goal right now.",
             "A chosen action still needs local human approval and is verified against the game.",
             "recent_outcomes lists earlier choices and whether the game confirmed their effect.",
+            "colony.fields holds only values the game observed; null means not observed.",
         ],
     }
 

@@ -34,7 +34,7 @@ from agent.field_contracts import (  # noqa: E402
     contract_quality_fixture,
 )
 from agent.llm_planner import ModelRequestError  # noqa: E402
-from agent.model_loop import CHOICE_SCHEMA, ModelLoop  # noqa: E402
+from agent.model_loop import CHOICE_SCHEMA, ModelLoop, colony_summary  # noqa: E402
 from bridge import oni_bridge  # noqa: E402
 from scripts import commit_command_approval  # noqa: E402
 from scripts import verify_bridge_reliability as fixtures  # noqa: E402
@@ -253,6 +253,28 @@ class ModelLoopTests(unittest.TestCase):
         [outcome] = payload["recent_outcomes"]
         self.assertEqual((outcome["stage"], outcome["detail"]), ("rejected", "expired_before_approval"))
         self.assertFalse(outcome["effect_confirmed"])
+
+    def test_prompt_carries_only_observed_balance_fields(self):
+        # The oxygen report counters and power reach the model only when the
+        # Probe marks them observed (review 2026-09-26: the prompt had no
+        # resource balance at all).
+        state = self.snapshot()
+        state["report_counters"] = {
+            "current": {"report_day": 6, "oxygen_created": {"positive_kg": 25.5, "negative_kg": -127.0}},
+            "previous_closed": {"report_day": 5, "oxygen_created": {"positive_kg": 48.5, "negative_kg": -210.25}},
+        }
+        state["power"] = {"generator_count": 1, "battery_count": 3, "active_load_watts": 0,
+                          "active_rated_generation_watts": 0}
+        for path in ("report_counters.current.report_day", "report_counters.current.oxygen_created.positive_kg",
+                     "report_counters.current.oxygen_created.negative_kg", "power.generator_count"):
+            state["quality"][path] = {"status": "observed", "source": "fixture"}
+        state["quality"]["power.battery_count"] = {"status": "error", "source": "fixture"}
+        fields = colony_summary(state)["fields"]
+        self.assertEqual(fields["report_counters.current.oxygen_created.negative_kg"], -127.0)
+        self.assertEqual(fields["report_counters.current.report_day"], 6)
+        self.assertEqual(fields["power.generator_count"], 1)
+        self.assertIsNone(fields["power.battery_count"])  # reader error
+        self.assertIsNone(fields["report_counters.previous_closed.oxygen_created.negative_kg"])  # no quality entry
 
     def publish_one(self) -> tuple[ModelLoop, pathlib.Path]:
         loop = self.loop(FakeModel())
