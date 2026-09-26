@@ -9,6 +9,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Retired (code review 2026-09-26, finding S4): the destination check only
+# requires a parent under save_files/cloud_save_files, so a baseline could
+# overwrite any original save, and the backup lives in a Bridge directory that
+# other tools move or delete. Use scripts/restore-named-test-clone.ps1.
+throw "restore-test-save.ps1 is retired: it can overwrite original saves. Use restore-named-test-clone.ps1 with a verified named-clone manifest."
+
 if (-not $ConfirmRestore) {
     throw "Restore is disabled by default. Re-run with -ConfirmRestore after checking the destination test save."
 }

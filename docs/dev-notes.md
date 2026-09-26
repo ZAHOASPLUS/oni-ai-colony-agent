@@ -106,8 +106,9 @@ build artifacts, and installed artifact.
 
 ## Test Save
 
-`prepare-test-save.ps1` and `restore-test-save.ps1` remain available for legacy
-baseline recovery. Final V2.7 acceptance does not restore that baseline between
+`prepare-test-save.ps1` and `restore-test-save.ps1` are retired and refuse to
+run: their destination check could overwrite an original save (code review
+2026-09-26). Final V2.7 acceptance does not restore that baseline between
 scenarios. First capture the pre-boundary, create the exact named loader clone,
 and run the environment `prepare --apply` below so the original configs, Probe,
 and Bridge are frozen. Then complete the separately authorized runtime bootstrap

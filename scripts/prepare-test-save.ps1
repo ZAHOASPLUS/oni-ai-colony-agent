@@ -6,6 +6,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Retired together with restore-test-save.ps1 (code review 2026-09-26,
+# finding S4). It picks the most recently written .sav by default, which can be
+# a test clone's autosave, and stores the baseline inside the Bridge directory.
+throw "prepare-test-save.ps1 is retired. Use create-named-test-clone.ps1 to make a verified named test clone."
+
 $saveRoots = @(
     (Join-Path $HOME "Documents\Klei\OxygenNotIncluded\save_files"),
     (Join-Path $HOME "Documents\Klei\OxygenNotIncluded\cloud_save_files")

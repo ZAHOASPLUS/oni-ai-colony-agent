@@ -1,3 +1,4 @@
+raise SystemExit("ARCHIVED one-off script from the 2026-09-13 live runs. It deletes or overwrites live Bridge/Probe/config files with relative paths and no verification. Do not run it; see archive/tmp-scripts-20260913/README.md.")
 from pathlib import Path
 import shutil
 oni=Path(r'C:/Users/user/Documents/Klei/OxygenNotIncluded');b=oni/'ai-bridge';state=b/'state.jsonl';
