@@ -18,6 +18,12 @@ namespace OniAiProbeMod.Commands
     {
         private const float PollIntervalSeconds = 2f;
         private const float VerificationPollSeconds = 0.25f;
+        // Code review 2026-09-26 (P2): the Bridge-confirmation witness was read
+        // every frame, and a read failure re-latched, re-paused and re-logged
+        // every frame.  Poll it on a cadence, tolerate a bounded run of
+        // transient sharing violations, and resolve a failure exactly once.
+        private const float WitnessPollSeconds = 0.5f;
+        private const int MaxTransientWitnessFailures = 10;
         private const float VerificationTimeoutSeconds = 5f;
         private const int CommandClockSkewSeconds = 5;
         private const int MaxCommandIdLength = 80;
@@ -72,6 +78,8 @@ namespace OniAiProbeMod.Commands
         private static bool latchFromFailedRecordsOnly;
         private static string failedLatchSignature;
         private static string pendingWitnessId;
+        private static float nextWitnessPollAt;
+        private static int transientWitnessFailures;
 
         internal static void BeginSession()
         {
@@ -82,6 +90,8 @@ namespace OniAiProbeMod.Commands
             latchFromFailedRecordsOnly = false;
             failedLatchSignature = null;
             pendingWitnessId = null;
+            nextWitnessPollAt = 0f;
+            transientWitnessFailures = 0;
             nextPollAt = 0f;
             sessionStarted = true;
             QuarantineStartupCommands();
@@ -169,7 +179,7 @@ namespace OniAiProbeMod.Commands
             }
 
             VerifyPendingCommands(now);
-            PollWitnessConfirmation();
+            PollWitnessConfirmation(now);
             if (now < nextPollAt)
             {
                 return;
@@ -2514,12 +2524,18 @@ namespace OniAiProbeMod.Commands
             }
         }
 
-        private static void PollWitnessConfirmation()
+        private static void PollWitnessConfirmation(float now)
         {
             if (string.IsNullOrEmpty(pendingWitnessId))
             {
+                transientWitnessFailures = 0;
                 return;
             }
+            if (now < nextWitnessPollAt)
+            {
+                return;
+            }
+            nextWitnessPollAt = now + WitnessPollSeconds;
 
             try
             {
@@ -2563,6 +2579,7 @@ namespace OniAiProbeMod.Commands
                         Path.GetFileNameWithoutExtension(path),
                         pendingWitnessId,
                         StringComparison.Ordinal));
+                transientWitnessFailures = 0;
                 if (!confirmingExists)
                 {
                     SetSessionLatch();
@@ -2579,9 +2596,27 @@ namespace OniAiProbeMod.Commands
             }
             catch (Exception ex)
             {
+                // A reader such as a copy tool or the Bridge can hold the file
+                // briefly; retry on the next polls before calling it unknown.
+                if ((ex is IOException || ex is UnauthorizedAccessException) &&
+                    ++transientWitnessFailures <= MaxTransientWitnessFailures)
+                {
+                    return;
+                }
+
                 SetSessionLatch();
                 PauseForUnknownOutcome();
                 ProbeWriter.WriteError("command_witness_poll", ex);
+                ProbeWriter.WriteEvent("command_safety_latched", new Dictionary<string, object>
+                {
+                    { "command_id", pendingWitnessId },
+                    { "classification", "outcome_unknown" },
+                    { "reason", "The Bridge terminal confirmation could not be read." }
+                });
+                // Resolved once: the latch now blocks mutations, so the witness
+                // must not re-pause and re-log every poll.
+                pendingWitnessId = null;
+                transientWitnessFailures = 0;
             }
         }
 
