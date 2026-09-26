@@ -862,6 +862,22 @@ def _path_native_value_blockers(path: Optional[str], value: Any) -> list[str]:
     return ["field_type_mismatch"]
 
 
+def _finite_float(value: Any) -> Optional[float]:
+    """Return a JSON number as a finite float, or None for anything else.
+
+    A JSON integer beyond binary64 (e.g. ``10**400``) raises OverflowError in
+    ``float``; a validator must report it as a blocker, not raise.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _blueprint_material_lineage_blockers(value: Any) -> list[str]:
     if not isinstance(value, list):
         return ["blueprint_material_lineage_type_mismatch"]
@@ -881,17 +897,15 @@ def _blueprint_material_lineage_blockers(value: Any) -> list[str]:
         else:
             seen_tags.add(tag)
         required = item.get("required_mass_kg")
-        if isinstance(required, bool) or not isinstance(required, (int, float)) or not math.isfinite(float(required)) or required < 0:
+        required_number = _finite_float(required)
+        if required_number is None or required_number < 0:
             blockers.append("blueprint_material_lineage_required_invalid")
         delivered = item.get("delivered_mass_kg")
         remaining = item.get("remaining_mass_kg")
+        masses: Dict[str, Optional[float]] = {}
         for name, number in (("delivered", delivered), ("remaining", remaining)):
-            if number is not None and (
-                isinstance(number, bool)
-                or not isinstance(number, (int, float))
-                or not math.isfinite(float(number))
-                or number < 0
-            ):
+            masses[name] = _finite_float(number)
+            if number is not None and (masses[name] is None or masses[name] < 0):
                 blockers.append(f"blueprint_material_lineage_{name}_invalid")
         status = item.get("delivery_status")
         if status not in _BLUEPRINT_MATERIAL_LINEAGE_STATUSES:
@@ -901,10 +915,13 @@ def _blueprint_material_lineage_blockers(value: Any) -> list[str]:
                 blockers.append("blueprint_material_lineage_unknown_has_mass")
         elif delivered is None or remaining is None:
             blockers.append("blueprint_material_lineage_observed_mass_missing")
+        elif required_number is None or masses["delivered"] is None or masses["remaining"] is None:
+            # Already reported as invalid above; there is nothing to compare.
+            pass
         else:
-            required_value = float(required)
-            delivered_value = float(delivered)
-            remaining_value = float(remaining)
+            required_value = required_number
+            delivered_value = masses["delivered"]
+            remaining_value = masses["remaining"]
             if delivered_value > required_value + 0.0001:
                 blockers.append("blueprint_material_lineage_delivered_exceeds_required")
             if remaining_value > required_value + 0.0001:
@@ -2126,7 +2143,7 @@ def _functional_building_utility_contents_payload_blockers(value: Any) -> list[s
             if d is True and cell is None: b.append("functional_building_utility_contents_declared_cell_missing")
             for key in ("mass","temperature"):
                 z=s.get(key)
-                if z is not None and (isinstance(z,bool) or not isinstance(z,(int,float)) or not math.isfinite(float(z)) or (key=="mass" and z<0)): b.append("functional_building_utility_contents_numeric_invalid")
+                if z is not None and (_finite_float(z) is None or (key=="mass" and z<0)): b.append("functional_building_utility_contents_numeric_invalid")
             dc=s.get("disease_count")
             if dc is not None and (isinstance(dc,bool) or not isinstance(dc,int) or dc<0): b.append("functional_building_utility_contents_disease_invalid")
             sp=s.get("solid_present")
