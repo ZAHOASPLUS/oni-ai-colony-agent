@@ -109,6 +109,8 @@ RUNTIME_DYNAMIC_BRIDGE_ROOT_FILES = frozenset(
         "advice.json",
         "advice.md",
         "colony-plan.json",
+        # Written by every Bridge generation (agent.control_packet).
+        "control-packet.json",
         "decision-frame.json",
         "evidence-continuity.json",
         "health.json",
@@ -116,6 +118,9 @@ RUNTIME_DYNAMIC_BRIDGE_ROOT_FILES = frozenset(
         "latest_state.json",
         "llm-health.json",
         "llm-state.json",
+        # Written only by bridge --model-loop (agent.model_loop).
+        "model-loop.json",
+        "model-loop-state.json",
         "plan.json",
         "state.jsonl",
         "state_summary.md",
