@@ -2575,8 +2575,16 @@ def validate_clone_inputs(
         raise WorkflowError("source and loader must use the exact .sav extension")
     source_root = save_root_for(source_save, roots.oni_root)
     loader_root = save_root_for(loader_save, roots.oni_root)
-    if not same_path(source_root, loader_root) or source_save.parent != loader_save.parent:
-        raise WorkflowError("source and loader must be siblings in one save root")
+    # Review P0-1: the loader clone lives in its own colony folder, named by
+    # its stem, beside the source colony folder.  In the source folder ONI's
+    # autosave rotation deletes the user's same-GUID autosaves.
+    if (
+        not same_path(source_root, loader_root)
+        or paths_overlap(source_save.parent, loader_save.parent)
+        or not same_path(source_save.parent.parent, loader_save.parent.parent)
+        or loader_save.parent.name != loader_stem
+    ):
+        raise WorkflowError("loader must sit in its own colony folder beside the source colony")
     if source_save == loader_save or loader_save.stem != loader_stem:
         raise WorkflowError("loader save identity does not match its declared stem")
     source_preview = source_save.with_suffix(".png")
@@ -2616,6 +2624,15 @@ def validate_clone_inputs(
         ):
             raise WorkflowError(f"clone manifest {label} no longer matches")
     if (
+        target.get("isolation") != "own_colony_folder"
+        or source.get("colony_directory_path_id") != path_id(source_save.parent, contract="lower")
+        or source.get("redirect_colony_directory_path_id")
+        in {None, path_id(loader_save.parent, contract="lower")}
+        or target.get("save_base_path_id") != path_id(loader_save.parent.parent, contract="lower")
+        or (source.get("header") or {}).get("is_auto_save") is not False
+    ):
+        raise WorkflowError("clone manifest does not describe an isolated non-autosave clone")
+    if (
         clone.get("target_stem_id") != text_id(loader_stem)
         or target.get("directory_path_id") != path_id(loader_save.parent, contract="lower")
         or target.get("save_path_id") != path_id(loader_save, contract="lower")
@@ -2636,6 +2653,12 @@ def validate_clone_inputs(
     }
     if path_id(loader_save, contract="lower") in pre_save_ids or path_id(loader_preview, contract="lower") in pre_save_ids:
         raise WorkflowError("loader pair already existed in the pre-boundary report")
+    loader_folder_id = path_id(loader_save.parent, contract="lower")
+    if any(
+        isinstance(item, dict) and item.get("parent_path_id") == loader_folder_id
+        for item in (pre.get("saves") or {}).get("entries", [])
+    ):
+        raise WorkflowError("loader colony folder already held saves in the pre-boundary report")
     return pre, clone
 
 

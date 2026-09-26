@@ -3750,13 +3750,21 @@ def validate_environment(
         raise ConfigError("source and loader must use the exact .sav extension")
     source_root = save_root_for(source, roots.oni_root)
     loader_root = save_root_for(loader, roots.oni_root)
+    # Review P0-1: the loader clone has its own colony folder, named by its
+    # stem, beside the source colony; ONI's autosave rotation in the source
+    # folder would delete the user's same-GUID autosaves.
+    clone_target = clone.get("target") if isinstance(clone.get("target"), dict) else {}
     if (
         not same_path(source_root, loader_root)
-        or not same_path(source.parent, loader.parent)
+        or paths_overlap(source.parent, loader.parent)
+        or not same_path(source.parent.parent, loader.parent.parent)
+        or loader.parent.name != args.loader_stem
         or same_path(source, loader)
         or loader.stem != args.loader_stem
+        or clone_target.get("isolation") != "own_colony_folder"
+        or clone_target.get("directory_path_id") != path_id(loader.parent, contract="lower")
     ):
-        raise ConfigError("source/loader are not the exact sibling named-clone pair")
+        raise ConfigError("source/loader are not a named clone in its own colony folder")
     source_preview = source.with_suffix(".png")
     loader_preview = loader.with_suffix(".png")
     for item in (source, source_preview, loader, loader_preview):

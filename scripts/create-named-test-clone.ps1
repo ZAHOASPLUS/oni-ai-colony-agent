@@ -146,6 +146,69 @@ function Get-StableFileState([string]$LiteralPath) {
     }
 }
 
+function Get-SaveHeader([string]$LiteralPath) {
+    # Mirrors SaveGame.GetHeader / SaveLoader.LoadHeader in _audit_full:
+    # little-endian uint32 buildVersion, int32 headerSize, uint32
+    # headerVersion, int32 compression when headerVersion >= 1, then
+    # headerSize bytes of UTF-8 GameInfo JSON.
+    $stream = [IO.File]::Open($LiteralPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $reader = New-Object IO.BinaryReader($stream)
+        if ($stream.Length -lt 12) {
+            throw 'Source save header is truncated.'
+        }
+        $buildVersion = $reader.ReadUInt32()
+        $headerSize = $reader.ReadInt32()
+        $headerVersion = $reader.ReadUInt32()
+        $offset = 12
+        if ($headerVersion -ge 1) {
+            if ($stream.Length -lt 16) {
+                throw 'Source save header is truncated.'
+            }
+            [void]$reader.ReadInt32()
+            $offset = 16
+        }
+        if ($headerSize -le 0 -or $headerSize -gt 1048576 -or ($offset + [long]$headerSize) -gt $stream.Length) {
+            throw 'Source save header size is invalid.'
+        }
+        $headerBytes = $reader.ReadBytes($headerSize)
+    } finally {
+        $stream.Dispose()
+    }
+    try {
+        $text = (New-Object Text.UTF8Encoding($false, $true)).GetString($headerBytes)
+        $info = $text | ConvertFrom-Json
+    } catch {
+        throw 'Source save header is not GameInfo JSON.'
+    }
+    if ($null -eq $info -or $info -isnot [Management.Automation.PSCustomObject]) {
+        throw 'Source save header is not GameInfo JSON.'
+    }
+    $fields = @{}
+    foreach ($name in @('isAutoSave', 'baseName')) {
+        # Newtonsoft binds GameInfo members case-insensitively, so any second
+        # spelling (raw or decoded) makes the flag ambiguous.
+        $raw = [regex]::Matches($text, '"(?i:' + $name + ')"\s*:').Count
+        $decoded = @($info.PSObject.Properties | Where-Object { $_.Name -ieq $name })
+        if ($raw -ne 1 -or $decoded.Count -ne 1) {
+            throw "Source save header $name field is missing or ambiguous."
+        }
+        $fields[$name] = $decoded[0].Value
+    }
+    if ($fields['isAutoSave'] -isnot [bool]) {
+        throw 'Source save header isAutoSave flag is invalid.'
+    }
+    if ($fields['baseName'] -isnot [string] -or [string]::IsNullOrEmpty($fields['baseName'])) {
+        throw 'Source save header baseName is invalid.'
+    }
+    return [ordered]@{
+        build_version = [long]$buildVersion
+        header_version = [long]$headerVersion
+        is_auto_save = [bool]$fields['isAutoSave']
+        base_name = [string]$fields['baseName']
+    }
+}
+
 function Test-FileStateMatches([string]$LiteralPath, [object]$Expected) {
     if (-not (Test-Path -LiteralPath $LiteralPath -PathType Leaf)) {
         return $false
@@ -293,16 +356,49 @@ if (-not (Test-Path -LiteralPath $sourcePreview -PathType Leaf)) {
     throw 'Source save does not have a paired .png preview.'
 }
 Assert-NoReparsePath $sourcePreview $allowedRoot
-$targetSave = Get-NormalizedFullPath (Join-Path $sourceDirectory ($TargetStem + '.sav'))
-$targetPreview = Get-NormalizedFullPath (Join-Path $sourceDirectory ($TargetStem + '.png'))
-foreach ($target in @($targetSave, $targetPreview)) {
-    if (-not (Test-StrictDescendant $target $sourceDirectory)) {
-        throw 'Resolved test-clone target escaped the source save directory.'
-    }
-    if (Test-Path -LiteralPath $target) {
-        throw 'A requested test-clone target already exists.'
-    }
+
+# Review P0-1.  ONI's autosave rotation (SaveLoader.Save) keeps only the 10
+# newest saves with this colony's GUID in "<active save dir>\auto_save" and
+# File.Deletes the rest.  A byte-copied clone keeps the GUID, so a clone in
+# the source colony folder deletes the user's autosaves.  Loading an autosave
+# (header isAutoSave + originalSaveName) also points the active save back at
+# "<save root>\<baseName>\<originalSaveName>" (SaveLoader.Load), i.e. the
+# source colony folder.  So: never clone an autosave, and put every clone in
+# its own new colony folder beside the source colony.
+$sourceRelative = (Get-NormalizedFullPath $resolvedSource).Substring((Get-NormalizedFullPath $allowedRoot).Length + 1)
+if (@($sourceRelative -split '[\\/]' | Where-Object { $_ -ieq 'auto_save' }).Count -ne 0) {
+    throw 'Refusing to clone an autosave: the source lies in an auto_save folder.'
 }
+$sourceHeader = Get-SaveHeader $resolvedSource
+if ($sourceHeader.is_auto_save) {
+    throw 'Refusing to clone an autosave: the source save header has isAutoSave set.'
+}
+$saveBase = [IO.Path]::GetDirectoryName($sourceDirectory)
+$saveBaseParent = [IO.Path]::GetDirectoryName($saveBase)
+$isLocalLayout = Test-SamePath $saveBase $allowedRoot
+$isCloudLayout = ([IO.Path]::GetFileName($allowedRoot) -ieq 'cloud_save_files') -and (Test-SamePath $saveBaseParent $allowedRoot)
+if (-not ($isLocalLayout -or $isCloudLayout)) {
+    throw 'Source save must sit directly in a colony folder (save_files\<colony> or cloud_save_files\<user>\<colony>).'
+}
+Assert-NoReparsePath $saveBase $allowedRoot
+$cloneDirectory = Get-NormalizedFullPath (Join-Path $saveBase $TargetStem)
+try {
+    $redirectDirectory = Get-NormalizedFullPath (Join-Path $saveBase $sourceHeader.base_name)
+} catch {
+    throw 'Source save header baseName is not a usable folder name.'
+}
+if (-not (Test-StrictDescendant $cloneDirectory $saveBase) -or
+    -not (Test-SamePath ([IO.Path]::GetDirectoryName($cloneDirectory)) $saveBase)) {
+    throw 'Resolved test-clone colony folder escaped the save root.'
+}
+if ((Test-PathsOverlap $cloneDirectory $sourceDirectory) -or (Test-PathsOverlap $cloneDirectory $redirectDirectory)) {
+    throw 'The test-clone colony folder must differ from the source colony folder and its autosave redirect folder.'
+}
+if (Test-Path -LiteralPath $cloneDirectory) {
+    throw 'The test-clone colony folder already exists; every clone needs a new, empty colony folder.'
+}
+$targetSave = Get-NormalizedFullPath (Join-Path $cloneDirectory ($TargetStem + '.sav'))
+$targetPreview = Get-NormalizedFullPath (Join-Path $cloneDirectory ($TargetStem + '.png'))
 
 if ([string]::IsNullOrWhiteSpace($ReportRoot)) {
     $ReportRoot = if ($testMode) {
@@ -349,9 +445,21 @@ $manifest = [ordered]@{
     source = [ordered]@{
         save = $sourceSaveState
         preview = $sourcePreviewState
+        # Folders a launch must stay out of: the source colony folder and the
+        # "<save root>\<baseName>" folder an autosave load would redirect to.
+        colony_directory_path_id = Get-PathId $sourceDirectory
+        redirect_colony_directory_path_id = Get-PathId $redirectDirectory
+        header = [ordered]@{
+            is_auto_save = $false
+            build_version = $sourceHeader.build_version
+            header_version = $sourceHeader.header_version
+            base_name_id = Get-TextId $sourceHeader.base_name
+        }
     }
     target = [ordered]@{
-        directory_path_id = Get-PathId $sourceDirectory
+        isolation = 'own_colony_folder'
+        save_base_path_id = Get-PathId $saveBase
+        directory_path_id = Get-PathId $cloneDirectory
         save_path_id = Get-PathId $targetSave
         preview_path_id = Get-PathId $targetPreview
         save_sha256 = $null
@@ -361,17 +469,29 @@ $manifest = [ordered]@{
 
 if ($PSCmdlet.ShouldProcess($targetSave, 'Create an atomic named ONI test-save clone, paired preview, and immutable manifest')) {
     $token = [Guid]::NewGuid().ToString('N')
-    $temporarySave = Join-Path $sourceDirectory ('.clone-save-{0}.tmp' -f $token)
-    $temporaryPreview = Join-Path $sourceDirectory ('.clone-preview-{0}.tmp' -f $token)
+    $temporarySave = Join-Path $cloneDirectory ('.clone-save-{0}.tmp' -f $token)
+    $temporaryPreview = Join-Path $cloneDirectory ('.clone-preview-{0}.tmp' -f $token)
     $temporaryManifest = ''
     $saveCommitted = $false
     $previewCommitted = $false
+    $cloneDirectoryCreated = $false
     try {
+        # New-Item without -Force fails if the folder appeared concurrently.
+        New-Item -ItemType Directory -Path $cloneDirectory -ErrorAction Stop | Out-Null
+        $cloneDirectoryCreated = $true
+        Assert-NoReparsePath $cloneDirectory $allowedRoot
+        if (@(Get-ChildItem -LiteralPath $cloneDirectory -Force).Count -ne 0) {
+            throw 'The new test-clone colony folder is not empty.'
+        }
         [IO.File]::Copy($resolvedSource, $temporarySave, $false)
         [IO.File]::Copy($sourcePreview, $temporaryPreview, $false)
         if ((Get-Sha256 $temporarySave) -cne $sourceSaveState.sha256 -or
             (Get-Sha256 $temporaryPreview) -cne $sourcePreviewState.sha256) {
             throw 'Staged clone copies failed hash verification.'
+        }
+        # Re-read the header from the hash-verified bytes that become the clone.
+        if ((Get-SaveHeader $temporarySave).is_auto_save) {
+            throw 'Refusing to clone an autosave: the staged header has isAutoSave set.'
         }
         if (-not (Test-FileStateMatches $resolvedSource $sourceSaveState) -or
             -not (Test-FileStateMatches $sourcePreview $sourcePreviewState)) {
@@ -443,6 +563,11 @@ if ($PSCmdlet.ShouldProcess($targetSave, 'Create an atomic named ONI test-save c
             if (-not [string]::IsNullOrWhiteSpace($temporary) -and (Test-Path -LiteralPath $temporary -PathType Leaf)) {
                 Remove-Item -LiteralPath $temporary -Force
             }
+        }
+        if (-not $created -and $cloneDirectoryCreated -and
+            (Test-Path -LiteralPath $cloneDirectory -PathType Container) -and
+            @(Get-ChildItem -LiteralPath $cloneDirectory -Force).Count -eq 0) {
+            Remove-Item -LiteralPath $cloneDirectory -Force
         }
     }
 }

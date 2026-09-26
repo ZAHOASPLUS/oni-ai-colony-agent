@@ -306,6 +306,13 @@ def make_bridge(root: pathlib.Path, *, stamp: int, old: bool) -> None:
         write_bytes(root / "old-runtime-marker.txt", b"immutable-old-bridge\n", stamp=stamp + 100)
 
 
+def oni_save_bytes(body: bytes) -> bytes:
+    """Bytes with ONI's save header layout (SaveGame.GetHeader), non-autosave."""
+    header = json.dumps({"baseName": "Fixture Base", "isAutoSave": False}).encode("utf-8")
+    fields = (744825, len(header), 1, 1)  # buildVersion, headerSize, headerVersion, compression
+    return b"".join(value.to_bytes(4, "little") for value in fields) + header + body
+
+
 def make_fixture(
     base: pathlib.Path,
     name: str,
@@ -324,7 +331,7 @@ def make_fixture(
     source = save_dir / "Original.sav"
     source_preview = save_dir / "Original.png"
     stamp = 1_725_000_000_123_456_700
-    write_bytes(source, b"immutable-source-save-v1\x00", stamp=stamp)
+    write_bytes(source, oni_save_bytes(b"immutable-source-save-v1\x00"), stamp=stamp)
     write_bytes(source_preview, b"immutable-source-preview-v1\x89PNG", stamp=stamp + 100)
     extra_save = save_dir / "ExistingSecondary.sav"
     extra_preview = save_dir / "ExistingSecondary.png"
@@ -487,13 +494,14 @@ def create_loader_clone(fixture: dict[str, pathlib.Path | str]) -> None:
 def fixture_paths(fixture: dict[str, pathlib.Path | str]) -> dict[str, pathlib.Path]:
     run_id = str(fixture["run_id"])
     loader_stem = str(fixture["loader_stem"])
-    save_dir = pathlib.Path(fixture["save_dir"])
+    # The loader clone has its own colony folder beside the source colony.
+    loader_dir = pathlib.Path(fixture["save_dir"]).parent / loader_stem
     evidence = pathlib.Path(fixture["evidence"])
     return {
         "pre": pathlib.Path(fixture["boundaries"]) / run_id / "pre-boundary.json",
         "clone": pathlib.Path(fixture["runtime"]) / run_id / "test-clone-manifest.json",
-        "loader": save_dir / f"{loader_stem}.sav",
-        "loader_preview": save_dir / f"{loader_stem}.png",
+        "loader": loader_dir / f"{loader_stem}.sav",
+        "loader_preview": loader_dir / f"{loader_stem}.png",
         "environment": evidence / run_id / "environment",
         "manifest": evidence / run_id / "environment" / "environment-manifest.json",
     }
@@ -1206,7 +1214,8 @@ def simulate_runtime(
     write_bytes(paths["loader"], b"mutated-loader-save")
     write_bytes(paths["loader_preview"], b"mutated-loader-preview")
 
-    derivative = pathlib.Path(fixture["save_dir"]) / f"{run_id}-lineage.sav"
+    # ONI saves the lineage checkpoint beside the active (loader) save.
+    derivative = paths["loader"].parent / f"{run_id}-lineage.sav"
     derivative_preview = derivative.with_suffix(".png")
     write_bytes(derivative, f"lineage-final-save:{run_id}".encode("utf-8"))
     write_bytes(derivative_preview, b"lineage-final-preview")
@@ -2625,6 +2634,54 @@ def test_finalize_archive_absent_and_max_path(base: pathlib.Path) -> dict[str, A
         "environment_legacy_limit": workflow.MAX_LEGACY_PATH_UTF16_UNITS,
         "temporary_artifact_count": 0,
     }
+
+
+def test_loader_colony_isolation_refusals(base: pathlib.Path) -> dict[str, Any]:
+    """Review P0-1: prepare accepts only a loader clone in its own colony folder."""
+    results: dict[str, str] = {}
+    fixture = make_fixture(base, "isolation-sibling", run_id="g0-isolation-sibling")
+    paths = fixture_paths(fixture)
+    sibling = pathlib.Path(fixture["save_dir"]) / paths["loader"].name
+    shutil.copy2(paths["loader"], sibling)
+    shutil.copy2(paths["loader_preview"], sibling.with_suffix(".png"))
+    blocked = json.loads(
+        core(fixture, "prepare", "--loader-save", str(sibling), what_if=True, expected={2}).stdout
+    )
+    assert_true("own colony folder" in str(blocked.get("error")), "loader in the source colony folder was not refused as non-isolated")
+    results["loader_in_source_colony_folder"] = "refused"
+
+    legacy = make_fixture(base, "isolation-legacy", run_id="g0-isolation-legacy")
+    clone_path = fixture_paths(legacy)["clone"]
+    clone = json.loads(clone_path.read_text(encoding="utf-8-sig"))
+    del clone["target"]["isolation"]
+    write_json(clone_path, clone)
+    blocked = json.loads(core(legacy, "prepare", what_if=True, expected={2}).stdout)
+    assert_true("isolated non-autosave clone" in str(blocked.get("error")), "legacy clone manifest was not refused as non-isolated")
+    results["manifest_without_isolation"] = "refused"
+
+    occupied = make_fixture(base, "isolation-occupied", run_id="g0-isolation-occupied")
+    occupied_paths = fixture_paths(occupied)
+    # A pre-boundary that already saw saves in the loader folder: the clone
+    # folder was not new when the run started.
+    loader_dir = occupied_paths["loader"].parent
+    stray = loader_dir / "stray.sav"
+    stray.write_bytes(b"stray")
+    stray.with_suffix(".png").write_bytes(b"stray-preview")
+    parked = pathlib.Path(occupied["case"]) / "parked-loader"
+    parked.mkdir()
+    for path in (occupied_paths["loader"], occupied_paths["loader_preview"]):
+        os.replace(path, parked / path.name)
+    occupied_paths["pre"].unlink()
+    capture_pre(occupied)
+    for path in (occupied_paths["loader"], occupied_paths["loader_preview"]):
+        os.replace(parked / path.name, path)
+    blocked = json.loads(core(occupied, "prepare", what_if=True, expected={2}).stdout)
+    assert_true(
+        "loader colony folder already held saves" in str(blocked.get("error")),
+        "pre-boundary with an occupied loader folder was not refused",
+    )
+    results["loader_folder_seen_in_pre_boundary"] = "refused"
+    return results
 
 
 def test_tamper_refusals(base: pathlib.Path) -> dict[str, Any]:
@@ -9362,6 +9419,7 @@ def main() -> int:
         ("success_whatif_recursive_restore_post_compare", test_success_and_whatif),
         ("finalize_archive_absent_near_max_path", test_finalize_archive_absent_and_max_path),
         ("tamper_refusals", test_tamper_refusals),
+        ("loader_colony_isolation_refusals", test_loader_colony_isolation_refusals),
         ("priority_pair_report_bundle_freeze_tamper_refusals", test_priority_evidence_tamper_refusals),
         ("normal_shutdown_evidence_finalizer_refusals", test_shutdown_evidence_finalizer_refusals),
         ("startup_consumption_preflight_custody_refusals", test_startup_consumption_preflight_custody_refusals),

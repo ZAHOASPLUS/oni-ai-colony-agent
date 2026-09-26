@@ -371,8 +371,17 @@ if ([string]$manifest.oni_root_id -cne (Get-PathId $resolvedOniRoot) -or
 Assert-CanonicalHash $manifest.target_stem_id 'target_stem_id'
 Assert-ManifestFileState $manifest.source.save 'source.save'
 Assert-ManifestFileState $manifest.source.preview 'source.preview'
-foreach ($name in @('directory_path_id', 'save_path_id', 'preview_path_id', 'save_sha256', 'preview_sha256')) {
+foreach ($name in @('save_base_path_id', 'directory_path_id', 'save_path_id', 'preview_path_id', 'save_sha256', 'preview_sha256')) {
     Assert-CanonicalHash $manifest.target.$name "target.$name"
+}
+foreach ($name in @('colony_directory_path_id', 'redirect_colony_directory_path_id')) {
+    Assert-CanonicalHash $manifest.source.$name "source.$name"
+}
+# Review P0-1: only clones created in their own colony folder may be
+# restored (and so reused); a manifest from the old same-folder layout is
+# refused.
+if ([string]$manifest.target.isolation -cne 'own_colony_folder') {
+    throw 'Clone manifest does not describe a clone in its own colony folder.'
 }
 if ([string]$manifest.target.save_sha256 -cne [string]$manifest.source.save.sha256 -or
     [string]$manifest.target.preview_sha256 -cne [string]$manifest.source.preview.sha256) {
@@ -392,8 +401,10 @@ foreach ($path in @($resolvedSource, $resolvedTarget)) {
 }
 $sourceDirectory = [IO.Path]::GetDirectoryName($resolvedSource)
 $targetDirectory = [IO.Path]::GetDirectoryName($resolvedTarget)
-if (-not (Test-SamePath $sourceDirectory $targetDirectory)) {
-    throw 'Source and target must be siblings in the same ONI save directory.'
+$saveBase = [IO.Path]::GetDirectoryName($sourceDirectory)
+if ((Test-PathsOverlap $sourceDirectory $targetDirectory) -or
+    -not (Test-SamePath ([IO.Path]::GetDirectoryName($targetDirectory)) $saveBase)) {
+    throw 'The target must sit in its own colony folder beside the source colony folder.'
 }
 $allowedRoot = $null
 foreach ($relativeRoot in @('save_files', 'cloud_save_files')) {
@@ -412,6 +423,7 @@ if ($null -eq $allowedRoot) {
     throw 'Source and target are outside the same allowed ONI save root.'
 }
 Assert-NoReparsePath $sourceDirectory $allowedRoot
+Assert-NoReparsePath $targetDirectory $allowedRoot
 
 $sourcePreview = [IO.Path]::ChangeExtension($resolvedSource, '.png')
 $targetPreview = [IO.Path]::ChangeExtension($resolvedTarget, '.png')
@@ -423,7 +435,11 @@ foreach ($path in @($sourcePreview, $targetPreview)) {
 }
 $targetStem = [IO.Path]::GetFileNameWithoutExtension($resolvedTarget)
 if ((Get-TextId $targetStem) -cne [string]$manifest.target_stem_id -or
-    (Get-PathId $sourceDirectory) -cne [string]$manifest.target.directory_path_id -or
+    (Get-PathId $targetDirectory) -cne [string]$manifest.target.directory_path_id -or
+    (Get-PathId $saveBase) -cne [string]$manifest.target.save_base_path_id -or
+    (Get-PathId $sourceDirectory) -cne [string]$manifest.source.colony_directory_path_id -or
+    (Get-PathId $targetDirectory) -ceq [string]$manifest.source.redirect_colony_directory_path_id -or
+    [IO.Path]::GetFileName($targetDirectory) -cne $targetStem -or
     (Get-PathId $resolvedSource) -cne [string]$manifest.source.save.path_id -or
     (Get-PathId $sourcePreview) -cne [string]$manifest.source.preview.path_id -or
     (Get-PathId $resolvedTarget) -cne [string]$manifest.target.save_path_id -or
