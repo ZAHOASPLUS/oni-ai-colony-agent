@@ -67,6 +67,16 @@ def _load_manifest(path: pathlib.Path) -> Dict[str, Any]:
     return value
 
 
+def _target_path_id(target: Mapping[str, Any], name: str) -> str:
+    # scripts/create-named-test-clone.ps1 writes target.save_path_id /
+    # preview_path_id; older fixtures nest target.save.path_id.
+    value = target.get(f"{name}_path_id")
+    nested = target.get(name)
+    if value is None and isinstance(nested, Mapping):
+        value = nested.get("path_id")
+    return str(value or "")
+
+
 def validate_clone_launch(
     manifest_path: pathlib.Path,
     clone_save: pathlib.Path,
@@ -91,6 +101,11 @@ def validate_clone_launch(
     expected_preview = str(target.get("preview_sha256") or "")
     if _sha256(save) != expected_save or _sha256(preview) != expected_preview:
         raise CloneLaunchGuardError("The clone content does not match its manifest.")
+    # A fresh clone is byte-identical to its source, so content alone would
+    # admit any other copy of the original save (a backup, the cloud copy).
+    # Only the exact files the manifest created may launch (review M9).
+    if _path_id(save) != _target_path_id(target, "save") or _path_id(preview) != _target_path_id(target, "preview"):
+        raise CloneLaunchGuardError("The selected files are not the clone this manifest created.")
     if _path_id(save) == str(source.get("save", {}).get("path_id") or ""):
         raise CloneLaunchGuardError("The selected clone save resolves to the source save path.")
     if _path_id(preview) == str(source.get("preview", {}).get("path_id") or ""):

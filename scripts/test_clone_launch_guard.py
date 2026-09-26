@@ -50,7 +50,10 @@ class CloneLaunchGuardTests(unittest.TestCase):
         payload = {
             "schema": "oni.named-test-clone.v1", "created": True,
             "source": {"save": {"path_id": path_id(source_save)}, "preview": {"path_id": path_id(source_preview)}},
-            "target": {"save_sha256": digest(self.save), "preview_sha256": digest(self.preview)},
+            "target": {
+                "save_sha256": digest(self.save), "preview_sha256": digest(self.preview),
+                "save_path_id": path_id(self.save), "preview_path_id": path_id(self.preview),
+            },
         }
         self.manifest.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -88,6 +91,27 @@ class CloneLaunchGuardTests(unittest.TestCase):
     def test_source_path_collision_is_rejected_even_when_content_matches(self) -> None:
         payload = json.loads(self.manifest.read_text(encoding="utf-8"))
         payload["source"]["save"]["path_id"] = path_id(self.save)
+        self.manifest.write_text(json.dumps(payload), encoding="utf-8")
+        with self.assertRaises(CloneLaunchGuardError):
+            self.call()
+
+    def test_same_content_copy_elsewhere_is_rejected(self) -> None:
+        # A fresh clone equals its source byte for byte; any other copy of the
+        # original save must not pass as the clone (review 2026-09-26, M9).
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        copy_save, copy_preview = elsewhere / "named-clone.sav", elsewhere / "named-clone.png"
+        copy_save.write_bytes(self.save.read_bytes())
+        copy_preview.write_bytes(self.preview.read_bytes())
+        with self.assertRaises(CloneLaunchGuardError):
+            validate_clone_launch(
+                self.manifest, copy_save, copy_preview, bridge_dir=self.root / "bridge",
+                process_names=(), process_probe=lambda: {}, queue_counts={},
+            )
+
+    def test_manifest_without_target_paths_is_rejected(self) -> None:
+        payload = json.loads(self.manifest.read_text(encoding="utf-8"))
+        del payload["target"]["save_path_id"], payload["target"]["preview_path_id"]
         self.manifest.write_text(json.dumps(payload), encoding="utf-8")
         with self.assertRaises(CloneLaunchGuardError):
             self.call()
