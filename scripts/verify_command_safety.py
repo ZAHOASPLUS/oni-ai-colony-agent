@@ -1061,7 +1061,7 @@ def case_executor_static_contract(root: pathlib.Path) -> Dict[str, Any]:
         and "PendingRecords.Enqueue(record)" in writer_source
         and "PrepareRecordForWrite(record)" in writer_source
         and "TryValidateJsonValue(record" in writer_source
-        and "JsonLineWriter.Write(writer, recordToWrite)" in writer_source,
+        and "JsonLineWriter.Write(line, recordToWrite)" in writer_source,
         "snapshot preflight/serialization is not delegated to the writer thread",
     )
     require(
