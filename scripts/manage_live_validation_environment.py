@@ -2275,15 +2275,22 @@ def command_pipeline_gate(
             if isinstance(readiness.get("mutation_confirmation"), Mapping)
             else {}
         )
+        context = (
+            pipeline.get("evaluation_context")
+            if isinstance(pipeline.get("evaluation_context"), Mapping)
+            else {}
+        )
         if (
             set(pipeline)
             != {
                 "schema",
+                "evaluation_context",
                 "ready",
                 "blockers",
                 "readiness",
                 "counts",
                 "commands",
+                "pending_candidates",
                 "in_flight_mutations",
                 "ambiguous_outcomes",
                 "duplicate_ids",
@@ -2291,6 +2298,10 @@ def command_pipeline_gate(
                 "invalid_records",
             }
             or pipeline.get("schema") != COMMAND_PIPELINE_SCHEMA
+            # Evaluated without a proposal frame, as called above.
+            or context.get("phase") != "pre_frame"
+            or context.get("proposal_frame_id") is not None
+            or pipeline.get("pending_candidates") != []
             or pipeline.get("ready") is not True
             or pipeline.get("blockers") != []
             or proposal.get("ready") is not True
