@@ -32,6 +32,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
+from agent.field_contracts import NON_MUTATING_ACTIONS
+
 
 COMMAND_STAGES: Tuple[str, ...] = (
     "pending",
@@ -876,6 +878,21 @@ def _validate_command_envelope(
     return value
 
 
+def _done_status_for(command: Mapping[str, Any]) -> str:
+    """Return the canonical ``done/`` status for one command.
+
+    ``noop`` and ``focus_note`` never mutate game state; the executor completes
+    them directly in ``done/status=verified`` (docs/protocol.md, command
+    lifecycle).  Every mutating command must reach ``done`` only through
+    snapshot attestation as ``confirmed``, so a mutating ``verified`` record
+    still fails closed.
+    """
+
+    if command.get("action") in NON_MUTATING_ACTIONS and command.get("status") == "verified":
+        return "verified"
+    return "confirmed"
+
+
 def _command_id_from_bytes(value: bytes, *, label: str) -> str:
     parsed = _strict_json_loads(value, label=label)
     if not isinstance(parsed, dict):
@@ -916,7 +933,7 @@ def _scan_command_locations(bridge_dir: pathlib.Path) -> List[_CommandLocation]:
             expected_statuses = {
                 "pending": {PENDING_STATUS},
                 "approved": {"approved"},
-                "done": {"confirmed"},
+                "done": {_done_status_for(parsed)},
                 "failed": {"failed"},
                 "rejected": {"rejected"},
                 "quarantine": {"quarantined"},
@@ -1010,7 +1027,6 @@ def _observe_pending_envelope_locked(
     _assert_no_duplicate_locations(locations)
     observed_statuses = {
         "approved": "approved",
-        "done": "confirmed",
         "failed": "failed",
         "rejected": "rejected",
         "quarantine": "quarantined",
@@ -1027,7 +1043,11 @@ def _observe_pending_envelope_locked(
             _validate_command_envelope(
                 item.command,
                 expected_id=str(item.command["id"]),
-                expected_status=observed_statuses.get(item.stage),
+                expected_status=(
+                    _done_status_for(item.command)
+                    if item.stage == "done"
+                    else observed_statuses.get(item.stage)
+                ),
                 label=f"commands/{item.stage}/{item.path.name}",
             )
     owned_locations = [item for item in locations if item.command.get("id") == command_id]
