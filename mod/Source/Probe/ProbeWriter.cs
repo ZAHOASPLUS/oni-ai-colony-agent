@@ -31,6 +31,10 @@ namespace OniAiProbeMod.Probe
         private const int MaxQueueDepth = 1000;
         private const int MaxJsonDepth = 64;
         private const int MaxJsonNodeCount = 1000000;
+        // Consecutive sharing-violation retries tolerated before an open
+        // failure becomes a process fault (about 10 s at the writer cadence).
+        private const int MaxTransientOpenFailures = 40;
+        private static int transientOpenFailures;
 
         internal static string BridgeDirectory { get; private set; }
         internal static string StateLogPath { get; private set; }
@@ -309,7 +313,7 @@ namespace OniAiProbeMod.Probe
 
         private static void WriterLoop()
         {
-            while (running || !PendingRecords.IsEmpty)
+            while (running || (!PendingRecords.IsEmpty && !HasSafetyFault))
             {
                 PendingSignal.WaitOne(250);
                 FlushPendingRecords();
@@ -318,22 +322,50 @@ namespace OniAiProbeMod.Probe
 
         private static void FlushPendingRecords()
         {
-            if (string.IsNullOrEmpty(StateLogPath))
+            if (string.IsNullOrEmpty(StateLogPath) || PendingRecords.IsEmpty)
             {
                 return;
             }
 
+            FileStream stream;
             try
             {
-                using (FileStream stream = new FileStream(StateLogPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
+                stream = new FileStream(StateLogPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+            }
+            catch (IOException ex) when (IsSharingViolation(ex))
+            {
+                // The Bridge renames state.jsonl during rotation and copy tools
+                // hold it briefly.  Nothing was dequeued, so no record is lost:
+                // retry on the next cadence instead of faulting the whole
+                // process on one transient race (code review 2026-09-26, L3).
+                if (++transientOpenFailures >= MaxTransientOpenFailures)
+                {
+                    RegisterSafetyFault("append_failed", true, false);
+                }
+                return;
+            }
+            catch
+            {
+                RegisterSafetyFault("append_failed", true, false);
+                return;
+            }
+
+            transientOpenFailures = 0;
+            try
+            {
+                using (stream)
                 using (StreamWriter writer = new StreamWriter(stream, new UTF8Encoding(false)))
                 {
                     while (PendingRecords.TryDequeue(out IDictionary<string, object> record))
                     {
                         ReleaseQueueSlot();
                         IDictionary<string, object> recordToWrite = PrepareRecordForWrite(record);
-                        JsonLineWriter.Write(writer, recordToWrite);
-                        writer.WriteLine();
+                        // Serialize the whole line first so a serialization
+                        // failure cannot leave half a record in the log.
+                        StringWriter line = new StringWriter(CultureInfo.InvariantCulture);
+                        JsonLineWriter.Write(line, recordToWrite);
+                        line.WriteLine();
+                        writer.Write(line.ToString());
                     }
                 }
             }
@@ -341,6 +373,14 @@ namespace OniAiProbeMod.Probe
             {
                 RegisterSafetyFault("append_failed", true, false);
             }
+        }
+
+        private static bool IsSharingViolation(IOException exception)
+        {
+            // ERROR_SHARING_VIOLATION (32) or ERROR_LOCK_VIOLATION (33); .NET and
+            // Mono both carry the Win32 code in the low word of HResult.
+            int code = exception.HResult & 0xFFFF;
+            return code == 32 || code == 33;
         }
 
         private static IDictionary<string, object> PrepareRecordForWrite(
