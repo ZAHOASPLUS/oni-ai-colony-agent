@@ -16,6 +16,7 @@ import pathlib
 import shlex
 import shutil
 import stat
+import struct
 import subprocess
 from typing import Any, Callable, Dict, Iterable, Mapping
 
@@ -26,12 +27,86 @@ class CloneLaunchGuardError(RuntimeError):
     pass
 
 
-def _sha256(path: pathlib.Path) -> str:
+def _read(path: pathlib.Path) -> bytes:
     try:
         payload, _, _ = read_stable_bytes(path, label="clone file")
     except (CommandCustodyError, OSError) as exc:
         raise CloneLaunchGuardError("Clone file changed or is unreadable.") from exc
+    return payload
+
+
+def _digest(payload: bytes) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _sha256(path: pathlib.Path) -> str:
+    return _digest(_read(path))
+
+
+SAVE_HEADER_MAX_BYTES = 1 << 20
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise CloneLaunchGuardError("The save header repeats a field.")
+        result[key] = value
+    return result
+
+
+def _header_field(info: Mapping[str, Any], name: str) -> Any:
+    # Newtonsoft binds GameInfo members case-insensitively, so every
+    # spelling of the name counts; more than one is ambiguous.
+    matches = [value for key, value in info.items() if str(key).casefold() == name.casefold()]
+    if len(matches) > 1:
+        raise CloneLaunchGuardError(f"The save header has ambiguous {name} fields.")
+    return matches[0] if matches else None
+
+
+def read_save_header(payload: bytes) -> Dict[str, Any]:
+    """Parse the GameInfo header the way ONI's SaveGame.GetHeader does.
+
+    Layout (``_audit_full/SaveGame.cs`` GetHeader, ``SaveLoader.cs``
+    LoadHeader): little-endian uint32 buildVersion, int32 headerSize, uint32
+    headerVersion, int32 compression when headerVersion >= 1, then headerSize
+    bytes of UTF-8 GameInfo JSON.
+    """
+    if len(payload) < 12:
+        raise CloneLaunchGuardError("The save header is truncated.")
+    build_version, header_size, header_version = struct.unpack_from("<IiI", payload, 0)
+    offset = 12
+    if header_version >= 1:
+        if len(payload) < 16:
+            raise CloneLaunchGuardError("The save header is truncated.")
+        offset = 16
+    if header_size <= 0 or header_size > SAVE_HEADER_MAX_BYTES or offset + header_size > len(payload):
+        raise CloneLaunchGuardError("The save header size is invalid.")
+    try:
+        info = json.loads(
+            payload[offset:offset + header_size].decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+    except (UnicodeError, ValueError) as exc:
+        raise CloneLaunchGuardError("The save header is not GameInfo JSON.") from exc
+    if not isinstance(info, dict):
+        raise CloneLaunchGuardError("The save header is not GameInfo JSON.")
+    is_auto_save = _header_field(info, "isAutoSave")
+    base_name = _header_field(info, "baseName")
+    original_save_name = _header_field(info, "originalSaveName")
+    if type(is_auto_save) is not bool:
+        raise CloneLaunchGuardError("The save header isAutoSave flag is missing or invalid.")
+    if not isinstance(base_name, str) or not base_name:
+        raise CloneLaunchGuardError("The save header baseName is missing.")
+    if original_save_name is not None and not isinstance(original_save_name, str):
+        raise CloneLaunchGuardError("The save header originalSaveName is invalid.")
+    return {
+        "build_version": build_version,
+        "header_version": header_version,
+        "is_auto_save": is_auto_save,
+        "base_name": base_name,
+        "original_save_name": original_save_name,
+    }
 
 
 def _path_id(path: pathlib.Path) -> str:
@@ -99,8 +174,27 @@ def validate_clone_launch(
     target = manifest["target"]
     expected_save = str(target.get("save_sha256") or "")
     expected_preview = str(target.get("preview_sha256") or "")
-    if _sha256(save) != expected_save or _sha256(preview) != expected_preview:
+    save_payload = _read(save)
+    if _digest(save_payload) != expected_save or _sha256(preview) != expected_preview:
         raise CloneLaunchGuardError("The clone content does not match its manifest.")
+    # Autosave rotation deletes the oldest same-colony saves in
+    # "<active save dir>/auto_save", and loading a header with isAutoSave
+    # points the active save back at "<save root>/<baseName>/<original>",
+    # i.e. the source colony folder (SaveLoader.cs Save / Load).  A clone
+    # must therefore be a non-autosave living outside every folder the
+    # manifest records for its source colony (review P0-1).
+    if read_save_header(save_payload)["is_auto_save"]:
+        raise CloneLaunchGuardError(
+            "The clone save is an autosave; loading it would redirect saves into the source colony folder."
+        )
+    forbidden = {
+        str(source.get(name) or "")
+        for name in ("colony_directory_path_id", "redirect_colony_directory_path_id")
+    }
+    if any(len(value) != 71 or not value.startswith("sha256:") for value in forbidden):
+        raise CloneLaunchGuardError("The clone manifest does not record its source colony folders.")
+    if any(_path_id(folder) in forbidden for folder in (save.parent, *save.parent.parents)):
+        raise CloneLaunchGuardError("The clone save lies inside its source colony folder.")
     # A fresh clone is byte-identical to its source, so content alone would
     # admit any other copy of the original save (a backup, the cloud copy).
     # Only the exact files the manifest created may launch (review M9).

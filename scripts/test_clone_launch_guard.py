@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
+import struct
 import sys
 import tempfile
 import unittest
@@ -34,28 +35,71 @@ def path_id(path: pathlib.Path) -> str:
     return "sha256:" + hashlib.sha256(str(path.resolve()).lower().encode()).hexdigest()
 
 
+def oni_save_bytes(*, is_auto_save: bool = False, base_name: str = "Fixture Base",
+                   header: bytes | None = None, body: bytes = b"clone-save") -> bytes:
+    """A save with ONI's header layout: buildVersion, headerSize, headerVersion, compression, GameInfo JSON."""
+    if header is None:
+        header = json.dumps({
+            "numberOfCycles": 6, "numberOfDuplicants": 3, "baseName": base_name,
+            "isAutoSave": is_auto_save, "originalSaveName": "Fixture Base.sav",
+            "clusterId": "fixture", "colonyGuid": "00000000-0000-0000-0000-000000000001",
+        }).encode("utf-8")
+    return struct.pack("<IiIi", 744825, len(header), 1, 1) + header + body
+
+
 class CloneLaunchGuardTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="oni-clone-guard-")
         self.root = pathlib.Path(self.temp.name)
-        self.save = self.root / "named-clone.sav"
-        self.preview = self.root / "named-clone.png"
-        self.save.write_bytes(b"clone-save")
+        save_root = self.root / "save_files"
+        self.source_colony = save_root / "Fixture Colony"
+        self.redirect_colony = save_root / "Fixture Base"
+        self.clone_dir = save_root / "named-clone"
+        for directory in (self.source_colony, self.clone_dir):
+            directory.mkdir(parents=True)
+        self.save = self.clone_dir / "named-clone.sav"
+        self.preview = self.clone_dir / "named-clone.png"
+        self.save.write_bytes(oni_save_bytes())
         self.preview.write_bytes(b"clone-preview")
         self.manifest = self.root / "manifest.json"
-        source_save = self.root / "source.sav"
-        source_preview = self.root / "source.png"
-        source_save.write_bytes(b"source-save")
-        source_preview.write_bytes(b"source-preview")
-        payload = {
+        source_save = self.source_colony / "source.sav"
+        source_preview = self.source_colony / "source.png"
+        source_save.write_bytes(oni_save_bytes())
+        source_preview.write_bytes(b"clone-preview")
+        self.write_manifest({
             "schema": "oni.named-test-clone.v1", "created": True,
-            "source": {"save": {"path_id": path_id(source_save)}, "preview": {"path_id": path_id(source_preview)}},
+            "source": {
+                "save": {"path_id": path_id(source_save)}, "preview": {"path_id": path_id(source_preview)},
+                "colony_directory_path_id": path_id(self.source_colony),
+                "redirect_colony_directory_path_id": path_id(self.redirect_colony),
+            },
             "target": {
                 "save_sha256": digest(self.save), "preview_sha256": digest(self.preview),
                 "save_path_id": path_id(self.save), "preview_path_id": path_id(self.preview),
             },
-        }
+        })
+
+    def write_manifest(self, payload: dict) -> None:
         self.manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    def manifest_payload(self) -> dict:
+        return json.loads(self.manifest.read_text(encoding="utf-8"))
+
+    def move_clone_to(self, directory: pathlib.Path, content: bytes | None = None) -> None:
+        """Place the clone pair at ``directory`` and point the manifest at it."""
+        directory.mkdir(parents=True, exist_ok=True)
+        save, preview = directory / self.save.name, directory / self.preview.name
+        payload_bytes = self.save.read_bytes() if content is None else content
+        preview_bytes = self.preview.read_bytes()
+        save.write_bytes(payload_bytes)
+        preview.write_bytes(preview_bytes)
+        payload = self.manifest_payload()
+        payload["target"].update({
+            "save_sha256": digest(save), "save_path_id": path_id(save),
+            "preview_path_id": path_id(preview),
+        })
+        self.write_manifest(payload)
+        self.save, self.preview = save, preview
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -108,6 +152,70 @@ class CloneLaunchGuardTests(unittest.TestCase):
                 self.manifest, copy_save, copy_preview, bridge_dir=self.root / "bridge",
                 process_names=(), process_probe=lambda: {}, queue_counts={},
             )
+
+    def test_clone_inside_source_colony_folder_is_rejected(self) -> None:
+        # Autosave rotation in the source colony's auto_save folder deleted
+        # the user's Cycle 6 autosave on 2026-09-13 (review P0-1).
+        self.move_clone_to(self.source_colony)
+        with self.assertRaisesRegex(CloneLaunchGuardError, "inside its source colony"):
+            self.call()
+
+    def test_clone_below_source_colony_folder_is_rejected(self) -> None:
+        self.move_clone_to(self.source_colony / "nested" / "deeper")
+        with self.assertRaisesRegex(CloneLaunchGuardError, "inside its source colony"):
+            self.call()
+
+    def test_clone_inside_autosave_redirect_folder_is_rejected(self) -> None:
+        self.move_clone_to(self.redirect_colony)
+        with self.assertRaisesRegex(CloneLaunchGuardError, "inside its source colony"):
+            self.call()
+
+    def test_colony_check_resolves_dotdot_spelling(self) -> None:
+        self.move_clone_to(self.source_colony)
+        dotted = self.clone_dir / ".." / self.source_colony.name / self.save.name
+        with self.assertRaisesRegex(CloneLaunchGuardError, "inside its source colony"):
+            validate_clone_launch(
+                self.manifest, dotted, dotted.with_suffix(".png"), bridge_dir=self.root / "bridge",
+                process_names=(), process_probe=lambda: {}, queue_counts={},
+            )
+
+    def test_manifest_without_source_colony_folders_is_rejected(self) -> None:
+        original = self.manifest_payload()
+        for name in ("colony_directory_path_id", "redirect_colony_directory_path_id"):
+            with self.subTest(name):
+                payload = json.loads(json.dumps(original))
+                del payload["source"][name]
+                self.write_manifest(payload)
+                with self.assertRaisesRegex(CloneLaunchGuardError, "source colony folders"):
+                    self.call()
+
+    def test_autosave_header_is_rejected(self) -> None:
+        # Loading an autosave points the active save back at
+        # <save root>/<baseName>/<originalSaveName> (SaveLoader.cs Load).
+        self.move_clone_to(self.clone_dir, oni_save_bytes(is_auto_save=True))
+        with self.assertRaisesRegex(CloneLaunchGuardError, "autosave"):
+            self.call()
+
+    def test_malformed_or_ambiguous_header_is_rejected(self) -> None:
+        cases = {
+            "not_json": oni_save_bytes(header=b"not-json"),
+            "truncated": struct.pack("<Ii", 744825, 4096),
+            "oversized": struct.pack("<IiIi", 744825, 1 << 30, 1, 1) + b"{}",
+            "missing_flag": oni_save_bytes(header=b'{"baseName":"Fixture Base"}'),
+            "string_flag": oni_save_bytes(header=b'{"baseName":"B","isAutoSave":"false"}'),
+            "case_variant": oni_save_bytes(header=b'{"baseName":"B","isAutoSave":false,"IsAutoSave":true}'),
+            "duplicate": oni_save_bytes(header=b'{"baseName":"B","isAutoSave":false,"isAutoSave":true}'),
+        }
+        for label, content in cases.items():
+            with self.subTest(label):
+                self.move_clone_to(self.clone_dir, content)
+                with self.assertRaises(CloneLaunchGuardError):
+                    self.call()
+
+    def test_header_without_compression_field_parses(self) -> None:
+        header = b'{"baseName":"B","isAutoSave":false}'
+        self.move_clone_to(self.clone_dir, struct.pack("<IiI", 744825, len(header), 0) + header + b"body")
+        self.assertTrue(self.call()["launch_allowed"])
 
     def test_manifest_without_target_paths_is_rejected(self) -> None:
         payload = json.loads(self.manifest.read_text(encoding="utf-8"))
