@@ -508,7 +508,12 @@ def _project_health(value: Mapping[str, Any]) -> Dict[str, Any]:
     projected = {
         "valid": valid,
         "status": status,
-        "snapshot_age_seconds": _finite_number(value.get("snapshot_age_seconds")),
+        # Snapshot age grows on every publication even when no record arrived.
+        # frame_id is a digest of the frame, so projecting the age changed the
+        # frame on every poll and rejected/re-created each pending suggestion
+        # (code review 2026-09-26, L1).  Freshness is already carried by
+        # status and trust_ready; the key stays for v2 compatibility.
+        "snapshot_age_seconds": None,
         "trust_ready": trust_ready if isinstance(trust_ready, bool) else False,
         "replay_mode": replay_mode if isinstance(replay_mode, bool) else False,
         "session_start_observed": (
