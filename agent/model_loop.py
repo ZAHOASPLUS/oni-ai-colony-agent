@@ -34,7 +34,7 @@ from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence
 from agent.action_policy import action_policy_hash, action_policy_is_valid
 from agent.candidates import WAIT_CANDIDATE_ID, display_text, generate_candidates
 from agent.colony_plan import TERMINAL_PLAN_STATUSES, load_active_plan
-from agent.command_custody import publish_pending_command
+from agent.command_custody import publish_pending_command, read_bytes_share_delete
 from agent.command_queue import (
     COMMAND_DIRS,
     COMMAND_SCHEMA,
@@ -257,7 +257,7 @@ def _locate_command(bridge_dir: pathlib.Path, command_id: str) -> Tuple[Optional
         if not path.is_file():
             continue
         try:
-            value = json.loads(path.read_text(encoding="utf-8-sig"))
+            value = json.loads(read_bytes_share_delete(path).decode("utf-8-sig"))
         except (OSError, UnicodeError, json.JSONDecodeError):
             return stage, {}
         return stage, value if isinstance(value, dict) else {}

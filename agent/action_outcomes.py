@@ -13,6 +13,7 @@ import tempfile
 import time
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
+from agent.command_custody import read_bytes_share_delete
 from agent.command_queue import COMMAND_SCHEMA, ensure_command_dirs, write_json_atomic
 from agent.canonical_hash import canonical_hash as _contract_canonical_hash, loads_strict
 from agent.decision import DecisionFrameError, validate_decision_frame
@@ -474,7 +475,8 @@ def _safe_session_name(value: Any) -> str:
 
 def _read_json_object(path: pathlib.Path) -> Optional[Dict[str, Any]]:
     try:
-        value = loads_strict(path.read_text(encoding="utf-8-sig"))
+        # Never deny the executor's rename of a command file (review L10).
+        value = loads_strict(read_bytes_share_delete(path).decode("utf-8-sig"))
     except (FileNotFoundError, OSError, ValueError, UnicodeError):
         return None
     return value if isinstance(value, dict) else None

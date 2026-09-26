@@ -64,6 +64,14 @@ _MAX_THREAD_RECURSION = 16
 _MAX_JOURNAL_STRING = 512
 _MAX_TRANSACTION_STRING = 80
 _COMMAND_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
+# The C# executor does not take the lifecycle lock.  Its durable replace
+# writes "<id>.json.tmp-<guid>" and File.Replace leaves "<id>.json.backup-
+# <guid>" for a moment (ExecutionClaimStore.TryReplaceFileContents).
+_EXECUTOR_TRANSIENT_NAME_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}\.json\.(?:tmp|backup)-[0-9a-f]{32}$"
+)
+_SCAN_SETTLE_ATTEMPTS = 8
+_SCAN_SETTLE_DELAY_SECONDS = 0.05
 _TRANSACTION_RE = re.compile(r"^tx-[0-9a-f]{32}$")
 _SHA256_RE = re.compile(r"^[0-9A-F]{64}$")
 _JOURNAL_PHASES = frozenset({"staged", "published", "restoring", "completing"})
@@ -593,13 +601,81 @@ def _validate_directory(path: pathlib.Path, *, label: str) -> os.stat_result:
     return metadata
 
 
+def _open_share_delete_descriptor(path: pathlib.Path) -> int:
+    """Open for reading without denying a concurrent rename or delete.
+
+    ``os.open`` on Windows omits FILE_SHARE_DELETE, so while Bridge read a
+    command file the executor's File.Move/File.Replace of it failed with a
+    sharing violation; after dispatch that became outcome_unknown and paused
+    the game (code review 2026-09-26, L10).
+    """
+
+    create_file, close_handle = _windows_file_api()
+    generic_read = 0x80000000
+    share_all = 0x1 | 0x2 | 0x4  # FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+    open_existing = 3
+    # FILE_FLAG_OPEN_REPARSE_POINT: never follow a link planted after lstat.
+    flags = 0x80 | 0x00200000
+    handle = create_file(str(path), generic_read, share_all, None, open_existing, flags, None)
+    if handle is None or handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        import msvcrt
+
+        return msvcrt.open_osfhandle(handle, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    except Exception:
+        close_handle(handle)
+        raise
+
+
+_WINDOWS_FILE_API: Optional[Tuple[Any, Any]] = None
+
+
+def _windows_file_api() -> Tuple[Any, Any]:
+    global _WINDOWS_FILE_API
+    if _WINDOWS_FILE_API is None:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+            ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
+        _WINDOWS_FILE_API = (create_file, close_handle)
+    return _WINDOWS_FILE_API
+
+
 def _open_read_descriptor(path: pathlib.Path) -> int:
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     no_follow = getattr(os, "O_NOFOLLOW", 0)
     try:
+        if os.name == "nt":
+            return _open_share_delete_descriptor(path)
         return os.open(str(path), flags | no_follow)
     except OSError as exc:
         raise CommandCustodyError(f"cannot open lifecycle file: {path}") from exc
+
+
+def read_bytes_share_delete(path: pathlib.Path) -> bytes:
+    """Read a whole file without blocking a concurrent executor rename."""
+
+    try:
+        descriptor = _open_read_descriptor(path)
+    except CommandCustodyError as exc:
+        cause = exc.__cause__
+        raise cause if isinstance(cause, OSError) else OSError(str(exc)) from exc
+    try:
+        chunks: List[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+    finally:
+        os.close(descriptor)
 
 
 def read_stable_bytes(
@@ -629,8 +705,9 @@ def read_stable_bytes(
                 raise CommandCustodyError(f"{label} grew beyond its bounded read limit")
             chunks.append(chunk)
         after = os.fstat(descriptor)
-        named = _lstat_safe(path, label=label)
-        assert named is not None
+        named = _lstat_safe(path, label=label, allow_missing=True)
+        if named is None:
+            raise CommandCustodyConflict(f"{label} was moved away during read: {path}")
         if _identity(after) != _identity(before) or _identity(named) != _identity(before):
             raise CommandCustodyConflict(f"{label} identity changed during read: {path}")
         if _mtime_ns(after) != _mtime_ns(before) or int(after.st_size) != int(before.st_size):
@@ -900,14 +977,56 @@ def _command_id_from_bytes(value: bytes, *, label: str) -> str:
     return _validate_command_id(parsed.get("id"), label=f"{label} command id")
 
 
+class _TransientQueueState(Exception):
+    """An inventory state the unlocked executor passes through in milliseconds."""
+
+    def __init__(self, error: CommandCustodyError) -> None:
+        super().__init__(str(error))
+        self.error = error
+
+
 def _scan_command_locations(bridge_dir: pathlib.Path) -> List[_CommandLocation]:
+    """Return the strict inventory once it is settled.
+
+    The C# executor claims and finishes commands without the lifecycle lock,
+    so a scan can meet a temp/backup sibling, ``status=executing`` still in
+    ``approved/``, a file moved away or replaced between listing and read, or
+    one id in two stages during a copy-then-delete move.  Each settles within
+    milliseconds; rescan with a short backoff and fail closed with the same
+    error only if it persists (code review 2026-09-26, L10).
+    """
+
+    for attempt in range(_SCAN_SETTLE_ATTEMPTS):
+        last = attempt + 1 >= _SCAN_SETTLE_ATTEMPTS
+        try:
+            locations = _scan_command_locations_once(bridge_dir)
+        except _TransientQueueState as transient:
+            if last:
+                raise transient.error from transient.error.__cause__
+        else:
+            ids = [str(item.command["id"]) for item in locations]
+            if last or len(ids) == len(set(ids)):
+                return locations
+        time.sleep(_SCAN_SETTLE_DELAY_SECONDS * (attempt + 1))
+    raise AssertionError("unreachable")
+
+
+def _scan_command_locations_once(bridge_dir: pathlib.Path) -> List[_CommandLocation]:
     layout = _ensure_layout(bridge_dir)
     locations: List[_CommandLocation] = []
     for stage in COMMAND_STAGES:
         directory = layout[stage]
-        for path, _metadata in _directory_entries(directory, label=f"commands/{stage} directory"):
+        try:
+            entries = _directory_entries(directory, label=f"commands/{stage} directory")
+        except CommandCustodyError as exc:
+            # Typically an entry moved away between listing and lstat.
+            raise _TransientQueueState(exc)
+        for path, listed in entries:
             if path.suffix.lower() != ".json":
-                raise CommandCustodyUnknown(f"unexpected protected-stage material: {path}")
+                error = CommandCustodyUnknown(f"unexpected protected-stage material: {path}")
+                if _EXECUTOR_TRANSIENT_NAME_RE.fullmatch(path.name):
+                    raise _TransientQueueState(error)
+                raise error
             try:
                 raw, identity, mtime_ns = read_stable_bytes(
                     path,
@@ -921,11 +1040,15 @@ def _scan_command_locations(bridge_dir: pathlib.Path) -> List[_CommandLocation]:
                     label=f"commands/{stage}/{path.name} id",
                 )
             except CommandCustodyError as exc:
-                if isinstance(exc, CommandCustodyUnknown):
-                    raise
-                raise CommandCustodyUnknown(
-                    f"protected command could not be validated: {path}"
-                ) from exc
+                error = exc
+                if not isinstance(exc, CommandCustodyUnknown):
+                    error = CommandCustodyUnknown(f"protected command could not be validated: {path}")
+                    error.__cause__ = exc
+                current = _lstat_safe(path, label=f"commands/{stage}/{path.name}", allow_missing=True)
+                if current is None or _identity(current) != _identity(listed):
+                    # Moved away or replaced by an atomic executor write.
+                    raise _TransientQueueState(error)
+                raise error
             if path.name != f"{command_id}.json":
                 raise CommandCustodyConflict(
                     f"protected command filename is not canonical: {path}"
@@ -939,9 +1062,17 @@ def _scan_command_locations(bridge_dir: pathlib.Path) -> List[_CommandLocation]:
                 "quarantine": {"quarantined"},
             }.get(stage)
             if expected_statuses is not None and parsed.get("status") not in expected_statuses:
-                raise CommandCustodyConflict(
+                error = CommandCustodyConflict(
                     f"protected command status is not canonical for {stage}: {path}"
                 )
+                if (
+                    stage == "approved"
+                    and parsed.get("status") == "executing"
+                    and isinstance(parsed.get("execution_claim"), dict)
+                ):
+                    # Claimed in place; the executor renames it to executing/.
+                    raise _TransientQueueState(error)
+                raise error
             locations.append(
                 _CommandLocation(
                     stage=stage,
