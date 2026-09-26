@@ -510,8 +510,34 @@ def sha256_file(path: pathlib.Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def _expand_short_names(text: str) -> str:
+    """Spell an existing prefix with long names instead of 8.3 aliases.
+
+    ``C:\\Users\\user\\DOCUME~1`` and ``...\\Documents`` are one directory; string
+    comparisons and path ids must not treat them as disjoint (review section
+    6).  GetLongPathNameW expands aliases without following junctions, so the
+    reparse-point checks still see every segment.  Aliases always contain "~".
+    """
+    if os.name != "nt" or "~" not in text:
+        return text
+    head, tail = text, []
+    while not os.path.exists(head):
+        parent, name = os.path.split(head)
+        if parent == head or not name:
+            return text
+        tail.append(name)
+        head = parent
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetLongPathNameW(head, buffer, len(buffer))
+    if not length or length >= len(buffer):
+        raise ConfigError("a path could not be expanded to its long form")
+    return os.path.join(buffer.value, *reversed(tail))
+
+
 def normalized(path: pathlib.Path | str) -> pathlib.Path:
-    return pathlib.Path(os.path.abspath(os.path.normpath(str(pathlib.Path(path).expanduser()))))
+    return pathlib.Path(
+        _expand_short_names(os.path.abspath(os.path.normpath(str(pathlib.Path(path).expanduser()))))
+    )
 
 
 def protected_documents_root() -> pathlib.Path:

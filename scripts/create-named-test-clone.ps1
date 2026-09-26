@@ -17,11 +17,44 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 
+function Expand-ShortPathSegments([string]$FullPath) {
+    # An 8.3 alias (DOCUME~1) names the same directory as its long name, so
+    # string comparisons and path ids must use the long spelling (review
+    # section 6).  Only the existing prefix can be expanded; a missing tail
+    # is kept verbatim.  Aliases always contain "~".
+    if ($FullPath.IndexOf('~') -lt 0) {
+        return $FullPath
+    }
+    $root = [IO.Path]::GetPathRoot($FullPath)
+    $parts = $FullPath.Substring($root.Length).Split([char[]]@('\', '/'), [StringSplitOptions]::RemoveEmptyEntries)
+    $current = $root
+    for ($index = 0; $index -lt $parts.Count; $index++) {
+        $found = @()
+        if ([IO.Directory]::Exists($current)) {
+            # FindFirstFile matches a literal segment against long and short
+            # names and returns the long name.
+            $found = @([IO.Directory]::GetFileSystemEntries($current, $parts[$index]))
+        }
+        if ($found.Count -eq 0) {
+            return [IO.Path]::Combine($current, [string]::Join('\', $parts[$index..($parts.Count - 1)]))
+        }
+        $exact = @($found | Where-Object { [IO.Path]::GetFileName($_) -ieq $parts[$index] })
+        if ($exact.Count -eq 1) {
+            $current = $exact[0]
+        } elseif ($found.Count -eq 1) {
+            $current = $found[0]
+        } else {
+            throw 'A path segment is ambiguous.'
+        }
+    }
+    return $current
+}
+
 function Get-NormalizedFullPath([string]$LiteralPath) {
     if ([string]::IsNullOrWhiteSpace($LiteralPath)) {
         throw 'A required path was empty.'
     }
-    $full = [IO.Path]::GetFullPath($LiteralPath)
+    $full = Expand-ShortPathSegments ([IO.Path]::GetFullPath($LiteralPath))
     $root = [IO.Path]::GetPathRoot($full)
     if ($full.Length -gt $root.Length) {
         $full = $full.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
