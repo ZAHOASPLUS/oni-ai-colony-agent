@@ -11,7 +11,7 @@ import pathlib
 import re
 import tempfile
 import time
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from agent.command_queue import COMMAND_SCHEMA, ensure_command_dirs, write_json_atomic
 from agent.canonical_hash import canonical_hash as _contract_canonical_hash, loads_strict
@@ -507,6 +507,32 @@ def _command_locations(
     return grouped
 
 
+def _archive_candidate_lines(path: pathlib.Path, needles: Iterable[bytes]) -> Iterator[str]:
+    """Yield decoded session-archive lines that contain any needle.
+
+    The Bridge writes every archive line with ``json.dumps`` (see
+    ``archive_session_records``), so a string value inside a line always
+    appears as its JSON token and a line without any wanted token cannot
+    match; only candidate lines are decoded and parsed.  Parsing every
+    multi-megabyte snapshot line on every generation made each scan grow with
+    the whole session (code review 2026-09-26, L7).
+    """
+
+    patterns = tuple(needles)
+    first = True
+    with path.open("rb") as handle:
+        for raw in handle:
+            leading = first
+            first = False
+            if not any(pattern in raw for pattern in patterns):
+                continue
+            yield raw.decode("utf-8-sig" if leading else "utf-8")
+
+
+def _json_token(value: str) -> bytes:
+    return json.dumps(value, ensure_ascii=False).encode("utf-8")
+
+
 def _source_snapshots(
     bridge_dir: pathlib.Path,
     session_id: str,
@@ -518,17 +544,16 @@ def _source_snapshots(
         return found
     path = bridge_dir / "sessions" / _safe_session_name(session_id) / "state.jsonl"
     try:
-        with path.open("r", encoding="utf-8-sig") as handle:
-            for line in handle:
-                try:
-                    value = json.loads(line)
-                except (json.JSONDecodeError, UnicodeError):
-                    continue
-                if not isinstance(value, dict):
-                    continue
-                snapshot_id = value.get("snapshot_id")
-                if snapshot_id in wanted:
-                    found[str(snapshot_id)].append(value)
+        for line in _archive_candidate_lines(path, [_json_token(item) for item in sorted(wanted)]):
+            try:
+                value = json.loads(line)
+            except (json.JSONDecodeError, UnicodeError):
+                continue
+            if not isinstance(value, dict):
+                continue
+            snapshot_id = value.get("snapshot_id")
+            if isinstance(snapshot_id, str) and snapshot_id in wanted:
+                found[snapshot_id].append(value)
     except (FileNotFoundError, OSError, UnicodeError):
         return found
     return found
@@ -545,18 +570,18 @@ def _command_acks(
         return found
     path = bridge_dir / "sessions" / _safe_session_name(session_id) / "state.jsonl"
     try:
-        with path.open("r", encoding="utf-8-sig") as handle:
-            for line in handle:
-                try:
-                    value = json.loads(line)
-                except (json.JSONDecodeError, UnicodeError):
-                    continue
-                if (
-                    isinstance(value, dict)
-                    and value.get("event") == "command_ack"
-                    and value.get("id") in wanted
-                ):
-                    found[str(value["id"])].append(value)
+        for line in _archive_candidate_lines(path, [_json_token(item) for item in sorted(wanted)]):
+            try:
+                value = json.loads(line)
+            except (json.JSONDecodeError, UnicodeError):
+                continue
+            if (
+                isinstance(value, dict)
+                and value.get("event") == "command_ack"
+                and isinstance(value.get("id"), str)
+                and value.get("id") in wanted
+            ):
+                found[str(value["id"])].append(value)
     except (FileNotFoundError, OSError, UnicodeError):
         return found
     return found
@@ -689,6 +714,41 @@ def _base_outcome(
     }
 
 
+def _stored_confirmation(
+    command: Mapping[str, Any],
+    *,
+    directory_name: str,
+    location_count: int,
+) -> Optional[Dict[str, Any]]:
+    """Return a done command's intact stored attestation, if it has one."""
+
+    stored_confirmation = command.get("confirmation")
+    if not (
+        directory_name == "done"
+        and location_count == 1
+        and command.get("status") == "confirmed"
+        and isinstance(stored_confirmation, Mapping)
+    ):
+        return None
+    stored = copy.deepcopy(dict(stored_confirmation))
+    declared_hash = stored.get("attestation_hash")
+    if (
+        stored.get("schema") == ACTION_OUTCOME_SCHEMA
+        and stored.get("command_id") == command.get("id")
+        and stored.get("command_intent_hash") == command_intent_hash(command)
+        and stored.get("confirmation_status") == CONFIRMATION_CONFIRMED
+        and isinstance(declared_hash, str)
+        and _HASH_RE.fullmatch(declared_hash) is not None
+        and declared_hash == _hash_document(stored, "attestation_hash")
+        and (
+            command.get("action") in {"noop", "focus_note"}
+            or not _approval_receipt_blockers(command)
+        )
+    ):
+        return stored
+    return None
+
+
 def _attest_done_command(
     command: Mapping[str, Any],
     *,
@@ -700,29 +760,13 @@ def _attest_done_command(
     health: Mapping[str, Any],
     replay_mode: bool,
 ) -> Dict[str, Any]:
-    stored_confirmation = command.get("confirmation")
-    if (
-        directory_name == "done"
-        and location_count == 1
-        and command.get("status") == "confirmed"
-        and isinstance(stored_confirmation, Mapping)
-    ):
-        stored = copy.deepcopy(dict(stored_confirmation))
-        declared_hash = stored.get("attestation_hash")
-        if (
-            stored.get("schema") == ACTION_OUTCOME_SCHEMA
-            and stored.get("command_id") == command.get("id")
-            and stored.get("command_intent_hash") == command_intent_hash(command)
-            and stored.get("confirmation_status") == CONFIRMATION_CONFIRMED
-            and isinstance(declared_hash, str)
-            and _HASH_RE.fullmatch(declared_hash) is not None
-            and declared_hash == _hash_document(stored, "attestation_hash")
-            and (
-                command.get("action") in {"noop", "focus_note"}
-                or not _approval_receipt_blockers(command)
-            )
-        ):
-            return stored
+    stored = _stored_confirmation(
+        command,
+        directory_name=directory_name,
+        location_count=location_count,
+    )
+    if stored is not None:
+        return stored
 
     outcome = _base_outcome(command, directory_name)
     permanent: List[str] = []
@@ -1014,6 +1058,7 @@ def build_action_outcomes(
     grouped = _command_locations(bridge_dir)
     candidates: List[Tuple[str, str, Dict[str, Any], int]] = []
     wanted_ids: List[str] = []
+    attest_ids: List[str] = []
     for command_id, locations in sorted(grouped.items()):
         current_locations = [item for item in locations if item[2].get("session_id") == current_session]
         if not current_locations:
@@ -1034,6 +1079,11 @@ def build_action_outcomes(
         if command.get("action") in NON_MUTATING_ACTIONS:
             continue
         candidates.append((command_id, directory_name, command, len(locations)))
+        if _stored_confirmation(command, directory_name=directory_name, location_count=len(locations)):
+            # An intact stored attestation is returned as is; its source
+            # snapshot and acks are never read (review L7).
+            continue
+        attest_ids.append(command_id)
         source_snapshot_id = command.get("source_snapshot_id")
         if isinstance(source_snapshot_id, str):
             wanted_ids.append(source_snapshot_id)
@@ -1047,7 +1097,7 @@ def build_action_outcomes(
         _command_acks(
             bridge_dir,
             str(current_session),
-            [command_id for command_id, _, _, _ in candidates],
+            attest_ids,
         )
         if isinstance(current_session, str) and current_session
         else {}
