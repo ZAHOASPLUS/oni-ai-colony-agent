@@ -1201,7 +1201,23 @@ namespace OniAiProbeMod.Commands
                     }
 
                     Tech techDefinition = Db.Get()?.Techs?.TryGet(tech);
-                    return techDefinition == null ? "Unknown research tech id: " + tech : null;
+                    if (techDefinition == null)
+                    {
+                        return "Unknown research tech id: " + tech;
+                    }
+                    // SetActiveResearch queues every unfinished prerequisite and
+                    // activates the lowest tier, and clears the active research
+                    // for a finished tech.  research.current can equal the target
+                    // only when the target is unfinished and every prerequisite
+                    // is complete; anything else is a deterministic mismatch that
+                    // used to be classified outcome_unknown (review L11).
+                    if (techDefinition.IsComplete())
+                    {
+                        return "set_research target is already researched: " + tech;
+                    }
+                    return techDefinition.ArePrerequisitesComplete()
+                        ? null
+                        : "set_research target has unfinished prerequisites: " + tech;
                 }
                 case "set_duplicant_chore_priority":
                 {
@@ -1908,6 +1924,27 @@ namespace OniAiProbeMod.Commands
 
             if (isUtilityPath)
             {
+                // Register the path's own adjacency before reading each cell's
+                // connections, exactly as WireBuildTool.ApplyPathToConduitSystem
+                // does.  Without it every blueprint kept Connections=0 and the
+                // built path became isolated single-cell networks (code review
+                // 2026-09-26, G1).  All blueprints exist at this point, so a
+                // later cancellation clears these bits through the visualizer.
+                for (int index = 1; index < cells.Count; index++)
+                {
+                    UtilityConnections direction = UtilityConnectionsExtensions.DirectionFromToCell(
+                        cells[index - 1],
+                        cells[index]);
+                    if (direction == 0)
+                    {
+                        int rolledBack = CancelCreatedBlueprints(created);
+                        message = "Wire path cells are not four-neighbor adjacent; rolled back " +
+                            rolledBack.ToString(CultureInfo.InvariantCulture) + " item(s).";
+                        return false;
+                    }
+                    utilityManager.AddConnection(direction, cells[index - 1], is_physical_building: false);
+                    utilityManager.AddConnection(direction.InverseDirection(), cells[index], is_physical_building: false);
+                }
                 for (int index = 0; index < cells.Count; index++)
                 {
                     UtilityConnections connections = utilityManager.GetConnections(

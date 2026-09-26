@@ -839,7 +839,11 @@ are `noop`, `focus_note`, `set_paused`,
 `set_research` replaces the current research queue with the approved target.
 ONI's `SetActiveResearch` API only enqueues its argument when the queue is
 empty, so preserving a non-empty queue would acknowledge a no-op instead of
-providing the command's exact set-active semantics.
+providing the command's exact set-active semantics. Because the API also
+queues every unfinished prerequisite and activates the lowest tier, the Mod
+accepts only a target that is not yet researched and whose prerequisites are
+all complete (`Tech.ArePrerequisitesComplete`); other targets are rejected
+before dispatch instead of ending as `outcome_unknown`.
 An observed empty `research.current` opens the `no_active_research` advisory
 incident but does not synthesize a target or a `set_research` command. A target
 must come from an explicit, separately validated operator/plan decision with
