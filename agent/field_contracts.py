@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from agent.state_quality import (
+    ALERTS_ACTIVE_WORLD_SCOPE,
+    ALERTS_ACTIVE_WORLD_SOURCE,
+    ALERTS_ALL_WORLDS_SCOPE,
+    ALERTS_ALL_WORLDS_SOURCE,
     field_quality,
     parse_snapshot_timestamp,
     quality_contract_blockers,
@@ -51,6 +55,9 @@ FUNCTIONAL_BUILDING_PREFAB_IDS = (
     "MineralDeoxidizer",
     "Outhouse",
     "ManualGenerator",
+    # Accepted ahead of the Probe reader so a producer that adds flush
+    # toilets does not invalidate the whole payload; sanitation counts both.
+    "FlushToilet",
 )
 FUNCTIONAL_BUILDING_GEOMETRY_CONTRACT_ID = "oni.qc.buildings.functional_geometry_instances.v1"
 FUNCTIONAL_BUILDING_GEOMETRY_SOURCE = (
@@ -225,6 +232,9 @@ class FieldContract:
     sorted_items: bool = False
     allowed_string_items: Tuple[str, ...] = ()
     status_completeness: Tuple[Tuple[str, str], ...] = ()
+    # When set, the entry's (scope, source) must be one of these pairs, so a
+    # source cannot claim a scope it does not cover.
+    scope_sources: Tuple[Tuple[str, str], ...] = ()
     capture_max_age_seconds: Optional[float] = None
     mutating_condition_allowed: bool = True
 
@@ -310,10 +320,16 @@ _CONTRACTS: Tuple[FieldContract, ...] = (
         statuses=("observed",),
         semantics=("canonical_active_alert_ids",),
         units=("alert_id_list",),
-        scopes=("active_world",),
+        # The Probe reads every world with live duplicants (review G3/M8).
+        # The active-world form is still read so older recordings replay; the
+        # snapshot trust check accepts it only while the camera world is the
+        # only populated one.
+        scopes=(ALERTS_ALL_WORLDS_SCOPE, ALERTS_ACTIVE_WORLD_SCOPE),
         completeness=("complete",),
-        sources=(
-            "Components.LiveMinionIdentities.GetWorldItems(activeWorldId,false)+typed_monitor_predicates;catalog=oni.alert.catalog.active_world.v1",
+        sources=(ALERTS_ALL_WORLDS_SOURCE, ALERTS_ACTIVE_WORLD_SOURCE),
+        scope_sources=(
+            (ALERTS_ALL_WORLDS_SCOPE, ALERTS_ALL_WORLDS_SOURCE),
+            (ALERTS_ACTIVE_WORLD_SCOPE, ALERTS_ACTIVE_WORLD_SOURCE),
         ),
         captures=("snapshot.ts",),
         value_type="string_list",
@@ -846,6 +862,22 @@ def _path_native_value_blockers(path: Optional[str], value: Any) -> list[str]:
     return ["field_type_mismatch"]
 
 
+def _finite_float(value: Any) -> Optional[float]:
+    """Return a JSON number as a finite float, or None for anything else.
+
+    A JSON integer beyond binary64 (e.g. ``10**400``) raises OverflowError in
+    ``float``; a validator must report it as a blocker, not raise.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _blueprint_material_lineage_blockers(value: Any) -> list[str]:
     if not isinstance(value, list):
         return ["blueprint_material_lineage_type_mismatch"]
@@ -865,17 +897,15 @@ def _blueprint_material_lineage_blockers(value: Any) -> list[str]:
         else:
             seen_tags.add(tag)
         required = item.get("required_mass_kg")
-        if isinstance(required, bool) or not isinstance(required, (int, float)) or not math.isfinite(float(required)) or required < 0:
+        required_number = _finite_float(required)
+        if required_number is None or required_number < 0:
             blockers.append("blueprint_material_lineage_required_invalid")
         delivered = item.get("delivered_mass_kg")
         remaining = item.get("remaining_mass_kg")
+        masses: Dict[str, Optional[float]] = {}
         for name, number in (("delivered", delivered), ("remaining", remaining)):
-            if number is not None and (
-                isinstance(number, bool)
-                or not isinstance(number, (int, float))
-                or not math.isfinite(float(number))
-                or number < 0
-            ):
+            masses[name] = _finite_float(number)
+            if number is not None and (masses[name] is None or masses[name] < 0):
                 blockers.append(f"blueprint_material_lineage_{name}_invalid")
         status = item.get("delivery_status")
         if status not in _BLUEPRINT_MATERIAL_LINEAGE_STATUSES:
@@ -885,10 +915,13 @@ def _blueprint_material_lineage_blockers(value: Any) -> list[str]:
                 blockers.append("blueprint_material_lineage_unknown_has_mass")
         elif delivered is None or remaining is None:
             blockers.append("blueprint_material_lineage_observed_mass_missing")
+        elif required_number is None or masses["delivered"] is None or masses["remaining"] is None:
+            # Already reported as invalid above; there is nothing to compare.
+            pass
         else:
-            required_value = float(required)
-            delivered_value = float(delivered)
-            remaining_value = float(remaining)
+            required_value = required_number
+            delivered_value = masses["delivered"]
+            remaining_value = masses["remaining"]
             if delivered_value > required_value + 0.0001:
                 blockers.append("blueprint_material_lineage_delivered_exceeds_required")
             if remaining_value > required_value + 0.0001:
@@ -908,6 +941,9 @@ _FUNCTIONAL_BUILDING_INSTANCE_KEYS = frozenset(
 _FUNCTIONAL_BUILDING_PAYLOAD_KEYS = frozenset(
     {"schema", "captured_at", "world_id", "complete", "instances"}
 )
+# Optional: the sorted prefab ids the producer enumerates, so a consumer can
+# tell "none exist" from "not tracked" for a prefab without instances.
+_FUNCTIONAL_BUILDING_OPTIONAL_PAYLOAD_KEYS = frozenset({"prefab_ids"})
 _FUNCTIONAL_BUILDING_MAX_INSTANCES = 10_000
 
 
@@ -918,8 +954,20 @@ def _functional_buildings_payload_blockers(value: Any) -> list[str]:
         return ["functional_buildings_type_mismatch"]
 
     blockers: list[str] = []
-    if set(value) != _FUNCTIONAL_BUILDING_PAYLOAD_KEYS:
+    keys = set(value)
+    if not _FUNCTIONAL_BUILDING_PAYLOAD_KEYS <= keys or not keys <= (
+        _FUNCTIONAL_BUILDING_PAYLOAD_KEYS | _FUNCTIONAL_BUILDING_OPTIONAL_PAYLOAD_KEYS
+    ):
         blockers.append("functional_buildings_payload_shape_invalid")
+    if "prefab_ids" in value:
+        declared = value.get("prefab_ids")
+        if (
+            not isinstance(declared, list)
+            or not declared
+            or any(item not in FUNCTIONAL_BUILDING_PREFAB_IDS for item in declared)
+            or declared != sorted(set(declared))
+        ):
+            blockers.append("functional_buildings_prefab_ids_invalid")
     if value.get("schema") != FUNCTIONAL_BUILDINGS_SCHEMA:
         blockers.append("functional_buildings_schema_invalid")
     captured_at = value.get("captured_at")
@@ -2095,7 +2143,7 @@ def _functional_building_utility_contents_payload_blockers(value: Any) -> list[s
             if d is True and cell is None: b.append("functional_building_utility_contents_declared_cell_missing")
             for key in ("mass","temperature"):
                 z=s.get(key)
-                if z is not None and (isinstance(z,bool) or not isinstance(z,(int,float)) or not math.isfinite(float(z)) or (key=="mass" and z<0)): b.append("functional_building_utility_contents_numeric_invalid")
+                if z is not None and (_finite_float(z) is None or (key=="mass" and z<0)): b.append("functional_building_utility_contents_numeric_invalid")
             dc=s.get("disease_count")
             if dc is not None and (isinstance(dc,bool) or not isinstance(dc,int) or dc<0): b.append("functional_building_utility_contents_disease_invalid")
             sp=s.get("solid_present")
@@ -2313,6 +2361,66 @@ def _value_blockers(
     return blockers
 
 
+ALERTS_BY_WORLD_SEMANTIC = "canonical_active_alert_ids_by_world"
+ALERTS_BY_WORLD_UNIT = "world_alert_groups"
+_ALERTS_BY_WORLD_ENTRY_KEYS = frozenset({"world_id", "duplicant_count", "alerts"})
+
+
+def _alerts_by_world_blockers(state: Mapping[str, Any], alerts: Any, entry: Mapping[str, Any]) -> list[str]:
+    """Check the optional per-world alert groups against ``alerts``.
+
+    ``alerts_by_world`` is additive: an absent or null field changes
+    nothing.  When present it must be a list ordered by world id (a null
+    world, e.g. a duplicant in transit, first), carry its own quality entry
+    with the same source and scope as ``alerts``, and its groups' union must
+    equal ``alerts`` exactly; any disagreement makes ``alerts`` unusable.
+    """
+
+    groups = state.get("alerts_by_world")
+    if groups is None:
+        return []
+    blockers: list[str] = []
+    group_entry = field_quality(state if isinstance(state, dict) else dict(state), "alerts_by_world")
+    if (
+        group_entry.get("status") != "observed"
+        or group_entry.get("semantic") != ALERTS_BY_WORLD_SEMANTIC
+        or group_entry.get("unit") != ALERTS_BY_WORLD_UNIT
+        or group_entry.get("scope") != entry.get("scope")
+        or group_entry.get("source") != entry.get("source")
+    ):
+        blockers.append("alerts_by_world_quality_mismatch")
+    if not isinstance(groups, list) or len(groups) > 1000:
+        return blockers + ["alerts_by_world_invalid"]
+    union: set[str] = set()
+    previous_key: Optional[int] = None
+    for group in groups:
+        if not isinstance(group, Mapping) or set(group) != _ALERTS_BY_WORLD_ENTRY_KEYS:
+            return blockers + ["alerts_by_world_invalid"]
+        world_id = group.get("world_id")
+        count = group.get("duplicant_count")
+        group_alerts = group.get("alerts")
+        if world_id is not None and (
+            isinstance(world_id, bool) or not isinstance(world_id, int) or not 0 <= world_id <= _INT32_MAX
+        ):
+            return blockers + ["alerts_by_world_invalid"]
+        if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= _INT32_MAX:
+            return blockers + ["alerts_by_world_invalid"]
+        if (
+            not isinstance(group_alerts, list)
+            or any(not isinstance(item, str) or item not in CANONICAL_ALERT_IDS for item in group_alerts)
+            or group_alerts != sorted(set(group_alerts))
+        ):
+            return blockers + ["alerts_by_world_invalid"]
+        key = -1 if world_id is None else world_id
+        if previous_key is not None and key <= previous_key:
+            return blockers + ["alerts_by_world_order_invalid"]
+        previous_key = key
+        union.update(group_alerts)
+    if not isinstance(alerts, list) or union != set(item for item in alerts if isinstance(item, str)):
+        blockers.append("alerts_by_world_union_mismatch")
+    return blockers
+
+
 def field_contract_blockers(
     state: Optional[Mapping[str, Any]],
     path: str,
@@ -2352,6 +2460,10 @@ def field_contract_blockers(
         entry.get("status"), entry.get("completeness")
     ) not in contract.status_completeness:
         blockers.append("quality_status_completeness_mismatch")
+    if contract.scope_sources and (
+        entry.get("scope"), entry.get("source")
+    ) not in contract.scope_sources:
+        blockers.append("quality_scope_source_mismatch")
     blockers.extend(_capture_binding_blockers(state, entry, contract))
 
     marker = object()
@@ -2360,6 +2472,8 @@ def field_contract_blockers(
         blockers.append("field_missing")
     else:
         blockers.extend(_value_blockers(value, contract, path))
+        if contract.contract_id == ALERTS_CANONICAL_CONTRACT_ID:
+            blockers.extend(_alerts_by_world_blockers(state_dict, value, entry))
         if contract.value_type == "functional_buildings":
             blockers.extend(_functional_buildings_state_binding_blockers(state_dict, value))
         elif contract.value_type == "functional_building_geometry":

@@ -731,6 +731,16 @@ def case_contract_scope_and_marker_spoofs_fail_closed() -> Dict[str, Any]:
             "complete_for_populated_worlds": False,
         }
     )
+    # With alerts that cover every world a second populated world keeps
+    # trust (review M8); with active-world-only alerts it cannot.
+    all_world_result = evaluate_fixture(copy.deepcopy(incomplete_scope))
+    require(all_world_result["status"] != "blocked", "all-world alerts did not keep multi-world trust")
+    incomplete_scope["quality"]["alerts"].update(
+        {
+            "scope": "active_world",
+            "source": "Components.LiveMinionIdentities.GetWorldItems(activeWorldId,false)+typed_monitor_predicates;catalog=oni.alert.catalog.active_world.v1",
+        }
+    )
     incomplete_result = evaluate_fixture(incomplete_scope)
     require(incomplete_result["status"] == "blocked", "incomplete populated-world coverage was accepted")
     require(
@@ -1581,9 +1591,12 @@ def case_strict_operational_fields_fail_closed() -> Dict[str, Any]:
         "alerts": {
             "semantics": ("canonical_active_alert_ids",),
             "units": ("alert_id_list",),
-            "scopes": ("active_world",),
+            # All-world alerts (review G3/M8); the active-world form still
+            # reads so older recordings replay.
+            "scopes": ("all_worlds", "active_world"),
             "completeness": ("complete",),
             "sources": (
+                "Components.LiveMinionIdentities.Items+GetMyWorldId+typed_monitor_predicates;catalog=oni.alert.catalog.all_worlds.v1",
                 "Components.LiveMinionIdentities.GetWorldItems(activeWorldId,false)+typed_monitor_predicates;catalog=oni.alert.catalog.active_world.v1",
             ),
             "captures": ("snapshot.ts",),

@@ -25,6 +25,21 @@ def _split_dotted_path(path: str) -> Tuple[str, ...]:
     return tuple(path.split("."))
 
 
+# Canonical alert coverage (review G3/M8).  The Probe reads alerts for every
+# world with live duplicants; the older active-world form is still recognised
+# so recordings replay, but only covers a colony living on the camera world.
+ALERTS_ALL_WORLDS_SCOPE = "all_worlds"
+ALERTS_ACTIVE_WORLD_SCOPE = "active_world"
+ALERTS_ALL_WORLDS_SOURCE = (
+    "Components.LiveMinionIdentities.Items+GetMyWorldId+typed_monitor_predicates;"
+    "catalog=oni.alert.catalog.all_worlds.v1"
+)
+ALERTS_ACTIVE_WORLD_SOURCE = (
+    "Components.LiveMinionIdentities.GetWorldItems(activeWorldId,false)+typed_monitor_predicates;"
+    "catalog=oni.alert.catalog.active_world.v1"
+)
+
+
 def safe_get(mapping: Dict[str, Any], path: str, default: Any = None) -> Any:
     if not isinstance(mapping, dict):
         return default
@@ -335,6 +350,55 @@ def _exact_world_ids(value: Any) -> Optional[List[int]]:
     return value
 
 
+def alerts_cover_all_worlds(state: Dict[str, Any]) -> bool:
+    """True when the snapshot carries a usable alert set spanning every world."""
+
+    entry = field_quality(state, "alerts")
+    if not (
+        entry.get("status") == "observed"
+        and entry.get("scope") == ALERTS_ALL_WORLDS_SCOPE
+        and entry.get("source") == ALERTS_ALL_WORLDS_SOURCE
+    ):
+        return False
+    # field_contracts imports this module; resolve it at call time.
+    from agent.field_contracts import ALERTS_CANONICAL_CONTRACT_ID, read_contract_field
+
+    return read_contract_field(state, "alerts", ALERTS_CANONICAL_CONTRACT_ID).usable
+
+
+def observation_scope_coverage_blockers(
+    state: Dict[str, Any],
+    *,
+    active_world_id: Any,
+    populated_world_ids: Optional[List[int]],
+    covered_world_ids: Optional[List[int]],
+    complete: Any,
+) -> List[str]:
+    """Multi-world aware coverage check (review M8).
+
+    The Probe's per-world readers cover the camera world; duplicants may also
+    live in a rocket or on another asteroid, and the camera may look at a
+    world without any.  Such a snapshot stays trusted when its survival
+    alerts cover every world, because an unobserved world can then still
+    raise a suffocation or starvation pause.  With active-world-only alerts
+    the old rule applies: every populated world must be covered.
+    """
+
+    # The Probe covers exactly the camera world; a wider covered set or a
+    # "complete" claim for any other world is a forged scope.
+    if not _is_nonnegative_integer(active_world_id):
+        return ["active_world_id_invalid"]
+    blockers: List[str] = []
+    expected_world_ids = [active_world_id]
+    if covered_world_ids != expected_world_ids:
+        blockers.append("covered_world_ids_not_active_world_only")
+    if complete is True and populated_world_ids != expected_world_ids:
+        blockers.append("complete_populated_world_ids_not_active_world_only")
+    if complete is not True and not alerts_cover_all_worlds(state):
+        blockers.append("populated_world_coverage_incomplete")
+    return blockers
+
+
 def snapshot_trust_blockers(
     state: Optional[Dict[str, Any]],
     *,
@@ -381,16 +445,15 @@ def snapshot_trust_blockers(
             observation_scope.get("covered_world_ids")
         )
         complete = observation_scope.get("complete_for_populated_worlds")
-        if not _is_nonnegative_integer(active_world_id):
-            blockers.append("active_world_id_invalid")
-        else:
-            expected_world_ids = [active_world_id]
-            if covered_world_ids != expected_world_ids:
-                blockers.append("covered_world_ids_not_active_world_only")
-            if complete is True and populated_world_ids != expected_world_ids:
-                blockers.append("complete_populated_world_ids_not_active_world_only")
-        if complete is not True:
-            blockers.append("populated_world_coverage_incomplete")
+        blockers.extend(
+            observation_scope_coverage_blockers(
+                state,
+                active_world_id=active_world_id,
+                populated_world_ids=populated_world_ids,
+                covered_world_ids=covered_world_ids,
+                complete=complete,
+            )
+        )
     if (
         _is_nonnegative_integer(world_id)
         and _is_nonnegative_integer(active_world_id)

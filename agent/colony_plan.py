@@ -42,8 +42,10 @@ from agent.decision_frame_archive import (
     load_current_decision_context,
 )
 from agent.field_contracts import (
+    build_condition,
     condition_contract_blockers,
     condition_declaration_blockers,
+    contract_id_for_path,
 )
 from agent.state_quality import (
     canonical_state_hash,
@@ -307,6 +309,9 @@ def _validate_definition(definition: Dict[str, Any]) -> Tuple[str, str, List[Dic
             raise ColonyPlanError(f"Step {step_id} must include preconditions.")
         if not isinstance(effects, list) or not effects:
             raise ColonyPlanError(f"Step {step_id} must include expected_effects.")
+        completed_effects = raw.get("completed_effects")
+        if completed_effects is not None and not isinstance(completed_effects, list):
+            raise ColonyPlanError(f"Step {step_id} completed_effects must be a list.")
         dependencies = raw.get("dependencies", [])
         if not isinstance(dependencies, list) or any(not isinstance(item, str) for item in dependencies):
             raise ColonyPlanError(f"Step {step_id} dependencies must be a string list.")
@@ -334,6 +339,16 @@ def _validate_definition(definition: Dict[str, Any]) -> Tuple[str, str, List[Dic
                     _validate_condition(item, f"Step {step_id} expected effect", action=str(action))
                     for item in effects
                 ],
+                **(
+                    {
+                        "completed_effects": [
+                            _validate_condition(item, f"Step {step_id} completed effect", action=str(action))
+                            for item in completed_effects
+                        ]
+                    }
+                    if completed_effects
+                    else {}
+                ),
                 "not_before_cycle": not_before,
                 "not_after_cycle": not_after,
                 "risk": catalog_item.get("risk"),
@@ -541,10 +556,104 @@ def _binding_errors(plan: Dict[str, Any], state: Dict[str, Any], health: Dict[st
     if age is None or age > stale_after_seconds(state):
         errors.append("snapshot_not_fresh")
     checkpoint = plan.get("last_checkpoint") if isinstance(plan.get("last_checkpoint"), dict) else {}
-    effects = checkpoint.get("expected_effects") if isinstance(checkpoint.get("expected_effects"), list) else []
-    if effects and not all(_evaluate_condition(state, item) for item in effects if isinstance(item, dict)):
+    if not _checkpoint_holds(plan, checkpoint, state):
         errors.append("checkpoint_state_mismatch")
     return sorted(set(errors))
+
+
+# A completed step's marker may disappear once the colony finishes the work:
+# a dug cell loses its dig designation, a built blueprint stops being a
+# blueprint.  The checkpoint therefore accepts, per target cell, either the
+# step's expected effects or the finished state (review M3).  Anything else,
+# such as a marker cancelled while the cell is still solid, still stops the
+# plan.
+_CELL_GROUP_PATTERNS = {
+    "mark_dig_cells": re.compile(r"^(designations\.dig\.by_cell\.cell_\d+)\."),
+    "place_building_blueprint": re.compile(r"^(cells\.by_id\.cell_\d+)\."),
+    "place_utility_blueprint_path": re.compile(r"^(cells\.by_id\.cell_\d+)\."),
+}
+
+
+def _observed_condition(path: str, op: str, value: Any) -> Optional[Dict[str, Any]]:
+    contract_id = contract_id_for_path(path)
+    if contract_id is None:
+        return None
+    try:
+        return build_condition(path, op, value, contract_id, quality=("observed",))
+    except ValueError:
+        return None
+
+
+def _finished_cell_conditions(
+    action: str, prefix: str, group: List[Dict[str, Any]]
+) -> Optional[List[Dict[str, Any]]]:
+    if action == "mark_dig_cells":
+        specs = [(f"{prefix}.solid", "eq", False), (f"{prefix}.designation_present", "eq", False)]
+    else:
+        specs = [
+            (f"{prefix}.blueprint_present", "eq", False),
+            (f"{prefix}.object_count", "gt", 0),
+            (f"{prefix}.empty_for_blueprint", "eq", False),
+        ]
+        # The step's own "cannot place this building here" effect stays true
+        # once the building stands there.
+        specs.extend(
+            (str(item["path"]), "eq", False)
+            for item in group
+            if str(item.get("path") or "").startswith(f"{prefix}.can_place_")
+            and item.get("op") == "eq"
+            and item.get("value") is False
+        )
+    conditions = [_observed_condition(*spec) for spec in specs]
+    if any(item is None for item in conditions):
+        return None
+    return [item for item in conditions if item is not None]
+
+
+def _checkpoint_holds(plan: Dict[str, Any], checkpoint: Dict[str, Any], state: Dict[str, Any]) -> bool:
+    effects = checkpoint.get("expected_effects") if isinstance(checkpoint.get("expected_effects"), list) else []
+    effects = [item for item in effects if isinstance(item, dict)]
+    if all(_evaluate_condition(state, item) for item in effects):
+        return True
+    step_id = checkpoint.get("step_id")
+    step = next(
+        (item for item in plan.get("steps") or [] if isinstance(item, dict) and item.get("id") == step_id),
+        None,
+    )
+    if step is None or step.get("status") != "completed":
+        return False
+    action = str(step.get("action") or "")
+    completed = step.get("completed_effects") if isinstance(step.get("completed_effects"), list) else []
+    if completed and all(
+        isinstance(item, dict) and _evaluate_condition(state, item, action=action) for item in completed
+    ):
+        return True
+    pattern = _CELL_GROUP_PATTERNS.get(action)
+    if pattern is None:
+        return False
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    other: List[Dict[str, Any]] = []
+    for item in effects:
+        match = pattern.match(str(item.get("path") or ""))
+        if match:
+            groups.setdefault(match.group(1), []).append(item)
+        else:
+            other.append(item)
+    if not groups:
+        return False
+    any_finished = False
+    for prefix, group in groups.items():
+        if all(_evaluate_condition(state, item) for item in group):
+            continue
+        finished = _finished_cell_conditions(action, prefix, group)
+        if not finished or not all(_evaluate_condition(state, item) for item in finished):
+            return False
+        any_finished = True
+    if all(_evaluate_condition(state, item) for item in other):
+        return True
+    # A utility path's own record stops being fully active once any of its
+    # blueprints is built; every cell was checked above.
+    return action == "place_utility_blueprint_path" and any_finished
 
 
 def _step_by_id(plan: Dict[str, Any], step_id: str) -> Dict[str, Any]:

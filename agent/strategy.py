@@ -25,7 +25,13 @@ from contextvars import ContextVar
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from agent.state_quality import (
+    ALERTS_ACTIVE_WORLD_SCOPE,
+    ALERTS_ACTIVE_WORLD_SOURCE,
+    ALERTS_ALL_WORLDS_SCOPE,
+    ALERTS_ALL_WORLDS_SOURCE,
+    alerts_cover_all_worlds,
     canonical_state_hash,
+    observation_scope_coverage_blockers,
     field_quality,
     parse_snapshot_timestamp,
     quality_contract_blockers,
@@ -215,11 +221,9 @@ CERTIFYING_FIELD_CONTRACTS: Dict[str, Dict[str, Any]] = {
     "alerts": {
         "semantics": ("canonical_active_alert_ids",),
         "units": ("alert_id_list",),
-        "scopes": ("active_world",),
+        "scopes": (ALERTS_ALL_WORLDS_SCOPE, ALERTS_ACTIVE_WORLD_SCOPE),
         "completeness": ("complete",),
-        "sources": (
-            "Components.LiveMinionIdentities.GetWorldItems(activeWorldId,false)+typed_monitor_predicates;catalog=oni.alert.catalog.active_world.v1",
-        ),
+        "sources": (ALERTS_ALL_WORLDS_SOURCE, ALERTS_ACTIVE_WORLD_SOURCE),
         "captures": ("snapshot.ts",),
         "contract_ids": (ALERTS_CANONICAL_CONTRACT_ID,),
     },
@@ -268,6 +272,11 @@ CERTIFYING_FIELD_CONTRACTS: Dict[str, Dict[str, Any]] = {
         "scopes": ("active_world_registered_buildings",),
     },
     "buildings.outhouse": {
+        "semantics": ("raw_count",),
+        "units": ("count",),
+        "scopes": ("active_world_registered_buildings",),
+    },
+    "buildings.flush_toilet": {
         "semantics": ("raw_count",),
         "units": ("count",),
         "scopes": ("active_world_registered_buildings",),
@@ -1259,9 +1268,6 @@ def _observation_scope_blockers(state: Optional[Mapping[str, Any]]) -> List[str]
             f"{scope_path}:{blocker}"
             for blocker in _field_contract_blockers(state_dict, scope_path)
         )
-    if safe_get(state_dict, path) is not True:
-        blockers.append("populated_world_coverage_incomplete")
-
     scope = state_dict.get("observation_scope")
     populated = scope.get("populated_world_ids") if isinstance(scope, Mapping) else None
     covered = scope.get("covered_world_ids") if isinstance(scope, Mapping) else None
@@ -1282,17 +1288,34 @@ def _observation_scope_blockers(state: Optional[Mapping[str, Any]]) -> List[str]
         blockers.append("populated_world_ids_missing")
     if not covered_ids:
         blockers.append("covered_world_ids_missing")
-    if populated_ids is not None and covered_ids is not None and not set(populated_ids).issubset(covered_ids):
+    all_world_alerts = alerts_cover_all_worlds(state_dict)
+    if (
+        not all_world_alerts
+        and populated_ids is not None
+        and covered_ids is not None
+        and not set(populated_ids).issubset(covered_ids)
+    ):
         blockers.append("populated_world_not_covered")
-    if isinstance(active_world, bool) or not isinstance(active_world, int) or active_world < 0:
-        blockers.append("active_world_id_invalid")
-    else:
-        if covered_ids is not None and active_world not in covered_ids:
-            blockers.append("active_world_not_covered")
-        if covered_ids != [active_world]:
-            blockers.append("covered_world_ids_not_active_world_only")
-        if safe_get(state_dict, path) is True and populated_ids != [active_world]:
-            blockers.append("complete_populated_world_ids_not_active_world_only")
+    if (
+        isinstance(active_world, int)
+        and not isinstance(active_world, bool)
+        and covered_ids is not None
+        and active_world not in covered_ids
+    ):
+        blockers.append("active_world_not_covered")
+    # Multi-world aware (review M8): a populated world outside the covered
+    # set, or a camera on an empty world, keeps trust only while the survival
+    # alerts cover every world; the objectives then describe the camera world
+    # plus the save-global report rates and all-world alerts.
+    blockers.extend(
+        observation_scope_coverage_blockers(
+            state_dict,
+            active_world_id=active_world,
+            populated_world_ids=populated_ids,
+            covered_world_ids=covered_ids,
+            complete=safe_get(state_dict, path),
+        )
+    )
     top_level_world = state_dict.get("world_id")
     if (
         isinstance(active_world, int)
@@ -1436,16 +1459,14 @@ def _read_industry_deliverable(
     return actual >= required, actual_path or required_path, "observed", evidence_paths
 
 
-def _read_functional_building_operational(
+def _trusted_functional_payload(
     state: Optional[Mapping[str, Any]],
-    prefab_id: str | Sequence[str],
-) -> Tuple[Optional[bool], Optional[str], str]:
-    """Project trusted functional-building telemetry to one prefab tri-state.
+) -> Tuple[Optional[Mapping[str, Any]], Optional[str], str]:
+    """Return the contract-valid functional-building payload or its status.
 
-    The legacy completed-prefab count is intentionally separate.  A wholly
-    absent functional field preserves old snapshot compatibility, while any
-    present-but-unusable functional claim fails closed instead of falling back
-    to that count.
+    A wholly absent functional field preserves old snapshot compatibility
+    (path ``None``), while any present-but-unusable functional claim fails
+    closed instead of falling back to a legacy count.
     """
 
     path = "functional_buildings"
@@ -1479,27 +1500,91 @@ def _read_functional_building_operational(
         # This is defensive; the shared contract has already validated the
         # payload shape before this value is consumed.
         return None, path, "contract_mismatch"
+    return payload, path, "observed"
+
+
+def _operational_tri_state(values: Sequence[Any]) -> Tuple[Optional[bool], str]:
+    if any(value is False for value in values):
+        return False, "observed"
+    if values and all(value is True for value in values):
+        return True, "observed"
+    return None, "unknown"
+
+
+def _read_functional_building_operational(
+    state: Optional[Mapping[str, Any]],
+    prefab_id: str | Sequence[str],
+) -> Tuple[Optional[bool], Optional[str], str]:
+    """Project trusted functional-building telemetry to one prefab tri-state.
+
+    The legacy completed-prefab count is intentionally separate.
+    """
+
+    payload, path, status = _trusted_functional_payload(state)
+    if payload is None:
+        return None, path, status
     prefab_ids = (prefab_id,) if isinstance(prefab_id, str) else tuple(prefab_id)
     values = [
         instance.get("operational")
-        for instance in instances
+        for instance in payload["instances"]
         if isinstance(instance, Mapping) and instance.get("prefab_id") in prefab_ids
     ]
     if not values:
-        return None, path, "unknown"
-    if any(value is False for value in values):
-        return False, path, "observed"
-    if all(value is True for value in values):
-        return True, path, "observed"
-    return None, path, "unknown"
+        # The trusted view is complete: none of these prefabs exists.
+        return None, path, "absent"
+    operational, operational_status = _operational_tri_state(values)
+    return operational, path, operational_status
+
+
+_TOILET_PREFAB_IDS = ("Outhouse", "FlushToilet")
+
+
+def _read_functional_toilets(state: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Count Outhouse and FlushToilet instances in the trusted functional view.
+
+    The Probe's functional reader lists every completed instance of the
+    prefabs it supports.  A flush-toilet count of zero is only an observation
+    when the reader shows it covers FlushToilet: either it emitted at least one
+    FlushToilet instance or its optional ``prefab_ids`` list names it.
+    """
+
+    payload, path, status = _trusted_functional_payload(state)
+    result: Dict[str, Any] = {
+        "path": path,
+        "quality": status,
+        "outhouses": None,
+        "flush_toilets": None,
+        "operational": None,
+        "operational_quality": status,
+    }
+    if payload is None:
+        return result
+    toilets = [
+        instance
+        for instance in payload["instances"]
+        if isinstance(instance, Mapping) and instance.get("prefab_id") in _TOILET_PREFAB_IDS
+    ]
+    flush = [instance for instance in toilets if instance.get("prefab_id") == "FlushToilet"]
+    declared = payload.get("prefab_ids")
+    flush_covered = bool(flush) or (isinstance(declared, list) and "FlushToilet" in declared)
+    result["outhouses"] = len(toilets) - len(flush)
+    result["flush_toilets"] = len(flush) if flush_covered else None
+    if toilets:
+        result["operational"], result["operational_quality"] = _operational_tri_state(
+            [instance.get("operational") for instance in toilets]
+        )
+    else:
+        result["operational_quality"] = "absent"
+    return result
 
 
 def _read_functional_outhouse_operational(
     state: Optional[Mapping[str, Any]],
 ) -> Tuple[Optional[bool], Optional[str], str]:
-    """Compatibility wrapper for the sanitation objective."""
+    """Compatibility wrapper: operational state of every trusted toilet."""
 
-    return _read_functional_building_operational(state, "Outhouse")
+    toilets = _read_functional_toilets(state)
+    return toilets["operational"], toilets["path"], toilets["operational_quality"]
 
 
 def _read_strict_primary(
@@ -1776,9 +1861,11 @@ def collect_metrics(state: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     )
     diffuser, diffuser_path, diffuser_quality = _read_int(state, ("buildings.oxygen_diffuser",))
     outhouse, outhouse_path, outhouse_quality = _read_int(state, ("buildings.outhouse",))
-    functional_outhouse_operational, functional_outhouse_path, functional_outhouse_quality = (
-        _read_functional_outhouse_operational(state)
-    )
+    flush_toilet, flush_toilet_path, flush_toilet_quality = _read_int(state, ("buildings.flush_toilet",))
+    functional_toilets = _read_functional_toilets(state)
+    functional_outhouse_operational = functional_toilets["operational"]
+    functional_outhouse_path = functional_toilets["path"]
+    functional_outhouse_quality = functional_toilets["operational_quality"]
     functional_diffuser_operational, functional_diffuser_path, functional_diffuser_quality = (
         _read_functional_building_operational(state, ("OxygenDiffuser", "MineralDeoxidizer"))
     )
@@ -1978,6 +2065,7 @@ def collect_metrics(state: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         "idle": idle_path,
         "diffuser": diffuser_path,
         "outhouse": outhouse_path,
+        "flush_toilet": flush_toilet_path,
         "functional_outhouse_operational": functional_outhouse_path,
         "functional_diffuser_operational": functional_diffuser_path,
         "functional_generator_operational": functional_generator_path,
@@ -2030,6 +2118,7 @@ def collect_metrics(state: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         "idle": idle_quality,
         "diffuser": diffuser_quality,
         "outhouse": outhouse_quality,
+        "flush_toilet": flush_toilet_quality,
         "functional_outhouse_operational": functional_outhouse_quality,
         "functional_diffuser_operational": functional_diffuser_quality,
         "functional_generator_operational": functional_generator_quality,
@@ -2091,6 +2180,9 @@ def collect_metrics(state: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         "idle": idle,
         "oxygen_diffusers": diffuser,
         "outhouses": outhouse,
+        "flush_toilets": flush_toilet,
+        "functional_outhouses": functional_toilets["outhouses"],
+        "functional_flush_toilets": functional_toilets["flush_toilets"],
         "functional_outhouse_operational": functional_outhouse_operational,
         "functional_diffuser_operational": functional_diffuser_operational,
         "functional_generator_operational": functional_generator_operational,
@@ -2158,6 +2250,253 @@ def _action_for_objective(
     ]
 
 
+# Report-derived window rates (review M7).  The Probe publishes the game's own
+# daily-report counters (``ReportManager``) as raw observed values and leaves
+# every ``production.*``/``consumption.*`` window rate null.  The last closed
+# report is a complete one-cycle window: the game closes it at night time and
+# opens the next one, so ``positive`` is what the colony produced during that
+# cycle and ``-negative`` what it consumed.  The derivation below runs in this
+# process and the verifier recomputes it from the same raw counters, so a JSON
+# producer cannot manufacture a rate by self-declaring proof metadata.
+REPORT_RATE_POLICY_VERSION = "oni.report-rate.v1"
+REPORT_RATE_AUTHORITY = "oni.evidence-window.v1"
+_REPORT_CYCLE_SECONDS = 600.0
+_REPORT_COUNTER_MAXIMUM = 1_000_000_000_000.0
+# counter key, report entry, positive/negative field, raw unit, raw scope,
+# production path, consumption path, derived unit, divisor to the derived unit.
+_REPORT_RATE_SPECS: Tuple[Tuple[str, str, str, str, str, str, str, str, str, float], ...] = (
+    (
+        "oxygen_created",
+        "OxygenCreated",
+        "positive_kg",
+        "negative_kg",
+        "kg",
+        "save_report_manager_oxygen_created",
+        "production.oxygen_kg_per_cycle",
+        "consumption.oxygen_kg_per_cycle",
+        "kg/cycle",
+        1.0,
+    ),
+    # Not yet emitted by the Probe; accepted with the same raw contract when
+    # the report reader adds it.  Joules per 600 s cycle become watts.
+    (
+        "energy_created",
+        "EnergyCreated",
+        "positive_joules",
+        "negative_joules",
+        "J",
+        "save_report_manager_energy_created",
+        "production.power_watts",
+        "consumption.power_watts",
+        "W",
+        _REPORT_CYCLE_SECONDS,
+    ),
+)
+REPORT_RATE_PATHS = frozenset(
+    path for spec in _REPORT_RATE_SPECS for path in (spec[6], spec[7])
+)
+REPORT_RATE_POLICY_HASH = "sha256:" + hashlib.sha256(
+    repr(
+        (
+            REPORT_RATE_POLICY_VERSION,
+            "previous_closed_report_is_one_cycle;open_day=closed_day+1;open_day in {cycle,cycle+1};closed_day>=2",
+            tuple(spec[:10] for spec in _REPORT_RATE_SPECS),
+        )
+    ).encode("utf-8")
+).hexdigest()
+
+
+def _report_raw_quality_ok(
+    state: Dict[str, Any],
+    path: str,
+    *,
+    semantic: str,
+    unit: str,
+    scope: str,
+    completeness: str,
+    source: str,
+) -> bool:
+    return quality_contract_matches(
+        field_quality(state, path),
+        semantics=(semantic,),
+        units=(unit,),
+        scopes=(scope,),
+        completeness=(completeness,),
+        sources=(source,),
+    )
+
+
+def _report_day(state: Dict[str, Any], period: str) -> Optional[int]:
+    closed = period == "previous_closed"
+    path = f"report_counters.{period}.report_day"
+    if not _report_raw_quality_ok(
+        state,
+        path,
+        semantic="raw_closed_report_epoch" if closed else "raw_open_report_epoch",
+        unit="report_day",
+        scope="save",
+        completeness="complete",
+        source="ReportManager.reports[last].day" if closed else "ReportManager.TodaysReport.day",
+    ):
+        return None
+    value = safe_get(state, path)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
+def _derive_report_rate_fields(state: Any) -> Dict[str, Tuple[float, Dict[str, Any]]]:
+    """Return ``path -> (value, quality)`` for every derivable report rate."""
+
+    if not isinstance(state, Mapping):
+        return {}
+    state_dict = state if isinstance(state, dict) else dict(state)
+    closed_day = _report_day(state_dict, "previous_closed")
+    open_day = _report_day(state_dict, "current")
+    cycle = state_dict.get("cycle")
+    if (
+        closed_day is None
+        or open_day is None
+        # Day 1 starts at world generation, not at a night-time rollover.
+        or closed_day < 2
+        or open_day != closed_day + 1
+        or field_quality(state_dict, "cycle").get("status") != "observed"
+        or isinstance(cycle, bool)
+        or not isinstance(cycle, int)
+        # The open report is today's (or, after night time, tomorrow's), so
+        # the closed one is the latest complete cycle, not an old one.
+        or open_day not in (cycle, cycle + 1)
+    ):
+        return {}
+    derived: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+    for (
+        counter,
+        entry_name,
+        positive_key,
+        negative_key,
+        raw_unit,
+        raw_scope,
+        production_path,
+        consumption_path,
+        unit,
+        divisor,
+    ) in _REPORT_RATE_SPECS:
+        prefix = f"report_counters.previous_closed.{counter}"
+        source_prefix = f"ReportManager.reports[last].reportEntries[{entry_name}]"
+        values: Dict[str, float] = {}
+        for key, sign in ((positive_key, "positive"), (negative_key, "negative")):
+            path = f"{prefix}.{key}"
+            if not _report_raw_quality_ok(
+                state_dict,
+                path,
+                semantic=f"raw_closed_report_{sign}_counter",
+                unit=raw_unit,
+                scope=raw_scope,
+                completeness="complete_for_instrumented_report_events",
+                source=f"{source_prefix}.{sign.capitalize()}",
+            ):
+                break
+            number = _number(safe_get(state_dict, path))
+            if number is None or abs(number) > _REPORT_COUNTER_MAXIMUM:
+                break
+            if (sign == "positive" and number < 0.0) or (sign == "negative" and number > 0.0):
+                break
+            values[sign] = number
+        else:
+            inputs = {
+                "policy_version": REPORT_RATE_POLICY_VERSION,
+                "counter": counter,
+                "closed_report_day": closed_day,
+                "open_report_day": open_day,
+                "cycle": cycle,
+                "positive": values["positive"],
+                "negative": values["negative"],
+            }
+            input_hash = "sha256:" + hashlib.sha256(
+                repr(sorted(inputs.items())).encode("utf-8")
+            ).hexdigest()
+            for path, value in (
+                (production_path, values["positive"] / divisor),
+                (consumption_path, -values["negative"] / divisor + 0.0),
+            ):
+                derived[path] = (
+                    value,
+                    {
+                        "status": "observed",
+                        "source": source_prefix,
+                        "semantic": "window_rate",
+                        "unit": unit,
+                        "scope": "all_populated_worlds",
+                        "completeness": "complete",
+                        "authority": REPORT_RATE_AUTHORITY,
+                        "captured_at": "snapshot.ts",
+                        "input_hash": input_hash,
+                        "policy_hash": REPORT_RATE_POLICY_HASH,
+                        "policy_version": REPORT_RATE_POLICY_VERSION,
+                        "window": {"kind": "closed_daily_report", "report_day": closed_day},
+                    },
+                )
+    return derived
+
+
+def with_report_rates(state: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return a copy of ``state`` carrying the report-derived window rates.
+
+    A rate the producer itself marks observed is left untouched; only the
+    reserved null/unsupported rate fields are filled.  The input is never
+    mutated.
+    """
+
+    result = dict(state)
+    derived = _derive_report_rate_fields(result)
+    if not derived:
+        return result
+    quality = dict(result.get("quality")) if isinstance(result.get("quality"), Mapping) else {}
+    copied_groups: Dict[str, Dict[str, Any]] = {}
+    for path, (value, entry) in derived.items():
+        existing = quality.get(path)
+        if isinstance(existing, Mapping) and existing.get("status") == "observed":
+            continue
+        group, _, leaf = path.partition(".")
+        if group not in copied_groups:
+            original = result.get(group)
+            copied_groups[group] = dict(original) if isinstance(original, Mapping) else {}
+            result[group] = copied_groups[group]
+        copied_groups[group][leaf] = value
+        quality[path] = copy.deepcopy(entry)
+    result["quality"] = quality
+    return result
+
+
+def report_rate_proof_verifier(state: Mapping[str, Any], path: str, entry: Mapping[str, Any]) -> bool:
+    """Accept a rate only if it equals the in-process report derivation."""
+
+    if path not in REPORT_RATE_PATHS:
+        return False
+    expected = _derive_report_rate_fields(state).get(path)
+    if expected is None:
+        return False
+    expected_value, expected_entry = expected
+    state_dict = state if isinstance(state, dict) else dict(state)
+    actual_value = safe_get(state_dict, path)
+    return bool(
+        dict(entry) == expected_entry
+        and isinstance(actual_value, float)
+        and actual_value == expected_value
+    )
+
+
+def _with_report_rate_verifier(
+    verifier: Optional[TrustedProofVerifier],
+) -> TrustedProofVerifier:
+    def combined(state: Mapping[str, Any], path: str, entry: Mapping[str, Any]) -> bool:
+        if path in REPORT_RATE_PATHS and entry.get("policy_version") == REPORT_RATE_POLICY_VERSION:
+            return report_rate_proof_verifier(state, path, entry)
+        return bool(verifier is not None and verifier(state, path, entry) is True)
+
+    return combined
+
+
 def _evaluate_strategy_impl(
     state: Optional[Mapping[str, Any]],
     *,
@@ -2165,6 +2504,7 @@ def _evaluate_strategy_impl(
     now: Optional[dt.datetime] = None,
     previous_phase: Optional[str] = None,
     trusted_proof_verifier: Optional[TrustedProofVerifier] = None,
+    report_rates: bool = False,
 ) -> Dict[str, Any]:
     """Evaluate one snapshot, defaulting all self-declared proofs to untrusted.
 
@@ -2172,10 +2512,20 @@ def _evaluate_strategy_impl(
     than state metadata.  The live Bridge does not provide one yet; future
     derivation code must recompute input hashes and allowlist policy hashes
     before any window rate or certified assertion can satisfy a gate.
+
+    ``report_rates=True`` derives the oxygen (and, when present, energy)
+    window rates from the last closed daily report and installs the matching
+    in-process verifier for those paths only; other proof-required fields
+    still go to ``trusted_proof_verifier``.  The strategy's identity and state
+    hash stay those of the input snapshot.
     """
 
     if trusted_proof_verifier is not None and not callable(trusted_proof_verifier):
         raise StrategyError("trusted_proof_verifier must be callable")
+    identity_source = state if isinstance(state, Mapping) else None
+    if report_rates and isinstance(state, Mapping):
+        state = with_report_rates(state)
+        trusted_proof_verifier = _with_report_rate_verifier(trusted_proof_verifier)
     value = (
         _ProofBoundState(state, trusted_proof_verifier)
         if isinstance(state, Mapping) and trusted_proof_verifier is not None
@@ -2183,7 +2533,7 @@ def _evaluate_strategy_impl(
         if isinstance(state, Mapping)
         else None
     )
-    identity = _state_identity(value)
+    identity = _state_identity(identity_source)
     metrics = collect_metrics(value)
     stale = _state_is_stale(value)
     quality = quality_summary(dict(value) if isinstance(value, Mapping) else None)
@@ -2226,7 +2576,9 @@ def _evaluate_strategy_impl(
     oxygen_demand = metrics["oxygen_demand_kg_per_cycle"]
     functional_diffuser_path = metrics["paths"].get("functional_diffuser_operational")
     functional_diffuser_quality = metrics["qualities"].get("functional_diffuser_operational")
-    functional_diffuser_present = functional_diffuser_path is not None
+    # A complete functional view without any diffuser is not unknown
+    # telemetry: the oxygen balance alone decides (review M7).
+    functional_diffuser_present = functional_diffuser_path is not None and functional_diffuser_quality != "absent"
     functional_diffuser_failure = (
         functional_diffuser_present
         and functional_diffuser_quality == "observed"
@@ -2271,6 +2623,12 @@ def _evaluate_strategy_impl(
         if stale
         else "Observed functional OxygenDiffuser telemetry reports operational=false; oxygen production cannot be treated as safe."
         if functional_diffuser_failure
+        else (
+            f"Observed oxygen production {oxygen_production:.1f} kg/cycle is below consumption "
+            f"{oxygen_demand:.1f} kg/cycle; the colony is losing breathable oxygen."
+        )
+        if oxygen_production is not None and oxygen_demand is not None and oxygen_production < oxygen_demand
+        and not metrics["low_oxygen_alert"]
         else "Observed oxygen stock/rate margin or the conservative visible-cell oxygen diagnostic is unsafe, or a breathing alert is active."
         if oxygen_risk
         else "Functional OxygenDiffuser telemetry is present but unknown or contract-invalid; oxygen remains uncertified until a fresh complete observation is available."
@@ -2377,26 +2735,57 @@ def _evaluate_strategy_impl(
         )
     )
 
-    sanitation_inputs_observed = all(
-        metrics["qualities"].get(key) == "observed" for key in ("outhouse", "duplicants")
-    )
+    # Sanitation counts every toilet the colony can use: Outhouses and flush
+    # toilets (review M7).  A count comes from the observed completed-prefab
+    # counters or, when those are unusable, from the trusted functional
+    # instance view.  Too few Outhouses is only a risk when the flush toilets
+    # were observed too; otherwise they may cover the colony and the
+    # objective stays unknown instead of reporting an emergency.
+    duplicants_observed = metrics["qualities"].get("duplicants") == "observed"
     functional_outhouse_path = metrics["paths"].get("functional_outhouse_operational")
     functional_outhouse_quality = metrics["qualities"].get("functional_outhouse_operational")
     functional_field_present = functional_outhouse_path is not None
-    functional_outhouse_unknown = functional_field_present and functional_outhouse_quality != "observed"
+    functional_trusted = metrics.get("functional_outhouses") is not None
     functional_outhouse_failure = (
-        functional_field_present
+        functional_trusted
         and functional_outhouse_quality == "observed"
         and metrics["functional_outhouse_operational"] is False
     )
-    functional_outhouse_proof_observed = (
-        not functional_field_present or functional_outhouse_quality == "observed"
+    functional_outhouse_unknown = functional_field_present and (
+        not functional_trusted or functional_outhouse_quality == "unknown"
     )
-    sanitation_inputs_observed = sanitation_inputs_observed and functional_outhouse_proof_observed
-    sanitation_count_unknown = metrics["outhouses"] is None or expected_outhouses is None
-    sanitation_unknown = functional_outhouse_unknown or sanitation_count_unknown
-    sanitation_coverage_risk = (
-        not sanitation_count_unknown and metrics["outhouses"] < expected_outhouses
+    count_conflict = False
+    outhouse_count = metrics["outhouses"]
+    flush_count = metrics.get("flush_toilets")
+    if functional_trusted:
+        if outhouse_count is None:
+            outhouse_count = metrics["functional_outhouses"]
+        elif outhouse_count != metrics["functional_outhouses"]:
+            count_conflict = True
+    functional_flush = metrics.get("functional_flush_toilets")
+    if functional_flush is not None:
+        if flush_count is None:
+            flush_count = functional_flush
+        elif flush_count != functional_flush:
+            count_conflict = True
+    sanitation_count_unknown = outhouse_count is None or expected_outhouses is None
+    outhouses_cover = not sanitation_count_unknown and outhouse_count >= expected_outhouses
+    toilet_total = (
+        outhouse_count + flush_count
+        if outhouse_count is not None and flush_count is not None
+        else None
+    )
+    sanitation_coverage_risk = bool(
+        not sanitation_count_unknown
+        and not outhouses_cover
+        and toilet_total is not None
+        and toilet_total < expected_outhouses
+    )
+    flush_unobserved = bool(
+        not sanitation_count_unknown and not outhouses_cover and toilet_total is None
+    )
+    sanitation_unknown = (
+        functional_outhouse_unknown or count_conflict or sanitation_count_unknown or flush_unobserved
     )
     sanitation_status = (
         "blocked"
@@ -2408,26 +2797,38 @@ def _evaluate_strategy_impl(
         else "at_risk"
         if sanitation_coverage_risk
         else "satisfied"
-        if sanitation_inputs_observed
+        if duplicants_observed
         else "unknown"
     )
+    toilet_label = (
+        f"{outhouse_count} outhouse(s) and {flush_count} flush toilet(s)"
+        if flush_count is not None
+        else f"{outhouse_count} outhouse(s)"
+    )
     sanitation_reason = (
-        "Observed functional Outhouse telemetry reports operational=false for at least one Outhouse; "
+        "Observed functional toilet telemetry reports operational=false for at least one Outhouse or flush toilet; "
         "sanitation cannot be treated as satisfied."
         if functional_outhouse_failure
-        else "Functional Outhouse telemetry is present but unknown or contract-invalid; sanitation remains unknown "
+        else "Functional toilet telemetry is present but unknown or contract-invalid; sanitation remains unknown "
         "until a fresh, complete active-world observation is available."
         if functional_outhouse_unknown
-        else f"At least {expected_outhouses} outhouse(s) are required for {dupes} duplicants; observed {metrics['outhouses']}."
+        else "The completed-prefab toilet counts disagree with the functional instance view; sanitation remains unknown."
+        if count_conflict
+        else f"At least {expected_outhouses} toilet(s) are required for {dupes} duplicants; observed {toilet_label}."
         if sanitation_coverage_risk
         else (
-            "Outhouse coverage meets the conservative early-colony target; observed functional "
-            "Outhouse telemetry reports operational=true."
-            if functional_field_present and metrics["functional_outhouse_operational"] is True
-            else "Outhouse coverage meets the conservative early-colony target."
+            f"Observed {outhouse_count} outhouse(s), fewer than the {expected_outhouses} required for {dupes} "
+            "duplicants, and flush toilets are not observed; sanitation remains unknown."
+        )
+        if flush_unobserved
+        else (
+            "Toilet coverage meets the conservative early-colony target; observed functional "
+            "toilet telemetry reports operational=true."
+            if functional_trusted and metrics["functional_outhouse_operational"] is True
+            else "Toilet coverage meets the conservative early-colony target."
         )
         if not sanitation_unknown
-        else "Duplicant count or outhouse count is unavailable."
+        else "Duplicant count or toilet count is unavailable."
     )
     objectives.append(
         _objective(
@@ -2442,13 +2843,14 @@ def _evaluate_strategy_impl(
                 for p in (
                     metrics["paths"]["duplicants"],
                     metrics["paths"]["outhouse"],
+                    metrics["paths"].get("flush_toilet"),
                     functional_outhouse_path,
                 )
                 if p
             ],
-            completion=("Outhouse coverage >= one per four duplicants",),
+            completion=("Outhouse plus flush toilet coverage >= one per four duplicants",),
             recommended=_action_for_objective("sanitation", sanitation_status, sanitation_reason),
-            telemetry=("duplicants.total", "buildings.outhouse", "functional_buildings"),
+            telemetry=("duplicants.total", "buildings.outhouse", "buildings.flush_toilet", "functional_buildings"),
         )
     )
 
@@ -2496,7 +2898,7 @@ def _evaluate_strategy_impl(
     power_known = metrics["battery_percent"] is not None or metrics["critical_power_covered"] is not None
     functional_generator_path = metrics["paths"].get("functional_generator_operational")
     functional_generator_quality = metrics["qualities"].get("functional_generator_operational")
-    functional_generator_present = functional_generator_path is not None
+    functional_generator_present = functional_generator_path is not None and functional_generator_quality != "absent"
     functional_generator_failure = (
         functional_generator_present
         and functional_generator_quality == "observed"
@@ -3416,6 +3818,7 @@ def evaluate_strategy(
     now: Optional[dt.datetime] = None,
     previous_phase: Optional[str] = None,
     trusted_proof_verifier: Optional[TrustedProofVerifier] = None,
+    report_rates: bool = False,
 ) -> Dict[str, Any]:
     """Evaluate one snapshot with an evaluation-scoped quality-status cache."""
 
@@ -3427,6 +3830,7 @@ def evaluate_strategy(
             now=now,
             previous_phase=previous_phase,
             trusted_proof_verifier=trusted_proof_verifier,
+            report_rates=report_rates,
         )
     finally:
         _QUALITY_STATUS_CACHE.reset(cache_token)
@@ -3634,5 +4038,7 @@ __all__ = [
     "build_strategy_markdown",
     "collect_metrics",
     "evaluate_strategy",
+    "report_rate_proof_verifier",
+    "with_report_rates",
     "validate_strategy",
 ]
