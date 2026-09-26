@@ -1263,6 +1263,17 @@ def assert_recovery_evidence(fixture: Mapping[str, Any]) -> dict[str, Any]:
     return value
 
 
+def probe_only_mods(document: Mapping[str, Any]) -> bool:
+    # ONI loads a mod when enabledForDlc holds the active version
+    # (KMod.Mod.IsEnabledForActiveDlc: "" or "EXPANSION1_ID"); the legacy
+    # enabled flag alone does not decide loading.
+    mods = document["mods"]
+    return [item["staticID"] for item in mods if item["enabled"]] == [core.PROBE_STATIC_ID] and all(
+        [item["staticID"] for item in mods if version in item["enabledForDlc"]] == [core.PROBE_STATIC_ID]
+        for version in ("", "EXPANSION1_ID")
+    )
+
+
 def assert_runtime_configs_configured(fixture: Mapping[str, Any]) -> None:
     prefs = (pathlib.Path(fixture["oni"]) / "kplayerprefs.yaml").read_text(encoding="utf-8")
     assert_true(str(fixture["loader"]) in prefs, "outcome-unknown path lost configured loader bytes")
@@ -1270,7 +1281,7 @@ def assert_runtime_configs_configured(fixture: Mapping[str, Any]) -> None:
         (pathlib.Path(fixture["oni"]) / "mods" / "mods.json").read_text(encoding="utf-8")
     )
     assert_true(
-        [item["staticID"] for item in mods["mods"] if item["enabled"]] == [core.PROBE_STATIC_ID],
+        probe_only_mods(mods),
         "outcome-unknown path lost the Probe-only mod configuration",
     )
 
@@ -1467,13 +1478,11 @@ def scenario_positive(base: pathlib.Path) -> dict[str, str]:
         "loader policy lost exact-path or built-in one-shot semantics",
     )
     after_mods = json.loads((pathlib.Path(fixture["oni"]) / "mods" / "mods.json").read_text(encoding="utf-8"))
-    assert_true(
-        [item["staticID"] for item in after_mods["mods"] if item["enabled"]] == [core.PROBE_STATIC_ID],
-        "Probe was not the only enabled mod",
-    )
+    assert_true(probe_only_mods(after_mods), "Probe was not the only enabled mod")
     for before, after in zip(before_mods["mods"], after_mods["mods"]):
         projected = dict(before)
         projected["enabled"] = after["enabled"]
+        projected["enabledForDlc"] = after["enabledForDlc"]
         assert_true(projected == after, "a non-enabled mod field changed")
     return {
         "apply": "passed",

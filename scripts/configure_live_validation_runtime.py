@@ -4236,6 +4236,11 @@ def _array_elements(text: str, position: int) -> tuple[list[tuple[int, int]], in
         position = _skip_ws(text, position + 1)
 
 
+# ONI enables mods per game version: base game ("") and Spaced Out.
+MOD_ACTIVE_VERSIONS = ("", "EXPANSION1_ID")
+PROBE_ENABLED_FOR_DLC = '["", "EXPANSION1_ID"]'
+
+
 def build_mods_json(payload: bytes) -> tuple[bytes, int]:
     text, bom = decode_utf8_preserving_bom(payload, "mods/mods.json")
     try:
@@ -4262,6 +4267,11 @@ def build_mods_json(payload: bytes) -> tuple[bytes, int]:
         static_ids.add(folded)
         if not isinstance(item.get("enabled"), bool):
             raise ConfigError("mods/mods.json contains a non-boolean enabled field")
+        dlc_ids = item.get("enabledForDlc")
+        if not isinstance(dlc_ids, list) or not all(isinstance(value, str) for value in dlc_ids):
+            # ONI decides loading with enabledForDlc; a missing list would be
+            # migrated from "enabled" to the base game only.
+            raise ConfigError("mods/mods.json mod entry lacks a string enabledForDlc list")
         enabled = static_id == PROBE_STATIC_ID
         desired_enabled.append(enabled)
         probe_count += int(enabled)
@@ -4290,9 +4300,23 @@ def build_mods_json(payload: bytes) -> tuple[bytes, int]:
         if text[left:right] not in {"true", "false"}:
             raise ConfigError("mod enabled token is not a JSON boolean")
         replacements.append((left, right, "true" if desired_enabled[index] else "false"))
+        # The game loads a mod only when enabledForDlc contains the active
+        # version (KMod.Mod.IsEnabledForActiveDlc); the legacy "enabled" flag
+        # alone left every other mod active under Spaced Out (code review
+        # 2026-09-26, S2).  Enable only the Probe, for both versions.
+        dlc_members = [(left, right) for key, left, right in members if key == "enabledForDlc"]
+        if len(dlc_members) != 1:
+            raise ConfigError("each mod entry must have one top-level enabledForDlc field")
+        left, right = dlc_members[0]
+        replacements.append((left, right, PROBE_ENABLED_FOR_DLC if desired_enabled[index] else "[]"))
     changed = text
-    for left, right, replacement in reversed(replacements):
+    for left, right, replacement in sorted(replacements, reverse=True):
         changed = changed[:left] + replacement + changed[right:]
+    effective = json.loads(changed)["mods"]
+    for version in MOD_ACTIVE_VERSIONS:
+        loaded = [item["staticID"] for item in effective if version in item["enabledForDlc"]]
+        if loaded != [PROBE_STATIC_ID]:
+            raise ConfigError("configured mods.json does not load exactly the Probe")
     desired = bom + changed.encode("utf-8")
     return desired, len(mods)
 
