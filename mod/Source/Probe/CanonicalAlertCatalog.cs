@@ -8,17 +8,26 @@ namespace OniAiProbeMod.Probe
     {
         private CanonicalAlertReadResult(
             List<string> alerts,
+            List<Dictionary<string, object>> worlds,
             string status,
             string source,
             string failureReason)
         {
             Alerts = alerts;
+            Worlds = worlds;
             Status = status;
             Source = source;
             FailureReason = failureReason;
         }
 
         internal List<string> Alerts { get; }
+
+        /// <summary>
+        /// One entry per world that holds live duplicants, ordered by world id:
+        /// { world_id (int, or null when the duplicant's cell has no world),
+        ///   duplicant_count, alerts (canonical sorted IDs) }.
+        /// </summary>
+        internal List<Dictionary<string, object>> Worlds { get; }
 
         internal string Status { get; }
 
@@ -30,28 +39,37 @@ namespace OniAiProbeMod.Probe
 
         internal object Value => Status == "observed" ? (object)Alerts : null;
 
+        internal object WorldsValue => Status == "observed" && Worlds != null ? (object)Worlds : null;
+
         internal static CanonicalAlertReadResult Observed(List<string> alerts, string source)
         {
-            return new CanonicalAlertReadResult(alerts, "observed", source, null);
+            return new CanonicalAlertReadResult(alerts, null, "observed", source, null);
+        }
+
+        internal CanonicalAlertReadResult WithWorlds(List<Dictionary<string, object>> worlds)
+        {
+            return new CanonicalAlertReadResult(Alerts, worlds, Status, Source, FailureReason);
         }
 
         internal static CanonicalAlertReadResult Unsupported(string source, string failureReason)
         {
-            return new CanonicalAlertReadResult(null, "unsupported", source, failureReason);
+            return new CanonicalAlertReadResult(null, null, "unsupported", source, failureReason);
         }
 
         internal static CanonicalAlertReadResult Error(string source, string failureReason)
         {
-            return new CanonicalAlertReadResult(null, "error", source, failureReason);
+            return new CanonicalAlertReadResult(null, null, "error", source, failureReason);
         }
     }
 
     /// <summary>
-    /// Versioned vocabulary and canonicalization boundary for active-world alerts.
+    /// Versioned vocabulary and canonicalization boundary for colony alerts.
+    /// The vocabulary is unchanged from active_world.v1; the ID moved when the
+    /// reader started covering every world (code review 2026-09-26, G3).
     /// </summary>
     internal static class CanonicalAlertCatalog
     {
-        internal const string CatalogId = "oni.alert.catalog.active_world.v1";
+        internal const string CatalogId = "oni.alert.catalog.all_worlds.v1";
         internal const int MaximumAlertCount = 128;
 
         internal const string BionicLowBattery = "bionic_low_battery";

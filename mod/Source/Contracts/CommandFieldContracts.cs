@@ -110,7 +110,9 @@ namespace OniAiProbeMod.Contracts
             CanonicalAlertReader.Source,
             "canonical_active_alert_ids",
             "alert_id_list",
-            "active_world",
+            // Equals CanonicalAlertReader.Scope (CommandContractsHarness checks
+            // it); a literal keeps this file compilable against reader stubs.
+            "all_worlds",
             "observed|complete");
 
         private static readonly CommandFieldContract ActiveWorldDuplicantCount = new CommandFieldContract(

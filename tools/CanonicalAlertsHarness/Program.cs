@@ -20,7 +20,7 @@ namespace OniAiProbeMod.Probe
                 StandardHazardsAreTypedAndSorted();
                 BionicHazardsAreTypedAndSorted();
                 ReaderFailsClosed();
-                ReaderBindsOneActiveWorld();
+                ReaderCoversEveryWorld();
                 Console.WriteLine(
                     "PASS canonical alerts harness: " +
                     string.Join(", ", Passed) +
@@ -165,16 +165,9 @@ namespace OniAiProbeMod.Probe
             Require(missingMonitor.Status == "error" && missingMonitor.Value == null, "missing SMI produced a partial list");
 
             ResetWorld(9);
-            Components.LiveMinionIdentities.OverrideItems = new MinionIdentity[] { null };
+            Components.LiveMinionIdentities.Items = new List<MinionIdentity> { null };
             CanonicalAlertReadResult destroyed = CanonicalAlertReader.Read();
-            Require(destroyed.Status == "error" && destroyed.Value == null && destroyed.FailureReason == "duplicant_identity_invalid", "null/destroyed identity did not fail closed");
-
-            ResetWorld(9);
-            MinionIdentity wrongWorld = HealthyStandardMinion(350);
-            wrongWorld.WorldId = 10;
-            Components.LiveMinionIdentities.OverrideItems = new[] { wrongWorld };
-            CanonicalAlertReadResult mixedWorld = CanonicalAlertReader.Read();
-            Require(mixedWorld.Status == "error" && mixedWorld.Value == null && mixedWorld.FailureReason == "duplicant_identity_invalid", "mixed-world identity did not fail closed");
+            Require(destroyed.Status == "error" && destroyed.Value == null && destroyed.WorldsValue == null && destroyed.FailureReason == "duplicant_identity_invalid", "null/destroyed identity did not fail closed");
 
             ResetWorld(9);
             MinionIdentity first = HealthyStandardMinion(404);
@@ -193,15 +186,59 @@ namespace OniAiProbeMod.Probe
             Passed.Add("reader_fail_closed");
         }
 
-        private static void ReaderBindsOneActiveWorld()
+        // Code review 2026-09-26, G3: a duplicant suffocating on a second
+        // asteroid or in a rocket interior must reach the canonical list, and
+        // every alert must carry the world it was observed on.
+        private static void ReaderCoversEveryWorld()
         {
-            ResetWorld(10);
-            Components.LiveMinionIdentities.OverrideItems = new WorldChangingEnumerable(
-                HealthyStandardMinion(505),
-                11);
-            CanonicalAlertReadResult changed = CanonicalAlertReader.Read();
-            Require(changed.Status == "error" && changed.Value == null && changed.FailureReason == "active_world_changed_during_read", "world-switch TOCTOU did not fail closed");
-            Passed.Add("active_world_toctou");
+            ResetWorld(0);
+            MinionIdentity home = HealthyStandardMinion(601);
+            MinionIdentity rocket = HealthyStandardMinion(602);
+            rocket.WorldId = 2;
+            rocket.Smi(new SuffocationMonitor.Instance
+            {
+                CanBreathe = false,
+                Suffocating = true,
+                oxygenBreather = new OxygenBreather()
+            });
+            MinionIdentity inTransit = HealthyStandardMinion(603);
+            inTransit.WorldId = -1;
+            inTransit.Smi(new CalorieMonitor.Instance { Starving = true });
+            Components.LiveMinionIdentities.Items.AddRange(new[] { rocket, home, inTransit });
+
+            CanonicalAlertReadResult result = CanonicalAlertReader.Read();
+            Require(result.Status == "observed" && result.Completeness == "complete", "multi-world read not observed/complete");
+            Require(
+                result.Alerts.SequenceEqual(new[]
+                {
+                    CanonicalAlertCatalog.LowOxygen,
+                    CanonicalAlertCatalog.Starvation,
+                    CanonicalAlertCatalog.Suffocation
+                }),
+                "off-camera hazards missing from the canonical union: " + string.Join(",", result.Alerts));
+            Require(ReferenceEquals(result.WorldsValue, result.Worlds) && result.Worlds.Count == 3, "world groups missing");
+            RequireWorld(result.Worlds[0], null, 1, CanonicalAlertCatalog.Starvation);
+            RequireWorld(result.Worlds[1], 0, 1);
+            RequireWorld(result.Worlds[2], 2, 1, CanonicalAlertCatalog.LowOxygen, CanonicalAlertCatalog.Suffocation);
+
+            // The camera's world is irrelevant to a colony-wide read.
+            ClusterManager.Instance.activeWorldId = -1;
+            CanonicalAlertReadResult noCamera = CanonicalAlertReader.Read();
+            Require(noCamera.Status == "observed" && noCamera.Alerts.SequenceEqual(result.Alerts), "read depended on the active world");
+
+            ResetWorld(0);
+            CanonicalAlertReadResult empty = CanonicalAlertReader.Read();
+            Require(empty.Status == "observed" && empty.Alerts.Count == 0 && empty.Worlds.Count == 0, "empty colony not observed as empty");
+            Passed.Add("all_worlds_tagged");
+        }
+
+        private static void RequireWorld(Dictionary<string, object> world, int? worldId, int duplicants, params string[] alerts)
+        {
+            object id = world["world_id"];
+            Require(worldId.HasValue ? id is int value && value == worldId.Value : id == null, "world id tag is wrong");
+            Require((int)world["duplicant_count"] == duplicants, "world duplicant count is wrong");
+            Require(((List<string>)world["alerts"]).SequenceEqual(alerts), "world alerts are wrong for world " + (id ?? "null"));
+            Require(world.Count == 3, "world group has unexpected fields");
         }
 
         private static void ResetWorld(int worldId)
@@ -264,13 +301,7 @@ internal static class Components
 
 internal sealed class LiveMinionRegistry
 {
-    internal List<MinionIdentity> Items { get; } = new List<MinionIdentity>();
-    internal IEnumerable<MinionIdentity> OverrideItems { get; set; }
-
-    internal IEnumerable<MinionIdentity> GetWorldItems(int worldId, bool checkChildWorlds)
-    {
-        return OverrideItems ?? Items.Where(item => item != null && item.WorldId == worldId);
-    }
+    internal List<MinionIdentity> Items { get; set; } = new List<MinionIdentity>();
 }
 
 internal sealed class MinionIdentity
@@ -403,24 +434,4 @@ internal sealed class BionicBatteryMonitor
     }
 
     internal static bool IsCriticallyLow(Instance instance) => instance.CriticallyLow;
-}
-
-internal sealed class WorldChangingEnumerable : IEnumerable<MinionIdentity>
-{
-    private readonly MinionIdentity identity;
-    private readonly int replacementWorldId;
-
-    internal WorldChangingEnumerable(MinionIdentity identity, int replacementWorldId)
-    {
-        this.identity = identity;
-        this.replacementWorldId = replacementWorldId;
-    }
-
-    public IEnumerator<MinionIdentity> GetEnumerator()
-    {
-        yield return identity;
-        ClusterManager.Instance.activeWorldId = replacementWorldId;
-    }
-
-    IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 }

@@ -4,7 +4,14 @@ using System.Collections.Generic;
 namespace OniAiProbeMod.Probe
 {
     /// <summary>
-    /// Reads a deliberately small, versioned set of direct active-world hazards.
+    /// Reads a deliberately small, versioned set of direct duplicant hazards for
+    /// every live duplicant in the cluster, whichever world it is on.
+    ///
+    /// Code review 2026-09-26, G3: the reader used to scan only the camera's
+    /// world, without child worlds, and still report the list as complete, so
+    /// a duplicant suffocating on a second asteroid or inside a rocket produced
+    /// alerts=[].  The flat list stays the canonical union (same shape);
+    /// alerts_by_world tags each alert with the world it was observed on.
     ///
     /// This reader does not inspect NotificationManager/NotificationScreen state,
     /// localized titles, diagnostic messages, or private fields.  Every emitted ID
@@ -14,9 +21,14 @@ namespace OniAiProbeMod.Probe
     internal static class CanonicalAlertReader
     {
         internal const int DuplicantEnumerationLimit = 1000;
+        internal const string Scope = "all_worlds";
         internal const string Source =
-            "Components.LiveMinionIdentities.GetWorldItems(activeWorldId,false)+typed_monitor_predicates;catalog=" +
+            "Components.LiveMinionIdentities.Items+GetMyWorldId+typed_monitor_predicates;catalog=" +
             CanonicalAlertCatalog.CatalogId;
+
+        // Duplicants whose cell has no world (Grid.WorldIdx 255, e.g. between
+        // cells in a transit tube) are still read; they are grouped here.
+        private const int UnknownWorldKey = int.MinValue;
 
         internal static CanonicalAlertReadResult Read()
         {
@@ -28,15 +40,7 @@ namespace OniAiProbeMod.Probe
                     return CanonicalAlertReadResult.Unsupported(Source, "cluster_manager_unavailable");
                 }
 
-                int activeWorldId = manager.activeWorldId;
-                if (activeWorldId < 0)
-                {
-                    return CanonicalAlertReadResult.Unsupported(Source, "active_world_unavailable");
-                }
-
-                IEnumerable<MinionIdentity> identities = Components.LiveMinionIdentities.GetWorldItems(
-                    activeWorldId,
-                    checkChildWorlds: false);
+                List<MinionIdentity> identities = Components.LiveMinionIdentities.Items;
                 if (identities == null)
                 {
                     return CanonicalAlertReadResult.Error(Source, "live_minion_registry_unavailable");
@@ -44,13 +48,14 @@ namespace OniAiProbeMod.Probe
 
                 HashSet<int> instanceIds = new HashSet<int>();
                 HashSet<string> alerts = new HashSet<string>(StringComparer.Ordinal);
+                SortedDictionary<int, WorldAlerts> worlds = new SortedDictionary<int, WorldAlerts>();
                 foreach (MinionIdentity identity in identities)
                 {
                     if (instanceIds.Count >= DuplicantEnumerationLimit)
                     {
                         return CanonicalAlertReadResult.Error(Source, "duplicant_limit_exceeded");
                     }
-                    if (identity == null || identity.GetMyWorldId() != activeWorldId)
+                    if (identity == null)
                     {
                         return CanonicalAlertReadResult.Error(Source, "duplicant_identity_invalid");
                     }
@@ -68,30 +73,60 @@ namespace OniAiProbeMod.Probe
                         return CanonicalAlertReadResult.Error(Source, "duplicant_model_invalid");
                     }
 
+                    int worldId = identity.GetMyWorldId();
+                    int worldKey = worldId < 0 ? UnknownWorldKey : worldId;
+                    WorldAlerts world;
+                    if (!worlds.TryGetValue(worldKey, out world))
+                    {
+                        world = new WorldAlerts();
+                        worlds.Add(worldKey, world);
+                    }
+                    world.DuplicantCount++;
+
                     string failureReason;
-                    if (!ReadCommonHazards(identity, alerts, out failureReason) ||
+                    if (!ReadCommonHazards(identity, world.Alerts, out failureReason) ||
                         (standard
-                            ? !ReadStandardHazards(identity, alerts, out failureReason)
-                            : !ReadBionicHazards(identity, alerts, out failureReason)))
+                            ? !ReadStandardHazards(identity, world.Alerts, out failureReason)
+                            : !ReadBionicHazards(identity, world.Alerts, out failureReason)))
                     {
                         return CanonicalAlertReadResult.Error(Source, failureReason);
                     }
                 }
 
-                // Bind the complete scan to one active world.  A UI world switch
-                // during enumeration makes the whole field unusable rather than
-                // returning a mixed-world empty/partial list.
-                if (!ReferenceEquals(ClusterManager.Instance, manager) || manager.activeWorldId != activeWorldId)
+                foreach (WorldAlerts world in worlds.Values)
                 {
-                    return CanonicalAlertReadResult.Error(Source, "active_world_changed_during_read");
+                    alerts.UnionWith(world.Alerts);
+                }
+                CanonicalAlertReadResult union = CanonicalAlertCatalog.Observed(alerts, Source);
+                if (union.Status != "observed")
+                {
+                    return union;
                 }
 
-                return CanonicalAlertCatalog.Observed(alerts, Source);
+                List<Dictionary<string, object>> tagged = new List<Dictionary<string, object>>(worlds.Count);
+                foreach (KeyValuePair<int, WorldAlerts> entry in worlds)
+                {
+                    // A subset of an accepted union: canonicalization cannot fail.
+                    CanonicalAlertReadResult world = CanonicalAlertCatalog.Observed(entry.Value.Alerts, Source);
+                    tagged.Add(new Dictionary<string, object>
+                    {
+                        { "world_id", entry.Key == UnknownWorldKey ? null : (object)entry.Key },
+                        { "duplicant_count", entry.Value.DuplicantCount },
+                        { "alerts", world.Alerts }
+                    });
+                }
+                return union.WithWorlds(tagged);
             }
             catch
             {
                 return CanonicalAlertReadResult.Error(Source, "typed_alert_read_failed");
             }
+        }
+
+        private sealed class WorldAlerts
+        {
+            internal readonly HashSet<string> Alerts = new HashSet<string>(StringComparer.Ordinal);
+            internal int DuplicantCount;
         }
 
         private static bool ReadCommonHazards(

@@ -191,7 +191,7 @@
     "alert_integration_source_path": "mod/Source/Probe/ProbeStateReader.cs",
     "alert_contract_source_path": "mod/Source/Contracts/CommandFieldContracts.cs",
     "required_alert_catalog_markers": [
-      "internal const string CatalogId = \"oni.alert.catalog.active_world.v1\";",
+      "internal const string CatalogId = \"oni.alert.catalog.all_worlds.v1\";",
       "internal const int MaximumAlertCount = 128;",
       "SortedSet<string> normalized = new SortedSet<string>(StringComparer.Ordinal);",
       "KnownIds.Contains(candidate)",
@@ -200,10 +200,10 @@
     "required_alert_reader_markers": [
       "internal const int DuplicantEnumerationLimit = 1000;",
       "CanonicalAlertCatalog.CatalogId",
-      "Components.LiveMinionIdentities.GetWorldItems(",
-      "checkChildWorlds: false",
+      "List<MinionIdentity> identities = Components.LiveMinionIdentities.Items;",
+      "internal const string Scope = \"all_worlds\";",
       "HashSet<int> instanceIds = new HashSet<int>();",
-      "identity.GetMyWorldId() != activeWorldId",
+      "int worldId = identity.GetMyWorldId();",
       "standard == bionic",
       "identity.GetSMI<SuffocationMonitor.Instance>()",
       "identity.GetSMI<StressMonitor.Instance>()",
@@ -213,8 +213,9 @@
       "identity.GetSMI<BionicOxygenTankMonitor.Instance>()",
       "oxygenPercentage > 1.0f",
       "case Health.HealthState.Dead:",
-      "manager.activeWorldId != activeWorldId",
-      "CanonicalAlertCatalog.Observed(alerts, Source)"
+      "{ \"world_id\", entry.Key == UnknownWorldKey ? null : (object)entry.Key }",
+      "CanonicalAlertCatalog.Observed(alerts, Source)",
+      "return union.WithWorlds(tagged);"
     ],
     "forbidden_alert_reader_markers": [
       "NotificationManager.Instance",
@@ -222,12 +223,15 @@
       ".titleText",
       "BindingFlags.",
       "ColonyDiagnosticUtility.GetDiagnostic",
-      "AlertManager.ActiveWorldCanonical"
+      "AlertManager.ActiveWorldCanonical",
+      "GetWorldItems(",
+      "checkChildWorlds"
     ],
     "required_alert_integration_markers": [
       "CanonicalAlertReader.Read",
       "CanonicalAlertReadResult.Error(",
       "{ \"alerts\", alertResult.Value }",
+      "{ \"alerts_by_world\", alertResult.WorldsValue }",
       "\"canonical_active_alert_ids\"",
       "\"alert_id_list\"",
       "CommandFieldContracts.CanonicalAlertsId"
@@ -835,13 +839,13 @@
           "alert_id_list"
         ],
         "scopes": [
-          "active_world"
+          "all_worlds"
         ],
         "completeness": [
           "complete"
         ],
         "sources": [
-          "Components.LiveMinionIdentities.GetWorldItems(activeWorldId,false)+typed_monitor_predicates;catalog=oni.alert.catalog.active_world.v1"
+          "Components.LiveMinionIdentities.Items+GetMyWorldId+typed_monitor_predicates;catalog=oni.alert.catalog.all_worlds.v1"
         ],
         "contract_ids": [
           "oni.qc.alerts.canonical.v1"

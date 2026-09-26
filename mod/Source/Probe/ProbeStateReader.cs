@@ -370,6 +370,7 @@ namespace OniAiProbeMod.Probe
                 { "resilience", survival.Resilience },
                 { "colony", survival.Colony },
                 { "alerts", alertResult.Value },
+                { "alerts_by_world", alertResult.WorldsValue },
                 { "research", research },
                 { "buildings", buildings },
                 { "functional_buildings", functionalBuildings },
@@ -3039,15 +3040,23 @@ namespace OniAiProbeMod.Probe
                 CanonicalAlertReader.Source,
                 "canonical_active_alert_ids",
                 "alert_id_list",
-                "active_world",
+                CanonicalAlertReader.Scope,
                 alertCompleteness,
                 CommandFieldContracts.CanonicalAlertsId);
+            Dictionary<string, object> alertWorldQuality = Quality(
+                alertStatus,
+                CanonicalAlertReader.Source,
+                "canonical_active_alert_ids_by_world",
+                "world_alert_groups",
+                CanonicalAlertReader.Scope,
+                alertCompleteness);
             string alertFailureReason = alertResult?.FailureReason ?? "alert_result_missing";
             if (!string.IsNullOrEmpty(alertFailureReason))
             {
                 // Diagnostic only: executor authorization remains bound to the
                 // trusted contract fields above and never consumes this reason.
                 alertQuality["reason"] = alertFailureReason;
+                alertWorldQuality["reason"] = alertFailureReason;
             }
 
             Dictionary<string, object> quality = new Dictionary<string, object>
@@ -3113,6 +3122,7 @@ namespace OniAiProbeMod.Probe
                 { "resources.oxygen_kg_estimate", Quality("unsupported", "none") },
                 { "resources.water_kg_estimate", Quality("unsupported", "none") },
                 { "alerts", alertQuality },
+                { "alerts_by_world", alertWorldQuality },
                 { "research.current", Quality(
                     researchStatus,
                     researchSource,

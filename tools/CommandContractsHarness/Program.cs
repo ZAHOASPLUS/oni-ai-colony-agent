@@ -222,7 +222,7 @@ namespace OniAiProbeMod.Contracts
                         CanonicalAlertReader.Source,
                         "canonical_active_alert_ids",
                         "alert_id_list",
-                        "active_world",
+                        CanonicalAlertReader.Scope,
                         "observed",
                         "complete"));
                 JObject alertsContains = Condition(

@@ -340,11 +340,11 @@
         },
         "alerts": {
           "status": "observed",
-          "source": "Components.LiveMinionIdentities.GetWorldItems(activeWorldId,false)+typed_monitor_predicates;catalog=oni.alert.catalog.active_world.v1",
+          "source": "Components.LiveMinionIdentities.Items+GetMyWorldId+typed_monitor_predicates;catalog=oni.alert.catalog.all_worlds.v1",
           "contract_id": "oni.qc.alerts.canonical.v1",
           "semantic": "canonical_active_alert_ids",
           "unit": "alert_id_list",
-          "scope": "active_world",
+          "scope": "all_worlds",
           "completeness": "complete",
           "captured_at": "snapshot.ts"
         },
