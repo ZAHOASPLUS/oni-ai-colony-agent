@@ -18,6 +18,13 @@ namespace OniAiProbeMod
 
             ProbeWriter.Initialize();
             StartupBinding.Initialize(ProbeWriter.BridgeDirectory);
+            if (StartupBinding.WasAccepted)
+            {
+                // P0-1: a validation process must never run ONI's autosave
+                // rotation, which deletes the user's own colony autosaves.
+                AutosaveGuard.Activate("startup_binding_accepted");
+                Debug.Log(LogPrefix + " Autosave disabled for this validation process");
+            }
             ProbeSession.InitializeProcess();
             ProbeWriter.WriteEvent("probe_loaded", new Dictionary<string, object>
             {

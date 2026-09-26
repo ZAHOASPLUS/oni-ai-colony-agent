@@ -27,6 +27,9 @@ namespace OniAiProbeMod.Probe
                 reason,
                 TrustedSessionStartReason,
                 StringComparison.Ordinal);
+            // Before anything else can let the game clock run: the interval just
+            // came back from the save, so force autosave off again (P0-1).
+            AutosaveGuard.OnSessionStarted();
             ProbeSession.StartSaveSession();
             ProbeStateReader.ResetSession();
             if (trustedReason)
@@ -62,6 +65,15 @@ namespace OniAiProbeMod.Probe
             {
                 { "reason", reason }
             });
+            // After save_loaded: startup evidence requires session_started and
+            // save_loaded to be the session's first two records.
+            if (AutosaveGuard.IsActive)
+            {
+                ProbeWriter.WriteEvent("autosave_guard", new Dictionary<string, object>
+                {
+                    { "autosave", AutosaveGuard.Describe() }
+                });
+            }
         }
 
         public static void Stop(string reason)
@@ -94,6 +106,18 @@ namespace OniAiProbeMod.Probe
 
         private void Update()
         {
+            int? overwrittenInterval = AutosaveGuard.Tick(Time.unscaledTime);
+            if (overwrittenInterval.HasValue)
+            {
+                // Something (the options screen, another mod) turned autosave
+                // back on during a validation session.
+                ProbeWriter.WriteEvent("autosave_guard_enforced", new Dictionary<string, object>
+                {
+                    { "overwritten_interval", overwrittenInterval.Value },
+                    { "autosave", AutosaveGuard.Describe() }
+                });
+            }
+
             if (ProbeWriter.HasSafetyFault)
             {
                 StopControllers();

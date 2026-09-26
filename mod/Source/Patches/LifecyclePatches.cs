@@ -34,6 +34,74 @@ namespace OniAiProbeMod.Patches
             PatchFirst(harmony, "Game", StartMethods, nameof(OnGameStarted), "game_start");
             PatchFirst(harmony, "Game", StopMethods, nameof(OnGameStopped), "game_stop");
             PatchSaveLifecycle(harmony);
+            PatchAutosaveSuppression(harmony);
+        }
+
+        // P0-1: GameClock.DoAutoSave is the only caller that saves with
+        // isAutoSave=true, which is what runs the ten-per-colony autosave
+        // rotation.  Patched only for a validation process, so normal play keeps
+        // the game's own behaviour.
+        private static void PatchAutosaveSuppression(Harmony harmony)
+        {
+            if (!AutosaveGuard.IsActive)
+            {
+                return;
+            }
+            try
+            {
+                MethodInfo target = AccessTools.Method(typeof(GameClock), "DoAutoSave", new[] { typeof(int) });
+                if (target == null)
+                {
+                    ProbeWriter.WriteError("patch_autosave_suppression", "GameClock.DoAutoSave(int) was not found.");
+                    Debug.LogWarning(Mod.LogPrefix + " GameClock.DoAutoSave(int) was not found");
+                    return;
+                }
+
+                harmony.Patch(
+                    target,
+                    prefix: new HarmonyMethod(AccessTools.Method(typeof(LifecyclePatches), nameof(OnAutoSaveRequested))));
+                AutosaveGuard.MarkSuppressionPatchInstalled();
+                ProbeWriter.WriteEvent("probe_patch_registered", new Dictionary<string, object>
+                {
+                    { "target", "GameClock.DoAutoSave" },
+                    { "patch", "autosave_suppression" }
+                });
+            }
+            catch (Exception ex)
+            {
+                ProbeWriter.WriteError("patch_autosave_suppression", ex);
+            }
+        }
+
+        private static bool OnAutoSaveRequested(int day)
+        {
+            bool suppress;
+            try
+            {
+                suppress = AutosaveGuard.ShouldSuppressAutosave();
+            }
+            catch
+            {
+                // Only installed for a validation process: refuse on any doubt.
+                suppress = true;
+            }
+            if (!suppress)
+            {
+                return true;
+            }
+            try
+            {
+                ProbeWriter.WriteEvent("autosave_suppressed", new Dictionary<string, object>
+                {
+                    { "clock_cycle", day },
+                    { "autosave", AutosaveGuard.Describe() }
+                });
+            }
+            catch
+            {
+                // The autosave is refused either way.
+            }
+            return false;
         }
 
         private static void PatchSaveLifecycle(Harmony harmony)
@@ -158,6 +226,9 @@ namespace OniAiProbeMod.Patches
             bool updateSavePointer,
             out ProbeSession.SaveWriteContext __state)
         {
+            // Serialize interval 0 into every save a validation session writes,
+            // so a checkpoint clone cannot autosave when it is loaded later.
+            AutosaveGuard.EnforceNow();
             __state = ProbeSession.BeginSaveWrite(filename);
             ProbeWriter.WriteEvent("save_write_started", new Dictionary<string, object>
             {

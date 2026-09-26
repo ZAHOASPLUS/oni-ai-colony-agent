@@ -377,7 +377,9 @@ namespace OniAiProbeMod.Probe
                 { "blueprints", blueprintState.Blueprints },
                 { "cells", blueprintState.Cells },
                 { "quality", quality },
-                { "read_metrics_ms", metrics }
+                { "read_metrics_ms", metrics },
+                // P0-1: lets tooling assert that a validation session cannot autosave.
+                { "autosave", AutosaveGuard.Describe() }
             };
             Dictionary<string, object>[] extendedPayloads =
             {

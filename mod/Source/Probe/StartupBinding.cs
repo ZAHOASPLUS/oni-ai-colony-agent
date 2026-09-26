@@ -65,6 +65,7 @@ namespace OniAiProbeMod.Probe
 
         private static readonly int ProcessId = ReadProcessId();
         private static bool initialized;
+        private static bool accepted;
         private static bool terminalFailure;
         private static bool requestVerified;
         private static bool sessionVerified;
@@ -100,6 +101,22 @@ namespace OniAiProbeMod.Probe
                 {
                     return initialized && sessionVerified && !terminalFailure &&
                         string.Equals(status, "verified", StringComparison.Ordinal);
+                }
+            }
+        }
+
+        /// <summary>
+        /// True once a fresh, well-formed binding for this process was accepted
+        /// at load.  It stays true after a later binding failure: the process was
+        /// still launched by the validation tooling (see AutosaveGuard).
+        /// </summary>
+        internal static bool WasAccepted
+        {
+            get
+            {
+                lock (Sync)
+                {
+                    return accepted;
                 }
             }
         }
@@ -210,6 +227,7 @@ namespace OniAiProbeMod.Probe
                     string json = StrictUtf8.GetString(raw);
                     JObject document = CanonicalHashContract.ParseObjectStrict(json);
                     ValidateAndFreezeLocked(document);
+                    accepted = true;
                     status = "pending_request";
                 }
                 catch
