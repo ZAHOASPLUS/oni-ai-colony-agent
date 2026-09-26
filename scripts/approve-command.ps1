@@ -195,7 +195,13 @@ $Temp = $null
 $TempMarker = $null
 $TempToken = [Guid]::NewGuid().ToString("N")
 try {
-    $TempDir = ([IO.Directory]::CreateTempSubdirectory("oni-approval-")).FullName
+    # Directory.CreateTempSubdirectory needs .NET 7 (PowerShell 7.3+); the
+    # system Windows PowerShell 5.1 lacks it, so approval failed there.
+    $TempDir = Join-Path ([IO.Path]::GetTempPath()) ("oni-approval-" + $TempToken)
+    if (Test-Path -LiteralPath $TempDir) {
+        throw "Approval temporary directory already exists."
+    }
+    [void][IO.Directory]::CreateDirectory($TempDir)
     $TempDirInfo = Get-Item -LiteralPath $TempDir -Force -ErrorAction Stop
     if (-not $TempDirInfo.PSIsContainer -or
         (($TempDirInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {

@@ -253,6 +253,9 @@ def run_approval(
         cwd=PROJECT_ROOT,
         text=True,
         capture_output=True,
+        # PowerShell error text uses the console code page while PYTHONUTF8=1
+        # decodes as UTF-8; a decode failure left stderr=None.
+        errors="replace",
         timeout=30,
         check=False,
     )

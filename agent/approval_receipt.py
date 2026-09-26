@@ -386,7 +386,12 @@ def _main(argv: Sequence[str] | None = None) -> int:
                     approved_by=args.approved_by,
                     approved_at=str(args.approved_at),
                 )
-            sys.stdout.write(json.dumps(output, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+            # ASCII-only output: approve-command.ps1 captures this through the
+            # console code page (GBK under Windows PowerShell 5.1), which
+            # corrupted non-ASCII values such as Chinese duplicant names when
+            # Python wrote UTF-8.  Receipt hashes cover parsed values, so the
+            # escapes change no hash; the commit helper re-serializes the file.
+            sys.stdout.write(json.dumps(output, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
             sys.stdout.write("\n")
         else:
             validate_approval_receipt(command, policy, frame)
