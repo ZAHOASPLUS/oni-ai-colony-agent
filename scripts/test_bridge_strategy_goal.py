@@ -13,6 +13,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -76,6 +77,28 @@ class BridgeStrategyGoalTests(unittest.TestCase):
             tracker = runtime.strategy_tracker
             self.assertNotIn("strategy_duplicate_conflict", tracker.integrity_blockers)
             self.assertEqual(tracker.consecutive_samples, 7)
+
+
+    def test_both_evaluations_use_report_rates(self):
+        # Review M7: the replay observer and write_outputs must evaluate the
+        # same snapshot identically, with report-derived rates in both.
+        calls = []
+        real = oni_bridge.evaluate_strategy
+
+        def recording(*args, **kwargs):
+            calls.append(kwargs.get("report_rates"))
+            return real(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory(prefix="oni-goal-") as temp:
+            bridge = self.publish_session(pathlib.Path(temp))
+            with mock.patch.object(oni_bridge, "evaluate_strategy", recording):
+                runtime = self.accumulated_runtime(bridge, strategy_goal=LAUNCHER_GOAL)
+                oni_bridge.write_outputs(bridge, runtime, goal=LAUNCHER_GOAL)
+            self.assertGreaterEqual(len(calls), 2)
+            self.assertEqual(set(calls), {True})
+            self.assertNotIn(
+                "strategy_duplicate_conflict", runtime.strategy_tracker.integrity_blockers
+            )
 
 
 if __name__ == "__main__":

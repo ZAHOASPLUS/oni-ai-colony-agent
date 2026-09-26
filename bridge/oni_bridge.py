@@ -585,7 +585,11 @@ class ReplayState:
                     # second full schema walk for every replayed snapshot;
                     # public callers still get validation through observe().
                     self.strategy_tracker.observe_validated(
-                        evaluate_strategy(verified_record, goal=self.strategy_goal)
+                        evaluate_strategy(
+                            verified_record,
+                            goal=self.strategy_goal,
+                            report_rates=True,
+                        )
                     )
                 except Exception:
                     self.session_integrity_blockers.add("strategy_evaluation_error")
@@ -2945,6 +2949,7 @@ def write_outputs(
             latest,
             goal=runtime.strategy_goal,
             previous_phase=runtime.strategy_tracker.current_phase,
+            report_rates=True,
         )
     )
     strategy["source"] = copy.deepcopy(source)
