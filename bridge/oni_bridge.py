@@ -300,7 +300,13 @@ class ReplayState:
         allow_untrusted_snapshot_baseline: bool = False,
         startup_expectations: Optional[Dict[str, Any]] = None,
         require_startup_binding: bool = False,
+        strategy_goal: str = STRATEGY_GOAL,
     ) -> None:
+        # The goal is part of every strategy payload.  Per-record observation
+        # and write_outputs must evaluate the same snapshot with the same goal,
+        # otherwise the tracker sees a duplicate-snapshot conflict and resets
+        # its evidence window on every publication.
+        self.strategy_goal = strategy_goal
         self.current_session_id: Optional[str] = None
         self.retired_session_ids: set[str] = set()
         self.latest: Optional[Dict[str, Any]] = None
@@ -577,7 +583,9 @@ class ReplayState:
                     # returning it.  Use the tracker fast path to avoid a
                     # second full schema walk for every replayed snapshot;
                     # public callers still get validation through observe().
-                    self.strategy_tracker.observe_validated(evaluate_strategy(verified_record))
+                    self.strategy_tracker.observe_validated(
+                        evaluate_strategy(verified_record, goal=self.strategy_goal)
+                    )
                 except Exception:
                     self.session_integrity_blockers.add("strategy_evaluation_error")
                     self.warnings.append("strategy_evaluation_error")
@@ -2310,12 +2318,14 @@ def replay_initial_records(
     allow_untrusted_snapshot_baseline: bool = False,
     startup_expectations: Optional[Dict[str, Any]] = None,
     require_startup_binding: bool = False,
+    strategy_goal: str = STRATEGY_GOAL,
 ) -> Tuple[ReplayState, int]:
     raw_lines, position, partial = load_recent_raw_lines(path)
     runtime = ReplayState(
         allow_untrusted_snapshot_baseline=allow_untrusted_snapshot_baseline,
         startup_expectations=startup_expectations,
         require_startup_binding=require_startup_binding,
+        strategy_goal=strategy_goal,
     )
     runtime.partial_bytes = partial
     archive = SessionArchiveBuilder(bridge_dir)
@@ -2846,7 +2856,11 @@ def write_outputs(
     # strategy layer is deterministic and non-executing; all game changes still
     # go through the existing command queue, policy, and human approval gates.
     strategy = runtime.strategy_tracker.update(
-        evaluate_strategy(latest, goal=goal, previous_phase=runtime.strategy_tracker.current_phase)
+        evaluate_strategy(
+            latest,
+            goal=runtime.strategy_goal,
+            previous_phase=runtime.strategy_tracker.current_phase,
+        )
     )
     strategy["source"] = copy.deepcopy(source)
     health["strategy_status"] = strategy.get("status")
@@ -3312,6 +3326,7 @@ def run_once(
         allow_untrusted_snapshot_baseline=input_path is not None,
         startup_expectations=startup_expectations if input_path is None else None,
         require_startup_binding=input_path is None,
+        strategy_goal=goal,
     )
     write_outputs(
         bridge_dir,
@@ -3346,6 +3361,7 @@ def watch(
         bridge_dir,
         startup_expectations=startup_expectations,
         require_startup_binding=True,
+        strategy_goal=goal,
     )
     write_outputs(
         bridge_dir,
