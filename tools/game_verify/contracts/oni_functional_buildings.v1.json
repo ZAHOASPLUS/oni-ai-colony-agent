@@ -1,0 +1,34 @@
+{
+  "schema": "oni.functional-buildings-contract.v1",
+  "payload_schema": "oni.functional_buildings.v1",
+  "scope": "active_world",
+  "capture_max_age_seconds": 5.0,
+  "max_instances": 10000,
+  "status": "observed",
+  "completeness": "complete",
+  "mutating_condition_allowed": false,
+  "supported_prefab_ids": [
+    "ManualGenerator",
+    "MineralDeoxidizer",
+    "Outhouse",
+    "OxygenDiffuser"
+  ],
+  "payload_keys": ["captured_at", "complete", "instances", "schema", "world_id"],
+  "instance_keys": ["instance_id", "operational", "prefab_id", "world_id"],
+  "instance_types": {
+    "instance_id": "positive_int",
+    "world_id": "nonnegative_int",
+    "prefab_id": "supported_prefab_id",
+    "operational": ["boolean", "null"]
+  },
+  "source": "Components.BuildingCompletes.GetWorldItems(activeWorldId)+Operational.IsOperational",
+  "quality_contract_id": "oni.qc.buildings.functional_instances.v1",
+  "safety": {
+    "unknown_on_error": true,
+    "unknown_on_incomplete": true,
+    "unknown_on_stale": true,
+    "unknown_on_estimated": true,
+    "unknown_on_world_mismatch": true,
+    "actions": []
+  }
+}

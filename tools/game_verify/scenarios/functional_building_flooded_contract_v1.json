@@ -1,0 +1,76 @@
+{
+  "schema": "oni.functional-building-flooded-scenario.v1",
+  "live_admission": false,
+  "action_types": [],
+  "cases": [
+    {
+      "id": "observed_complete",
+      "world_id": 0,
+      "complete": true,
+      "instances": [
+        {"instance_id": 101, "world_id": 0, "prefab_id": "OxygenDiffuser", "is_flooded": false},
+        {"instance_id": 102, "world_id": 0, "prefab_id": "LiquidReservoir", "is_flooded": true}
+      ],
+      "expected": "usable"
+    },
+    {
+      "id": "empty_world_is_complete",
+      "world_id": 0,
+      "complete": true,
+      "instances": [],
+      "expected": "usable"
+    },
+    {
+      "id": "missing_floodable_is_unknown",
+      "world_id": 0,
+      "complete": true,
+      "instances": [
+        {"instance_id": 103, "world_id": 0, "prefab_id": "Battery", "is_flooded": null}
+      ],
+      "expected": "usable"
+    },
+    {
+      "id": "duplicate_instance",
+      "world_id": 0,
+      "complete": true,
+      "instances": [
+        {"instance_id": 101, "world_id": 0, "prefab_id": "OxygenDiffuser", "is_flooded": false},
+        {"instance_id": 101, "world_id": 0, "prefab_id": "LiquidReservoir", "is_flooded": true}
+      ],
+      "expected": "rejected"
+    },
+    {
+      "id": "cross_world_instance",
+      "world_id": 0,
+      "complete": true,
+      "instances": [
+        {"instance_id": 104, "world_id": 7, "prefab_id": "OxygenDiffuser", "is_flooded": false}
+      ],
+      "expected": "rejected"
+    },
+    {
+      "id": "world_binding_race",
+      "world_id": 0,
+      "active_world_id": 7,
+      "complete": true,
+      "instances": [],
+      "expected": "rejected"
+    },
+    {
+      "id": "invalid_flooded_value",
+      "world_id": 0,
+      "complete": true,
+      "instances": [
+        {"instance_id": 105, "world_id": 0, "prefab_id": "OxygenDiffuser", "is_flooded": "unknown"}
+      ],
+      "expected": "rejected"
+    },
+    {
+      "id": "incomplete_envelope",
+      "world_id": 0,
+      "complete": false,
+      "instances": [],
+      "expected": "rejected"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+*.tmp
+
+# Local credentials/configuration. Never commit an API key or a local secrets
+# directory, even when the bridge is configured to read it.
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+
+mod/bin/
+mod/obj/
+mod/OniAiProbeMod.dll
+mod/OniAiProbeMod.pdb
+
+docs/build-manifest.local.json
+docs/test-save-baseline.local.json
+reports/
+evidence/
+
+# Decompiled game assemblies used for API audits: third-party code, keep local only.
+_audit_full/
+_audit_il2/
+
+# Isolated Mod build outputs.
+mod/reports/
+
+# .NET harness build outputs.
+tools/*/bin/
+tools/*/obj/

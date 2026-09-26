@@ -1,0 +1,43 @@
+{
+  "id": "oni_runtime_command_safety",
+  "title": "Expired and duplicate approved commands were quarantined",
+  "profile": "mock-oni",
+  "game": "Oxygen Not Included",
+  "mod": "oni-ai-colony-agent",
+  "failure_class": {
+    "missing_expected_event": "behavior_fail",
+    "state_mismatch": "behavior_fail",
+    "visual_missing": "visual_fail"
+  },
+  "evidence": {"events": true, "state": true, "visuals": false},
+  "steps": [
+    {
+      "id": "probe_safety_acceptance_markers",
+      "action": {
+        "type": "file_probe",
+        "checks": [
+          {
+            "id": "runtime_stale",
+            "path": "reports/runtime-markers/stale_command_quarantine.passed",
+            "state_key": "oni.runtime.stale.passed",
+            "pass_event": "oni.runtime.stale.passed"
+          },
+          {
+            "id": "runtime_duplicate",
+            "path": "reports/runtime-markers/duplicate_command_idempotency.passed",
+            "state_key": "oni.runtime.duplicate.passed",
+            "pass_event": "oni.runtime.duplicate.passed"
+          }
+        ]
+      },
+      "expect": {
+        "events": ["oni.runtime.stale.passed", "oni.runtime.duplicate.passed"],
+        "state": {
+          "oni.runtime.stale.passed": true,
+          "oni.runtime.duplicate.passed": true
+        },
+        "timeout_ms": 500
+      }
+    }
+  ]
+}

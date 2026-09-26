@@ -1,0 +1,77 @@
+{
+  "schema": "oni.functional-building-health-scenario.v1",
+  "live_admission": false,
+  "action_types": [],
+  "cases": [
+    {
+      "id": "observed_complete",
+      "world_id": 0,
+      "complete": true,
+      "instances": [
+        {"instance_id": 101, "world_id": 0, "prefab_id": "OxygenDiffuser", "enabled": true, "hit_points": 100, "max_hit_points": 100, "is_broken": false, "needs_repairs": false},
+        {"instance_id": 102, "world_id": 0, "prefab_id": "Outhouse", "enabled": null, "hit_points": 42, "max_hit_points": 100, "is_broken": false, "needs_repairs": true},
+        {"instance_id": 103, "world_id": 0, "prefab_id": "ManualGenerator", "enabled": false, "hit_points": null, "max_hit_points": null, "is_broken": null, "needs_repairs": null}
+      ],
+      "expected": "usable"
+    },
+    {
+      "id": "empty_world_is_complete",
+      "world_id": 0,
+      "complete": true,
+      "instances": [],
+      "expected": "usable"
+    },
+    {
+      "id": "missing_components_are_unknown",
+      "world_id": 0,
+      "complete": true,
+      "instances": [
+        {"instance_id": 104, "world_id": 0, "prefab_id": "Battery", "enabled": null, "hit_points": null, "max_hit_points": null, "is_broken": null, "needs_repairs": null}
+      ],
+      "expected": "usable"
+    },
+    {
+      "id": "duplicate_instance",
+      "world_id": 0,
+      "complete": true,
+      "instances": [
+        {"instance_id": 101, "world_id": 0, "prefab_id": "OxygenDiffuser", "enabled": true, "hit_points": null, "max_hit_points": null, "is_broken": null, "needs_repairs": null},
+        {"instance_id": 101, "world_id": 0, "prefab_id": "Outhouse", "enabled": true, "hit_points": null, "max_hit_points": null, "is_broken": null, "needs_repairs": null}
+      ],
+      "expected": "rejected"
+    },
+    {
+      "id": "cross_world_instance",
+      "world_id": 0,
+      "complete": true,
+      "instances": [
+        {"instance_id": 105, "world_id": 7, "prefab_id": "Outhouse", "enabled": true, "hit_points": null, "max_hit_points": null, "is_broken": null, "needs_repairs": null}
+      ],
+      "expected": "rejected"
+    },
+    {
+      "id": "world_binding_race",
+      "world_id": 0,
+      "active_world_id": 7,
+      "complete": true,
+      "instances": [],
+      "expected": "rejected"
+    },
+    {
+      "id": "hit_points_exceed_max",
+      "world_id": 0,
+      "complete": true,
+      "instances": [
+        {"instance_id": 106, "world_id": 0, "prefab_id": "Outhouse", "enabled": true, "hit_points": 101, "max_hit_points": 100, "is_broken": false, "needs_repairs": false}
+      ],
+      "expected": "rejected"
+    },
+    {
+      "id": "incomplete_envelope",
+      "world_id": 0,
+      "complete": false,
+      "instances": [],
+      "expected": "rejected"
+    }
+  ]
+}

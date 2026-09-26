@@ -1,0 +1,11 @@
+{
+  "schema": "oni.validation-control-policy.v1",
+  "controls_enabled": false,
+  "test_run_id": null,
+  "allowed_operations": [],
+  "allowed_save_hashes": [],
+  "allowed_save_path_ids": [],
+  "allowed_target_save_path_ids": [],
+  "generated_at": null,
+  "expires_at": null
+}

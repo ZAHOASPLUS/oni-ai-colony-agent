@@ -1,0 +1,46 @@
+{
+  "id": "oni_runtime_duplicant_priority",
+  "title": "Approved duplicant chore priority change and restore were verified",
+  "profile": "mock-oni",
+  "game": "Oxygen Not Included",
+  "mod": "oni-ai-colony-agent",
+  "failure_class": {
+    "missing_expected_event": "behavior_fail",
+    "state_mismatch": "behavior_fail",
+    "visual_missing": "visual_fail"
+  },
+  "evidence": {"events": true, "state": true, "visuals": false},
+  "steps": [
+    {
+      "id": "probe_priority_acceptance_marker",
+      "action": {
+        "type": "file_probe",
+        "checks": [
+          {
+            "id": "runtime_priority",
+            "path": "reports/runtime-markers/duplicant_priority_runtime.passed",
+            "state_key": "oni.runtime.duplicant_priority.passed",
+            "pass_event": "oni.runtime.duplicant_priority.passed"
+          },
+          {
+            "id": "runtime_priority_invalid_target",
+            "path": "reports/runtime-markers/duplicant_priority_invalid_target.passed",
+            "state_key": "oni.runtime.duplicant_priority_invalid_target.passed",
+            "pass_event": "oni.runtime.duplicant_priority_invalid_target.passed"
+          }
+        ]
+      },
+      "expect": {
+        "events": [
+          "oni.runtime.duplicant_priority.passed",
+          "oni.runtime.duplicant_priority_invalid_target.passed"
+        ],
+        "state": {
+          "oni.runtime.duplicant_priority.passed": true,
+          "oni.runtime.duplicant_priority_invalid_target.passed": true
+        },
+        "timeout_ms": 500
+      }
+    }
+  ]
+}

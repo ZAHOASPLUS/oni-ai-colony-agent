@@ -1,0 +1,77 @@
+{
+  "id": "oni_ai_command_queue_mock",
+  "title": "ONI AI command queue emits accepted, executed, and verified stages",
+  "profile": "mock-oni",
+  "game": "Oxygen Not Included",
+  "mod": "oni-ai-colony-agent",
+  "failure_class": {
+    "missing_expected_event": "behavior_fail",
+    "state_mismatch": "behavior_fail",
+    "visual_missing": "visual_fail"
+  },
+  "evidence": {
+    "events": true,
+    "state": true,
+    "visuals": false
+  },
+  "steps": [
+    {
+      "id": "verify_focus_note",
+      "action": {
+        "type": "mock",
+        "events": [
+          {
+            "type": "oni.command.approved",
+            "data": {
+              "id": "cmd-focus-note",
+              "action": "focus_note"
+            }
+          },
+          {
+            "type": "oni.command_ack",
+            "data": {
+              "id": "cmd-focus-note",
+              "action": "focus_note",
+              "status": "accepted"
+            }
+          },
+          {
+            "type": "oni.command.executed",
+            "data": {
+              "id": "cmd-focus-note",
+              "action": "focus_note",
+              "status": "executed"
+            }
+          },
+          {
+            "type": "oni.command.verified",
+            "data": {
+              "id": "cmd-focus-note",
+              "action": "focus_note",
+              "status": "verified"
+            }
+          }
+        ],
+        "state": {
+          "oni.command.focus_note.approved": true,
+          "oni.command.focus_note.acked": true,
+          "oni.command.focus_note.verified": true
+        }
+      },
+      "expect": {
+        "events": [
+          "oni.command.approved",
+          "oni.command_ack",
+          "oni.command.executed",
+          "oni.command.verified"
+        ],
+        "state": {
+          "oni.command.focus_note.approved": true,
+          "oni.command.focus_note.acked": true,
+          "oni.command.focus_note.verified": true
+        },
+        "timeout_ms": 500
+      }
+    }
+  ]
+}

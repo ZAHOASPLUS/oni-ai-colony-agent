@@ -1,0 +1,170 @@
+{
+  "id": "oni_ai_colony_agent_static_probe",
+  "title": "ONI AI Colony Agent has mod, bridge, agent, scenarios, and scripts",
+  "profile": "mock-oni",
+  "game": "Oxygen Not Included",
+  "mod": "oni-ai-colony-agent",
+  "failure_class": {
+    "missing_expected_event": "behavior_fail",
+    "state_mismatch": "behavior_fail",
+    "visual_missing": "visual_fail"
+  },
+  "evidence": {
+    "events": true,
+    "state": true,
+    "visuals": false
+  },
+  "steps": [
+    {
+      "id": "probe_project_files",
+      "action": {
+        "type": "file_probe",
+        "checks": [
+          {
+            "id": "mod_csproj",
+            "path": "mod/OniAiProbeMod.csproj",
+            "state_key": "oni.mod.csproj.exists",
+            "pass_event": "oni.mod.csproj.exists"
+          },
+          {
+            "id": "action_executor",
+            "path": "mod/Source/Commands/ActionExecutor.cs",
+            "state_key": "oni.mod.action_executor.exists",
+            "pass_event": "oni.mod.action_executor.exists"
+          },
+          {
+            "id": "validation_checkpoint_controller",
+            "path": "mod/Source/Probe/ValidationCheckpointController.cs",
+            "state_key": "oni.mod.validation_checkpoint_controller.exists",
+            "pass_event": "oni.mod.validation_checkpoint_controller.exists"
+          },
+          {
+            "id": "bridge",
+            "path": "bridge/oni_bridge.py",
+            "state_key": "oni.bridge.exists",
+            "pass_event": "oni.bridge.exists"
+          },
+          {
+            "id": "rules",
+            "path": "agent/rules.py",
+            "state_key": "oni.agent.rules.exists",
+            "pass_event": "oni.agent.rules.exists"
+          },
+          {
+            "id": "verification",
+            "path": "scripts/verify_automation.py",
+            "state_key": "oni.verify.script.exists",
+            "pass_event": "oni.verify.script.exists"
+          },
+          {
+            "id": "runtime_verification",
+            "path": "scripts/verify_runtime.py",
+            "state_key": "oni.verify.runtime_script.exists",
+            "pass_event": "oni.verify.runtime_script.exists"
+          },
+          {
+            "id": "validation_checkpoint_manager",
+            "path": "scripts/manage_validation_checkpoint.py",
+            "state_key": "oni.verify.validation_checkpoint_manager.exists",
+            "pass_event": "oni.verify.validation_checkpoint_manager.exists"
+          },
+          {
+            "id": "validation_checkpoint_verifier",
+            "path": "scripts/verify_validation_checkpoint.py",
+            "state_key": "oni.verify.validation_checkpoint_verifier.exists",
+            "pass_event": "oni.verify.validation_checkpoint_verifier.exists"
+          },
+          {
+            "id": "advanced_action_catalog",
+            "path": "config/advanced-actions.v1.json",
+            "state_key": "oni.v27.catalog.exists",
+            "pass_event": "oni.v27.catalog.exists"
+          },
+          {
+            "id": "advanced_action_verifier",
+            "path": "scripts/verify_advanced_actions.py",
+            "state_key": "oni.v27.verifier.exists",
+            "pass_event": "oni.v27.verifier.exists"
+          },
+          {
+            "id": "colony_plan_state_machine",
+            "path": "agent/colony_plan.py",
+            "state_key": "oni.v27.colony_plan.exists",
+            "pass_event": "oni.v27.colony_plan.exists"
+          },
+          {
+            "id": "colony_plan_cli",
+            "path": "scripts/manage_colony_plan.py",
+            "state_key": "oni.v27.colony_plan_cli.exists",
+            "pass_event": "oni.v27.colony_plan_cli.exists"
+          },
+          {
+            "id": "colony_plan_verifier",
+            "path": "scripts/verify_colony_plan.py",
+            "state_key": "oni.v27.colony_plan_verifier.exists",
+            "pass_event": "oni.v27.colony_plan_verifier.exists"
+          },
+          {
+            "id": "v27_completion_auditor",
+            "path": "scripts/verify_v27_completion.py",
+            "state_key": "oni.v27.completion_auditor.exists",
+            "pass_event": "oni.v27.completion_auditor.exists"
+          },
+          {
+            "id": "runtime_blueprint_scenario",
+            "path": "scenarios/game_verify_runtime_blueprint.json",
+            "state_key": "oni.v27.runtime_blueprint_scenario.exists",
+            "pass_event": "oni.v27.runtime_blueprint_scenario.exists"
+          },
+          {
+            "id": "runtime_colony_plan_scenario",
+            "path": "scenarios/game_verify_runtime_plan.json",
+            "state_key": "oni.v27.runtime_colony_plan_scenario.exists",
+            "pass_event": "oni.v27.runtime_colony_plan_scenario.exists"
+          }
+        ]
+      },
+      "expect": {
+        "events": [
+          "oni.mod.csproj.exists",
+          "oni.mod.action_executor.exists",
+          "oni.mod.validation_checkpoint_controller.exists",
+          "oni.bridge.exists",
+          "oni.agent.rules.exists",
+          "oni.verify.script.exists",
+          "oni.verify.runtime_script.exists",
+          "oni.verify.validation_checkpoint_manager.exists",
+          "oni.verify.validation_checkpoint_verifier.exists",
+          "oni.v27.catalog.exists",
+          "oni.v27.verifier.exists",
+          "oni.v27.colony_plan.exists",
+          "oni.v27.colony_plan_cli.exists",
+          "oni.v27.colony_plan_verifier.exists",
+          "oni.v27.completion_auditor.exists",
+          "oni.v27.runtime_blueprint_scenario.exists",
+          "oni.v27.runtime_colony_plan_scenario.exists"
+        ],
+        "state": {
+          "oni.mod.csproj.exists": true,
+          "oni.mod.action_executor.exists": true,
+          "oni.mod.validation_checkpoint_controller.exists": true,
+          "oni.bridge.exists": true,
+          "oni.agent.rules.exists": true,
+          "oni.verify.script.exists": true,
+          "oni.verify.runtime_script.exists": true,
+          "oni.verify.validation_checkpoint_manager.exists": true,
+          "oni.verify.validation_checkpoint_verifier.exists": true,
+          "oni.v27.catalog.exists": true,
+          "oni.v27.verifier.exists": true,
+          "oni.v27.colony_plan.exists": true,
+          "oni.v27.colony_plan_cli.exists": true,
+          "oni.v27.colony_plan_verifier.exists": true,
+          "oni.v27.completion_auditor.exists": true,
+          "oni.v27.runtime_blueprint_scenario.exists": true,
+          "oni.v27.runtime_colony_plan_scenario.exists": true
+        },
+        "timeout_ms": 500
+      }
+    }
+  ]
+}

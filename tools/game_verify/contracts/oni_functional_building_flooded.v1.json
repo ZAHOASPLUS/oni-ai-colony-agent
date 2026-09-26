@@ -1,0 +1,31 @@
+{
+  "schema": "oni.functional-building-flooded-contract.v1",
+  "payload_schema": "oni.functional_building_flooded.v1",
+  "scope": "active_world",
+  "capture_max_age_seconds": 5.0,
+  "max_instances": 10000,
+  "status": "observed",
+  "completeness": "complete",
+  "mutating_condition_allowed": false,
+  "payload_keys": ["captured_at", "complete", "instances", "schema", "world_id"],
+  "instance_keys": ["instance_id", "is_flooded", "prefab_id", "world_id"],
+  "instance_types": {
+    "instance_id": "positive_int",
+    "world_id": "nonnegative_int",
+    "prefab_id": "nonempty_string",
+    "is_flooded": "nullable_boolean"
+  },
+  "source": "Components.BuildingCompletes.GetWorldItems(activeWorldId)+Floodable.IsFlooded",
+  "quality_contract_id": "oni.qc.buildings.functional_flooded_instances.v1",
+  "safety": {
+    "unknown_on_error": true,
+    "unknown_on_incomplete": true,
+    "unknown_on_stale": true,
+    "unknown_on_estimated": true,
+    "unknown_on_world_mismatch": true,
+    "unknown_on_race": true,
+    "unknown_on_duplicate": true,
+    "unknown_on_missing_component": true,
+    "actions": []
+  }
+}

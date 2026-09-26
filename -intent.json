@@ -1,0 +1,9 @@
+{
+  "schema": "oni.vps.candidate-intent.v1",
+  "base_commit": "b7d41ea",
+  "functional_changes": ["Condition blocker evaluation now evaluates only the selected comparison operator, preventing unrelated membership checks from raising TypeError.","Controller bounded-action and reconciliation paths now run through the fixed lazy comparison logic."],
+  "changed_files": ["agent/controller_loop.py"],
+  "expected_local_test_steps": ["Run the named test clone with python3 -B scripts/test_controller_loop.py and confirm the six bounded controller cases pass.","After user reconnects, observe one bounded action and matching effect in the verified ONI test clone; do not use original saves."],
+  "unverified_items": ["ONI, Steam, Bridge, Windows process and physical-device behavior remain unverified and are skipped on VPS.","Finite completion and real gameplay effect require the user's later local test."],
+  "rollback": "Revert e6add81552002c26bbba240cf7090b6d0d8a9f8c9 and retain base commit b7d41ea; no live game or save mutation occurred."
+}

@@ -1,0 +1,12 @@
+{
+  "schema": "oni.functional-building-utility-topology-scenario.v1",
+  "live_admission": false,
+  "action_types": [],
+  "cases": [
+    {"id":"network_counts","world_id":0,"complete":true,"instances":[{"instance_id":1,"world_id":0,"prefab_id":"Pump","input":{"declared":true,"cell":10,"network_id":3,"source_count":1,"sink_count":2,"conduit_count":4,"has_sinks":true},"output":{"declared":false,"cell":null,"network_id":null,"source_count":null,"sink_count":null,"conduit_count":null,"has_sinks":null}}],"expected":"usable"},
+    {"id":"unknown_network","world_id":0,"complete":true,"instances":[{"instance_id":2,"world_id":0,"prefab_id":"Vent","input":{"declared":true,"cell":11,"network_id":null,"source_count":null,"sink_count":null,"conduit_count":null,"has_sinks":null},"output":{"declared":false,"cell":null,"network_id":null,"source_count":null,"sink_count":null,"conduit_count":null,"has_sinks":null}}],"expected":"usable"},
+    {"id":"duplicate","world_id":0,"complete":true,"instances":[{"instance_id":3,"world_id":0,"prefab_id":"A","input":{"declared":false,"cell":null,"network_id":null,"source_count":null,"sink_count":null,"conduit_count":null,"has_sinks":null},"output":{"declared":false,"cell":null,"network_id":null,"source_count":null,"sink_count":null,"conduit_count":null,"has_sinks":null}},{"instance_id":3,"world_id":0,"prefab_id":"B","input":{"declared":false,"cell":null,"network_id":null,"source_count":null,"sink_count":null,"conduit_count":null,"has_sinks":null},"output":{"declared":false,"cell":null,"network_id":null,"source_count":null,"sink_count":null,"conduit_count":null,"has_sinks":null}}],"expected":"rejected"},
+    {"id":"negative_count","world_id":0,"complete":true,"instances":[{"instance_id":4,"world_id":0,"prefab_id":"A","input":{"declared":true,"cell":10,"network_id":3,"source_count":-1,"sink_count":0,"conduit_count":0,"has_sinks":false},"output":{"declared":false,"cell":null,"network_id":null,"source_count":null,"sink_count":null,"conduit_count":null,"has_sinks":null}}],"expected":"rejected"},
+    {"id":"incomplete","world_id":0,"complete":false,"instances":[],"expected":"rejected"}
+  ]
+}

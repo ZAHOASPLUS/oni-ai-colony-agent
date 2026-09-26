@@ -1,0 +1,57 @@
+{
+  "schema": "oni.cli-delegation.v1",
+  "status": "passed",
+  "result_hash_mode": "utf8_lf",
+  "run_id": "oni-v27-final-cli-audit-20260711",
+  "provider_policy": {
+    "assigned_pool": "cheap",
+    "expensive_fallback_used": false
+  },
+  "work_packages": {
+    "remaining_total_at_delegation": 7,
+    "completed_by_cli": 3,
+    "completed_fraction": 0.42857142857142855
+  },
+  "tasks": [
+    {
+      "id": "checkpoint-controller-audit",
+      "worker_id": "oni-v27-cheap-1",
+      "review_state": "accepted",
+      "changed_file_count": 0,
+      "effective_input_tokens": 36337,
+      "max_input_tokens": 30000,
+      "budget_variance": "accepted_after_main_thread_review",
+      "result": "checkpoint-controller-audit.md",
+      "result_sha256": "sha256:eeaac6c04f9121dc19e5899d4721693b32f9af234b192043deb6c4c7a201357b"
+    },
+    {
+      "id": "runtime-evidence-audit",
+      "worker_id": "oni-v27-cheap-2",
+      "review_state": "accepted",
+      "changed_file_count": 0,
+      "effective_input_tokens": 95413,
+      "max_input_tokens": 35000,
+      "budget_variance": "accepted_after_main_thread_review",
+      "result": "runtime-evidence-audit.md",
+      "result_sha256": "sha256:e5e771bc3566456b950b1ffb24d8d737e64056bd83ebd802814e7a33927cae0e"
+    },
+    {
+      "id": "blueprint-readiness-audit",
+      "worker_id": "oni-v27-cheap-3",
+      "review_state": "accepted",
+      "changed_file_count": 0,
+      "effective_input_tokens": 94616,
+      "max_input_tokens": 30000,
+      "budget_variance": "accepted_after_main_thread_review",
+      "result": "blueprint-readiness-audit.md",
+      "result_sha256": "sha256:0071ec3194c8530f5830775bf063dd552e4fe8464fe7af05caa2fe5e78aca36d"
+    }
+  ],
+  "residual_risks": [
+    {
+      "severity": "low",
+      "id": "corrupt_reload_intent_not_terminal",
+      "disposition": "next_iteration"
+    }
+  ]
+}

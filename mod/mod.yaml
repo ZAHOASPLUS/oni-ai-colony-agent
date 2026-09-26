@@ -1,0 +1,3 @@
+title: "ONI AI Probe"
+description: "Observer-default local probe with session-safe telemetry and explicitly approved test-save actions."
+staticID: "ass.OniAiProbe"

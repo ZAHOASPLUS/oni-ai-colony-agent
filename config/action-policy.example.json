@@ -1,0 +1,12 @@
+{
+  "schema": "oni.action-policy.v1",
+  "actions_enabled": false,
+  "suggestions_enabled": true,
+  "allowed_save_hashes": [],
+  "allowed_actions": [
+    "noop",
+    "focus_note"
+  ],
+  "command_ttl_seconds": 30,
+  "max_pending_commands": 20
+}
