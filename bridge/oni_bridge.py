@@ -1461,6 +1461,35 @@ def atomic_write_json(path: pathlib.Path, payload: Any) -> None:
     atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
+def publish_bridge_fault(bridge_dir: pathlib.Path, exc: BaseException) -> None:
+    """Leave an explicit untrusted health document before the Bridge exits.
+
+    A crash used to leave the last ``ok`` health in place until it aged out
+    (run18: CommandCustodyConflict).  Consumers require status ``ok`` and
+    trust_ready, so this document fails closed immediately.  Best effort: the
+    process exits non-zero regardless.
+    """
+
+    try:
+        atomic_write_json(
+            bridge_dir / "health.json",
+            {
+                "schema": "oni.bridge.health.v1",
+                "status": "bridge_fault",
+                "trust_ready": False,
+                "replay_mode": False,
+                "session_start_observed": False,
+                "published_at": now_iso(),
+                "fault": {
+                    "type": type(exc).__name__,
+                    "message": str(exc)[:500],
+                },
+            },
+        )
+    except Exception:  # noqa: BLE001 - the original exception is re-raised
+        pass
+
+
 def safe_session_name(value: Optional[str]) -> str:
     text = value or "waiting"
     return re.sub(r"[^A-Za-z0-9._-]+", "_", text)[:120] or "waiting"
@@ -3320,25 +3349,29 @@ def run_once(
         )
         if any(path.exists() for path in unsafe_markers):
             raise RuntimeError("Replay suggestions require a fresh isolated output directory.")
-    runtime, _ = replay_initial_records(
-        state_log,
-        bridge_dir,
-        allow_untrusted_snapshot_baseline=input_path is not None,
-        startup_expectations=startup_expectations if input_path is None else None,
-        require_startup_binding=input_path is None,
-        strategy_goal=goal,
-    )
-    write_outputs(
-        bridge_dir,
-        runtime,
-        enable_llm=enable_llm,
-        secrets_dir=secrets_dir,
-        goal=goal,
-        replay_mode=input_path is not None,
-        allow_replay_suggestions=allow_replay_suggestions,
-        coordinator_observer=coordinator_observer,
-        planned_queue_owner=planned_queue_owner,
-    )
+    try:
+        runtime, _ = replay_initial_records(
+            state_log,
+            bridge_dir,
+            allow_untrusted_snapshot_baseline=input_path is not None,
+            startup_expectations=startup_expectations if input_path is None else None,
+            require_startup_binding=input_path is None,
+            strategy_goal=goal,
+        )
+        write_outputs(
+            bridge_dir,
+            runtime,
+            enable_llm=enable_llm,
+            secrets_dir=secrets_dir,
+            goal=goal,
+            replay_mode=input_path is not None,
+            allow_replay_suggestions=allow_replay_suggestions,
+            coordinator_observer=coordinator_observer,
+            planned_queue_owner=planned_queue_owner,
+        )
+    except Exception as exc:
+        publish_bridge_fault(bridge_dir, exc)
+        raise
     return runtime
 
 
@@ -3356,29 +3389,17 @@ def watch(
     ] = None,
 ) -> None:
     state_log = bridge_dir / "state.jsonl"
-    runtime, position = replay_initial_records(
-        state_log,
-        bridge_dir,
-        startup_expectations=startup_expectations,
-        require_startup_binding=True,
-        strategy_goal=goal,
-    )
-    write_outputs(
-        bridge_dir,
-        runtime,
-        enable_llm=enable_llm,
-        secrets_dir=secrets_dir,
-        goal=goal,
-        coordinator_observer=coordinator_observer,
-        planned_queue_owner=planned_queue_owner,
-    )
-
-    while True:
-        records, position, invalid, partial = read_new_records(state_log, position)
-        runtime.partial_bytes = partial
-        runtime.process_many(records)
-        runtime.invalid_json_count += invalid
-        archive_session_records(bridge_dir, records, rebuild=False)
+    # Any failure leaves an explicit untrusted health before the Bridge
+    # exits non-zero; a partial generation is never retried in-process
+    # because records may already be consumed but not archived.
+    try:
+        runtime, position = replay_initial_records(
+            state_log,
+            bridge_dir,
+            startup_expectations=startup_expectations,
+            require_startup_binding=True,
+            strategy_goal=goal,
+        )
         write_outputs(
             bridge_dir,
             runtime,
@@ -3388,46 +3409,65 @@ def watch(
             coordinator_observer=coordinator_observer,
             planned_queue_owner=planned_queue_owner,
         )
-        if rotate_log(state_log):
-            runtime.rotation_count += 1
-            runtime.warnings.append("state_log_rotated")
-            event_seq_before = runtime.last_seq
-            snapshot_seq_before = runtime.last_snapshot_seq
-            rotated_records, rotated_position, rotated_invalid, rotated_partial = read_rotated_tail(
-                state_log,
-                position,
+
+        while True:
+            records, position, invalid, partial = read_new_records(state_log, position)
+            runtime.partial_bytes = partial
+            runtime.process_many(records)
+            runtime.invalid_json_count += invalid
+            archive_session_records(bridge_dir, records, rebuild=False)
+            write_outputs(
+                bridge_dir,
+                runtime,
+                enable_llm=enable_llm,
+                secrets_dir=secrets_dir,
+                goal=goal,
+                coordinator_observer=coordinator_observer,
+                planned_queue_owner=planned_queue_owner,
             )
-            if rotated_records:
-                runtime.process_many(rotated_records)
-                archive_session_records(bridge_dir, rotated_records, rebuild=False)
-            runtime.invalid_json_count += rotated_invalid
-            runtime.partial_bytes = rotated_partial
-            runtime.rotation_tail_records_total += len(rotated_records)
-            runtime.last_rotation_tail = {
-                "rotation_count": runtime.rotation_count,
-                "session_id": runtime.current_session_id,
-                "offset_before": position,
-                "offset_after": rotated_position,
-                "records": len(rotated_records),
-                "invalid_json": rotated_invalid,
-                "partial_bytes": rotated_partial,
-                "event_seq_before": event_seq_before,
-                "event_seq_after": runtime.last_seq,
-                "snapshot_seq_before": snapshot_seq_before,
-                "snapshot_seq_after": runtime.last_snapshot_seq,
-            }
-            if rotated_records or rotated_invalid or rotated_partial:
-                write_outputs(
-                    bridge_dir,
-                    runtime,
-                    enable_llm=enable_llm,
-                    secrets_dir=secrets_dir,
-                    goal=goal,
-                    coordinator_observer=coordinator_observer,
-                    planned_queue_owner=planned_queue_owner,
+            if rotate_log(state_log):
+                runtime.rotation_count += 1
+                runtime.warnings.append("state_log_rotated")
+                event_seq_before = runtime.last_seq
+                snapshot_seq_before = runtime.last_snapshot_seq
+                rotated_records, rotated_position, rotated_invalid, rotated_partial = read_rotated_tail(
+                    state_log,
+                    position,
                 )
-            position = 0
-        time.sleep(max(0.1, poll_seconds))
+                if rotated_records:
+                    runtime.process_many(rotated_records)
+                    archive_session_records(bridge_dir, rotated_records, rebuild=False)
+                runtime.invalid_json_count += rotated_invalid
+                runtime.partial_bytes = rotated_partial
+                runtime.rotation_tail_records_total += len(rotated_records)
+                runtime.last_rotation_tail = {
+                    "rotation_count": runtime.rotation_count,
+                    "session_id": runtime.current_session_id,
+                    "offset_before": position,
+                    "offset_after": rotated_position,
+                    "records": len(rotated_records),
+                    "invalid_json": rotated_invalid,
+                    "partial_bytes": rotated_partial,
+                    "event_seq_before": event_seq_before,
+                    "event_seq_after": runtime.last_seq,
+                    "snapshot_seq_before": snapshot_seq_before,
+                    "snapshot_seq_after": runtime.last_snapshot_seq,
+                }
+                if rotated_records or rotated_invalid or rotated_partial:
+                    write_outputs(
+                        bridge_dir,
+                        runtime,
+                        enable_llm=enable_llm,
+                        secrets_dir=secrets_dir,
+                        goal=goal,
+                        coordinator_observer=coordinator_observer,
+                        planned_queue_owner=planned_queue_owner,
+                    )
+                position = 0
+            time.sleep(max(0.1, poll_seconds))
+    except Exception as exc:
+        publish_bridge_fault(bridge_dir, exc)
+        raise
 
 
 def parse_args() -> argparse.Namespace:

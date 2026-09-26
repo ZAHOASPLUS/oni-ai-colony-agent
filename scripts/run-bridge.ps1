@@ -82,6 +82,7 @@ if ($Python) {
         )
     }
     & py @PythonArgs
+    exit $LASTEXITCODE
 } else {
     $PythonArgs = @($BridgeScript, "--bridge-dir", $BridgeDir)
     if ($Once) {
@@ -110,4 +111,5 @@ if ($Python) {
         )
     }
     & python @PythonArgs
+    exit $LASTEXITCODE
 }
