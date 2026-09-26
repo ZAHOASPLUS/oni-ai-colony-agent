@@ -65,6 +65,12 @@ namespace OniAiProbeMod.Commands
         private static float nextPollAt;
         private static bool sessionStarted;
         private static bool mutationSafetyLatch;
+        // True only while the latch comes solely from unresolved failed/
+        // records found at session start; such a latch is re-evaluated when
+        // failed/ changes, so an operator resolution takes effect without a
+        // reload.  A latch raised during the session holds until reload.
+        private static bool latchFromFailedRecordsOnly;
+        private static string failedLatchSignature;
         private static string pendingWitnessId;
 
         internal static void BeginSession()
@@ -73,10 +79,78 @@ namespace OniAiProbeMod.Commands
             InFlightIds.Clear();
             PendingVerifications.Clear();
             mutationSafetyLatch = false;
+            latchFromFailedRecordsOnly = false;
+            failedLatchSignature = null;
             pendingWitnessId = null;
             nextPollAt = 0f;
             sessionStarted = true;
             QuarantineStartupCommands();
+            // A reload must not forget an unknown outcome (code review
+            // 2026-09-26, P0-2): rebuild the durable latch from unresolved
+            // failed/ records, exactly as agent/command_queue.py does.
+            if (!mutationSafetyLatch)
+            {
+                LatchFromUnresolvedFailures(EnsureCommandDirectories());
+            }
+        }
+
+        private static void SetSessionLatch()
+        {
+            mutationSafetyLatch = true;
+            latchFromFailedRecordsOnly = false;
+        }
+
+        private static void LatchFromUnresolvedFailures(CommandDirectories dirs)
+        {
+            try
+            {
+                failedLatchSignature = OutcomeLatch.DirectorySignature(dirs.Failed);
+                string unresolved = OutcomeLatch.FindUnresolvedFailure(dirs.Failed);
+                if (unresolved == null)
+                {
+                    return;
+                }
+                mutationSafetyLatch = true;
+                latchFromFailedRecordsOnly = true;
+                ProbeWriter.WriteEvent("command_safety_latched", new Dictionary<string, object>
+                {
+                    { "command_id", unresolved },
+                    { "classification", "outcome_unknown" },
+                    { "reason", "unresolved_failed_mutation_at_session_start" }
+                });
+            }
+            catch (Exception ex)
+            {
+                SetSessionLatch();
+                ProbeWriter.WriteError("command_failed_latch_scan", ex);
+            }
+        }
+
+        private static void TryReleaseFailedRecordLatch(CommandDirectories dirs)
+        {
+            try
+            {
+                string signature = OutcomeLatch.DirectorySignature(dirs.Failed);
+                if (string.Equals(signature, failedLatchSignature, StringComparison.Ordinal))
+                {
+                    return;
+                }
+                failedLatchSignature = signature;
+                if (OutcomeLatch.FindUnresolvedFailure(dirs.Failed) != null)
+                {
+                    return;
+                }
+                mutationSafetyLatch = false;
+                latchFromFailedRecordsOnly = false;
+                ProbeWriter.WriteEvent("command_safety_latch_released", new Dictionary<string, object>
+                {
+                    { "reason", "failed_records_resolved" }
+                });
+            }
+            catch (Exception ex)
+            {
+                ProbeWriter.WriteError("command_failed_latch_scan", ex);
+            }
         }
 
         internal static void EndSession()
@@ -247,7 +321,7 @@ namespace OniAiProbeMod.Commands
                             // The executor normally permits only one such command.
                             // Preserve every valid prepared payload, but require an
                             // operator if an impossible second recovery is present.
-                            mutationSafetyLatch = true;
+                            SetSessionLatch();
                             ProbeWriter.WriteEvent("command_safety_latched", new Dictionary<string, object>
                             {
                                 { "command_id", commandId },
@@ -266,7 +340,7 @@ namespace OniAiProbeMod.Commands
                         });
                     }
 
-                    mutationSafetyLatch = true;
+                    SetSessionLatch();
                     string confirmingReason =
                         "A prior mutating command lacked a same-session trusted snapshot confirmation." +
                         PauseForUnknownOutcome();
@@ -331,7 +405,7 @@ namespace OniAiProbeMod.Commands
                 // crossed the durable claim boundary. Never infer no dispatch.
             }
 
-            mutationSafetyLatch = true;
+            SetSessionLatch();
             string reason =
                 "A durable executing claim survived process restart; whether its game mutation was dispatched is unknown." +
                 PauseForUnknownOutcome();
@@ -424,6 +498,10 @@ namespace OniAiProbeMod.Commands
                 // Keep one state-changing transaction in flight at a time.  A
                 // deferred approved file remains untouched and is reconsidered
                 // after the current command reaches a durable terminal state.
+                if (mutating && mutationSafetyLatch && latchFromFailedRecordsOnly)
+                {
+                    TryReleaseFailedRecordLatch(dirs);
+                }
                 if (mutating &&
                     (mutationSafetyLatch ||
                      !string.IsNullOrEmpty(pendingWitnessId) ||
@@ -2198,7 +2276,7 @@ namespace OniAiProbeMod.Commands
             bool outcomeUnknown = string.Equals(classification, "outcome_unknown", StringComparison.Ordinal);
             if (latchMutation || outcomeUnknown)
             {
-                mutationSafetyLatch = true;
+                SetSessionLatch();
                 message += PauseForUnknownOutcome();
             }
 
@@ -2236,7 +2314,7 @@ namespace OniAiProbeMod.Commands
                 // A retained executing claim blocks every later mutation. Its
                 // dispatch boundary cannot be reconstructed by another poll.
                 MoveRawFile(path, dirs.Failed);
-                mutationSafetyLatch = true;
+                SetSessionLatch();
                 message = "The executing claim could not reach failed/." + PauseForUnknownOutcome();
                 outcomeUnknown = true;
             }
@@ -2380,7 +2458,7 @@ namespace OniAiProbeMod.Commands
                         return;
                     }
 
-                    mutationSafetyLatch = true;
+                    SetSessionLatch();
                     string invalidReason = "Bridge terminal confirmation is malformed or mismatched.";
                     PauseForUnknownOutcome();
                     ProbeWriter.WriteEvent("command_safety_latched", new Dictionary<string, object>
@@ -2400,7 +2478,7 @@ namespace OniAiProbeMod.Commands
                         StringComparison.Ordinal));
                 if (!confirmingExists)
                 {
-                    mutationSafetyLatch = true;
+                    SetSessionLatch();
                     string missingReason = "The executed command disappeared before trusted snapshot confirmation.";
                     PauseForUnknownOutcome();
                     ProbeWriter.WriteEvent("command_safety_latched", new Dictionary<string, object>
@@ -2414,7 +2492,7 @@ namespace OniAiProbeMod.Commands
             }
             catch (Exception ex)
             {
-                mutationSafetyLatch = true;
+                SetSessionLatch();
                 PauseForUnknownOutcome();
                 ProbeWriter.WriteError("command_witness_poll", ex);
             }
@@ -2603,7 +2681,7 @@ namespace OniAiProbeMod.Commands
             string safetyAction = "";
             if (mutating)
             {
-                mutationSafetyLatch = true;
+                SetSessionLatch();
                 safetyAction = PauseForUnknownOutcome();
             }
 

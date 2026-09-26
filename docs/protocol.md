@@ -776,8 +776,13 @@ attestation or engage the mutation latch.
 
 The Python queue layer exposes `command_pipeline_readiness(...)` as the unified
 offline gate for Bridge and colony-plan callers. It deterministically scans
-`pending`, `approving`, `approved`, `executing`, and `confirming`, plus
-same-save `failed/result.classification=outcome_unknown` records. Duplicate
+`pending`, `approving`, `approved`, `executing`, and `confirming`, plus every
+unresolved failed mutation in the Bridge directory: a `failed/` mutating record
+latches unless the executor classified it as a definite pre-dispatch failure
+(`behavior_fail`, `rejected`, `runtime_fail`) or an operator recorded an
+`oni.operator-resolution.v1` with `scripts/resolve_outcome_unknown.py`. The
+latch is not scoped by `save_id_hash`, which changes on every save, and a
+missing classification cannot prove where dispatch stopped. Duplicate
 command IDs, conflicting immutable intents, malformed active records,
 approval/execution claims, prepared confirmation commits, unconfirmed
 mutations, and unresolved unknown outcomes are returned as structured blockers.
@@ -1367,8 +1372,8 @@ combining the two policy windows:
    lineage tip and disabled `action-policy.json`. The pipeline schema and
    mutation-proposal gate must be valid/ready, and relevant commands,
    `ambiguous_outcomes`, `duplicate_ids`, `stale_pending`, invalid records, and
-   in-flight mutations must all be empty. A same-save
-   `commands/failed/*/outcome_unknown` therefore blocks finalization even though
+   in-flight mutations must all be empty. An unresolved
+   `commands/failed/*` mutation therefore blocks finalization even though
     every nonterminal directory is empty.
 6. Publish the separate create-only `shutdown-evidence.json`. Its mandatory
    external startup anchor is the

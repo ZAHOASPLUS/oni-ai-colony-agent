@@ -150,7 +150,7 @@ freshness window. The exact commands and failure contract are in
 `docs/protocol.md` under **One-Save Validation Lineage**.
 Finalization also runs `command_pipeline_readiness(...)` against the exact
 current `latest_state.json` and disabled policy. Empty nonterminal directories
-are insufficient: any relevant same-save `failed/outcome_unknown`, ambiguity,
+are insufficient: any unresolved `failed/` mutation, ambiguity,
 duplicate id, stale pending record, invalid active record, or non-ready mutation
 proposal rejects the pair. The create-only report binds the resulting pipeline
 summary and canonical gate hash.

@@ -57,6 +57,11 @@ COMMAND_PIPELINE_ACTIVE_STAGES = (
 )
 COMMAND_PIPELINE_SCAN_STAGES = COMMAND_PIPELINE_ACTIVE_STAGES + ("failed",)
 OPERATOR_PENDING_MODES = {"runtime_validation", "planned"}
+# A failed mutation is a latch unless the executor proved it stopped before
+# dispatch (docs/protocol.md) or an operator explicitly reconciled it.
+_DEFINITE_FAILURE_CLASSIFICATIONS = frozenset({"behavior_fail", "rejected", "runtime_fail"})
+OPERATOR_RESOLUTION_SCHEMA = "oni.operator-resolution.v1"
+OPERATOR_RESOLUTION_OUTCOMES = frozenset({"effect_present", "effect_absent"})
 ALLOWED_ACTIONS = set(ACTION_POLICY_ALLOWED_ACTIONS)
 DEFAULT_TTL_SECONDS = 30
 DEFAULT_MAX_PENDING = 20
@@ -231,8 +236,6 @@ def command_pipeline_readiness(
                 )
                 continue
             if stage == "failed" and not _is_unresolved_outcome_unknown(value):
-                continue
-            if stage == "failed" and not _outcome_unknown_is_relevant(value, latest_state):
                 continue
 
             command_id = value.get("id")
@@ -643,28 +646,51 @@ def _operator_pending_mutation_latches(command: Mapping[str, Any]) -> bool:
     )
 
 
-def _is_unresolved_outcome_unknown(command: Mapping[str, Any]) -> bool:
+def _failure_classifications(command: Mapping[str, Any]) -> set[str]:
     result = command.get("result") if isinstance(command.get("result"), Mapping) else {}
+    return {
+        value
+        for value in (command.get("classification"), result.get("classification"))
+        if isinstance(value, str) and value
+    }
+
+
+def has_operator_resolution(command: Mapping[str, Any]) -> bool:
+    """Return whether an operator explicitly reconciled this failed command."""
+
+    value = command.get("operator_resolution")
+    reason = value.get("reason") if isinstance(value, Mapping) else None
     return (
-        command.get("classification") == "outcome_unknown"
-        or result.get("classification") == "outcome_unknown"
+        isinstance(value, Mapping)
+        and value.get("schema") == OPERATOR_RESOLUTION_SCHEMA
+        and value.get("command_id") == command.get("id")
+        and value.get("resolved_by") == "local_human"
+        and value.get("observed_outcome") in OPERATOR_RESOLUTION_OUTCOMES
+        and isinstance(reason, str)
+        and bool(reason.strip())
+        and parse_timestamp(value.get("resolved_at")) is not None
     )
 
 
-def _outcome_unknown_is_relevant(
-    command: Mapping[str, Any], latest_state: Optional[Mapping[str, Any]]
-) -> bool:
-    if not isinstance(latest_state, Mapping):
+def _is_unresolved_outcome_unknown(command: Mapping[str, Any]) -> bool:
+    """Return whether one failed record must latch further mutations.
+
+    The latch is durable and global to this Bridge directory: it is cleared
+    only by an explicit operator resolution, never by a later save (whose
+    content hash always differs) or a reload.  A mutating failure latches
+    unless the executor recorded a definite pre-dispatch classification;
+    a missing classification (for example a raw executing claim moved to
+    failed/ when finalization failed) cannot prove where dispatch stopped.
+    """
+
+    if has_operator_resolution(command):
+        return False
+    classifications = _failure_classifications(command)
+    if "outcome_unknown" in classifications:
         return True
-    command_save = command.get("save_id_hash")
-    current_save = latest_state.get("save_id_hash")
-    return not (
-        isinstance(command_save, str)
-        and isinstance(current_save, str)
-        and command_save
-        and current_save
-        and command_save != current_save
-    )
+    if command.get("action") in NON_MUTATING_ACTIONS:
+        return False
+    return not classifications or not classifications <= _DEFINITE_FAILURE_CLASSIFICATIONS
 
 
 def _command_intent_hash(command: Mapping[str, Any]) -> str:

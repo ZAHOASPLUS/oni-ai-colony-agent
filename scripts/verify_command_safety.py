@@ -61,6 +61,10 @@ def run_ps(script: pathlib.Path, *arguments: str, expect_success: bool = True) -
         [powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), *arguments],
         text=True,
         capture_output=True,
+        # Windows PowerShell 5.1 writes localized errors in the console code
+        # page while PYTHONUTF8=1 decodes as UTF-8; a decode failure in the
+        # reader thread left stderr=None.
+        errors="replace",
         env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
     )
     if expect_success and process.returncode != 0:
@@ -905,6 +909,15 @@ def case_executor_static_contract(root: pathlib.Path) -> Dict[str, Any]:
         execute_file.index("HasMutatingVerificationInFlight") < execute_file.index("ValidateCommand(command"),
         "a second mutating command can reach validation while another verification is in flight",
     )
+    session_latch = source[
+        source.index("private static void SetSessionLatch") : source.index(
+            "private static void LatchFromUnresolvedFailures"
+        )
+    ]
+    require(
+        "mutationSafetyLatch = true" in session_latch,
+        "SetSessionLatch does not engage the mutation latch",
+    )
     startup = source[
         source.index("private static void QuarantineStartupCommands") : source.index(
             "private static void PollApprovedCommands"
@@ -925,7 +938,7 @@ def case_executor_static_contract(root: pathlib.Path) -> Dict[str, Any]:
     require(
         "Directory.GetFiles(dirs.Executing" in startup
         and "RecoverExecutingAtStartup" in startup
-        and "mutationSafetyLatch = true" in startup
+        and "SetSessionLatch();" in startup
         and "PauseForUnknownOutcome" in startup
         and '"outcome_unknown"' in startup
         and "dirs.Failed" in startup,
@@ -1008,7 +1021,7 @@ def case_executor_static_contract(root: pathlib.Path) -> Dict[str, Any]:
         )
     ]
     require(
-        "mutationSafetyLatch = true" in unknown
+        "SetSessionLatch();" in unknown
         and "PauseForUnknownOutcome" in unknown
         and '"outcome_unknown"' in unknown
         and "EnsureCommandDirectories().Failed" in unknown,

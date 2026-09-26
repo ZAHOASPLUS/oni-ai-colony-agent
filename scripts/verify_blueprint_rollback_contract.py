@@ -31,7 +31,10 @@ def main() -> int:
     unknown_end = executor.index("private static string PauseForUnknownOutcome", unknown_start)
     unknown = executor[unknown_start:unknown_end]
     require('"outcome_unknown"' in unknown, "unknown path lacks outcome_unknown classification")
-    require("mutationSafetyLatch = true" in unknown, "unknown path lacks mutation latch")
+    require("SetSessionLatch();" in unknown, "unknown path lacks mutation latch")
+    latch_start = executor.index("private static void SetSessionLatch")
+    latch_body = executor[latch_start:executor.index("}", latch_start)]
+    require("mutationSafetyLatch = true" in latch_body, "SetSessionLatch does not engage the mutation latch")
     require("CancelCreatedBlueprints" not in unknown, "unknown path performs automatic blueprint cancellation")
     failure_start = executor.index("private static void FinishPendingFailure")
     failure_end = executor.index("private static void FinishPendingUnknown", failure_start)
