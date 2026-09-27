@@ -51,6 +51,7 @@ class PauseLedgerTests(unittest.TestCase):
             "shared_pause_refused",
             "new_screen_not_inherited",
             "single_reference_and_modal_rules",
+            "only_shown_modals_hold_the_pause",
         }, set(result["cases"]))
 
 

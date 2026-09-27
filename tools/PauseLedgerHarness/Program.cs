@@ -109,6 +109,29 @@ namespace PauseLedgerHarness
             Require(PauseLedger.ModalRefusal(0) == null, "no open modal was refused");
             Require(Contains(PauseLedger.ModalRefusal(1), "modal"), "an open pausing modal was not refused");
             Passed.Add("single_reference_and_modal_rules");
+
+            // Live run 2026-09-27: a hidden modal that stays active (the pause
+            // menu is created hidden) was counted as open and every unpause was
+            // refused.  Only a shown modal holds a pause reference.
+            FieldInfo screenShown = typeof(KModalScreen).GetField("shown", AnyInstance);
+            FieldInfo menuShown = typeof(KModalButtonMenu).GetField("shown", AnyInstance);
+            Require(screenShown != null && screenShown.FieldType == typeof(bool) &&
+                menuShown != null && menuShown.FieldType == typeof(bool),
+                "KModalScreen/KModalButtonMenu.shown is missing in this game build");
+            KModalScreen modal = (KModalScreen)RuntimeHelpers.GetUninitializedObject(typeof(KModalScreen));
+            modal.pause = true;
+            screenShown.SetValue(modal, false);
+            Require(!PauseLedger.ModalHoldsPause(modal), "a hidden pausing modal was counted as holding the pause");
+            screenShown.SetValue(modal, true);
+            Require(PauseLedger.ModalHoldsPause(modal), "a shown pausing modal was not counted");
+            modal.pause = false;
+            Require(!PauseLedger.ModalHoldsPause(modal), "a shown non-pausing modal was counted");
+            PauseScreen menu = (PauseScreen)RuntimeHelpers.GetUninitializedObject(typeof(PauseScreen));
+            menuShown.SetValue(menu, false);
+            Require(!PauseLedger.ModalHoldsPause(menu), "the hidden pause menu was counted as holding the pause");
+            menuShown.SetValue(menu, true);
+            Require(PauseLedger.ModalHoldsPause(menu), "the shown pause menu was not counted");
+            Passed.Add("only_shown_modals_hold_the_pause");
         }
 
         private static SpeedControlScreen NewScreen(FieldInfo countField, int pauseCount)

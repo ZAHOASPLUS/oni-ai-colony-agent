@@ -1650,17 +1650,18 @@ namespace OniAiProbeMod.Commands
         private static int CountOpenPausingModals()
         {
             int count = 0;
+            // Only a shown modal holds a pause reference (PauseLedger.ModalHoldsPause);
+            // KModalButtonMenu (the pause menu among them) always pauses while shown.
             foreach (KModalScreen screen in UnityEngine.Object.FindObjectsByType<KModalScreen>(FindObjectsSortMode.None))
             {
-                if (screen != null && screen.pause && screen.isActiveAndEnabled)
+                if (screen != null && PauseLedger.ModalHoldsPause(screen))
                 {
                     count++;
                 }
             }
-            // KModalButtonMenu (the pause menu among them) always pauses while shown.
             foreach (KModalButtonMenu menu in UnityEngine.Object.FindObjectsByType<KModalButtonMenu>(FindObjectsSortMode.None))
             {
-                if (menu != null && menu.isActiveAndEnabled)
+                if (menu != null && PauseLedger.ModalHoldsPause(menu))
                 {
                     count++;
                 }

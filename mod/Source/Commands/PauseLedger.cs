@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Reflection;
 
 namespace OniAiProbeMod.Commands
 {
@@ -22,6 +23,12 @@ namespace OniAiProbeMod.Commands
     internal static class PauseLedger
     {
         private static readonly object Sync = new object();
+        // KModalScreen and KModalButtonMenu set their private `shown` exactly when
+        // OnShow(true) calls Pause() and clear it when OnShow(false) calls Unpause().
+        private static readonly FieldInfo ModalScreenShown =
+            typeof(KModalScreen).GetField("shown", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo ModalMenuShown =
+            typeof(KModalButtonMenu).GetField("shown", BindingFlags.Instance | BindingFlags.NonPublic);
         private static bool tracking;
         private static object observedScreen;
         private static int observedCount = -1;
@@ -94,6 +101,43 @@ namespace OniAiProbeMod.Commands
                     " times; one unpause would not release it and would take another holder's pause";
             }
             return null;
+        }
+
+        /// <summary>
+        /// True while a modal holds the pause reference it took when shown.  A
+        /// hidden screen can stay active in the hierarchy (the pause menu is
+        /// created hidden and lives for the whole game), so being active is not
+        /// the signal: the first live run (2026-09-27) refused every unpause with
+        /// "1 pausing modal" while the pause was held exactly once.  An unreadable
+        /// flag counts as holding the pause (fail closed).
+        /// </summary>
+        internal static bool ModalHoldsPause(object modal)
+        {
+            if (modal is KModalScreen screen)
+            {
+                return screen.pause && ReadShown(ModalScreenShown, screen);
+            }
+            if (modal is KModalButtonMenu menu)
+            {
+                return ReadShown(ModalMenuShown, menu);
+            }
+            return false;
+        }
+
+        private static bool ReadShown(FieldInfo field, object modal)
+        {
+            if (field == null || field.FieldType != typeof(bool))
+            {
+                return true;
+            }
+            try
+            {
+                return (bool)field.GetValue(modal);
+            }
+            catch
+            {
+                return true;
+            }
         }
 
         /// <summary>Null when no pausing modal holds that single reference.</summary>
