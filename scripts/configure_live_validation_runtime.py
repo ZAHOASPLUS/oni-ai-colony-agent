@@ -4162,15 +4162,19 @@ def build_kplayerprefs(payload: bytes, source: pathlib.Path, loader: pathlib.Pat
         direct_child_width=direct_child_width,
         label=SAVE_FILENAME_KEY,
     )
+    # 2026-09-30: the pointer follows whatever the player last loaded, so it
+    # rarely equals the clone source (live runs m1-0927a/b had to clone the
+    # pointed save instead).  The gate needs a well-formed absolute local
+    # pointer that is not already the loader: the byte-exact backup restores
+    # whatever it was, and the loader policy below proves the rewritten file
+    # points only at the loader clone.
     current_value = match.group("value")
     try:
-        current_source = require_absolute_local_path(current_value, SAVE_FILENAME_KEY)
+        current_pointer = require_absolute_local_path(current_value, SAVE_FILENAME_KEY)
     except ConfigError as exc:
-        raise ConfigError(
-            "SaveFilenameKey/ does not point to the manifest-bound source save"
-        ) from exc
-    if current_value != str(source) or not same_path(current_source, source):
-        raise ConfigError("SaveFilenameKey/ does not point to the manifest-bound source save")
+        raise ConfigError("SaveFilenameKey/ must be an absolute local save path") from exc
+    if same_path(current_pointer, loader):
+        raise ConfigError("SaveFilenameKey/ already points to the loader save")
     newline = match.group("newline")
     if not newline:
         raise ConfigError("SaveFilenameKey/ must end with a reusable line ending")

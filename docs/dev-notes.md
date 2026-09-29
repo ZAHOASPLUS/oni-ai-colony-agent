@@ -645,6 +645,9 @@ Before starting Bridge or ONI, the separate config gate must consume both the
 result path and that external raw hash. Its live mutation atomically points the
 one `SaveFilenameKey/` at the named loader clone and enables only
 `ass.OniAiProbe`; every other existing mod entry is preserved but disabled. The
+current pointer need not equal the clone source (it follows the player's last
+load); it must be an absolute local path other than the loader, and the
+byte-exact backup restores it. The
 environment finalizer owns restoration.
 
 This workflow requires `$OniUserRoot` to resolve to
