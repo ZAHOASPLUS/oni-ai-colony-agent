@@ -1030,6 +1030,55 @@ shutdown/finalize path if its evidence is complete, otherwise stop for manual
 recovery. Abort must never be used to bypass the shutdown or priority-pair
 gates.
 
+### M1 (model-loop) runs: `finalize_m1_environment.py`
+
+An M1 run (the external model chooses `set_paused`/`noop`-class commands
+through `--model-loop`, no priority pair, no derivative save because the Mod's
+autosave guard is enforced) produces session and command evidence, so abort is
+closed, but it never produces the priority-pair report, shutdown certificate,
+or startup-consumption bundle the G0 `finalize` requires. Its restoration is
+`scripts/finalize_m1_environment.py`. It shares `resolve_roots`, the
+environment-manifest and restore-journal anchors, `verify_base_bindings`,
+`verify_backups`, `validate_bootstrap`, `FileTransaction`, `.finalize.lock`,
+and the post-boundary comparison with the G0 workflow; only the evidence gate
+differs. It requires ONI and Bridge stopped, the action policy disabled, every
+nonterminal queue and `quarantine`/`lifecycle-recovery` empty, and at least
+one `commands/done` record (with `--expect-done-command-id` the done set must
+match exactly). The runtime Bridge is preserved as `environment/rb` plus
+`rb-snapshot.json`; the runtime Probe, configs, and pre-restore loader pair are
+preserved under `environment/finalization-m1/`; the loader pair, configs, Probe,
+pre-existing Bridge, and archive-root timestamp are restored exactly from the
+manifest. The self-hashed `finalize-m1-result.json` is create-only; a replay
+re-verifies the restored state and returns it unchanged, and any other leftover
+from an earlier attempt (a rollback, a recovery latch, a moved Bridge without a
+result) is a hard refusal that needs manual inspection.
+
+```powershell
+python .\scripts\finalize_m1_environment.py `
+  --run-id $ValidationRunId `
+  --oni-root $OniUserRoot `
+  --evidence-root $EnvironmentEvidenceRoot `
+  --boundary-report-root $BoundaryReportRoot `
+  --pre-boundary $PreBoundaryJson `
+  --clone-manifest $CloneManifestJson `
+  --source-save $ImmutableSourceSave `
+  --loader-save $NamedLoaderSave `
+  --loader-stem $NamedLoaderStem `
+  --manifest $EnvironmentManifestJson `
+  --expected-environment-manifest-sha256 $ExpectedEnvironmentManifestHash `
+  --what-if
+
+# After reviewing the plan (steps, session_window.done_commands) and confirming
+# ONI/Bridge remain stopped: replace --what-if with
+#   --apply --confirm-live-run-id $ValidationRunId [--expect-done-command-id <id> ...]
+```
+
+Its offline TestRoot verification (zero-write what-if, exact restore with a
+passing post-boundary comparison, identical replay, tampered-result refusal,
+eight zero-write refusals, injected mid-transaction fault with exact rollback
+and a non-replay latch) is `python .\scripts\verify_finalize_m1_environment.py`;
+run it in a worktree like the other verifiers.
+
 After both priority commands are confirmed and the inverse save/reload is
 complete, keep policy disabled. Quit ONI through its normal application exit,
 wait until Bridge has copied the final lineage session's
