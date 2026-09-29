@@ -232,11 +232,11 @@ namespace OniAiProbeMod.Contracts
             RegexOptions.CultureInvariant);
 
         private static readonly Regex BlueprintCatalogPath = new Regex(
-            @"^blueprints\.catalog\.(Ladder|Wire)\.(available|prefab_id|is_utility|cancellable|orientation|facade_id|material_tags)$",
+            @"^blueprints\.catalog\.(Ladder|Wire|MineralDeoxidizer|AlgaeHabitat)\.(available|prefab_id|is_utility|cancellable|orientation|facade_id|material_tags)$",
             RegexOptions.CultureInvariant);
 
         private static readonly Regex BlueprintCellPath = new Regex(
-            @"^cells\.by_id\.cell_[0-9]+\.(cell|x|y|world_id|visible|solid|foundation|element_id|mass_kg|damage|object_count|empty_for_blueprint|can_place_ladder|can_place_wire|blueprint_present|blueprint_instance_id|blueprint_prefab_id|blueprint_orientation|blueprint_material_tags|blueprint_in_progress|blueprint_is_utility|blueprint_progress_percent|blueprint_worker_instance_id|blueprint_root_cell|blueprint_footprint_cells|blueprint_priority_class|blueprint_priority_value|empty_fingerprint|fingerprint)$",
+            @"^cells\.by_id\.cell_[0-9]+\.(cell|x|y|world_id|visible|solid|foundation|element_id|mass_kg|damage|object_count|empty_for_blueprint|can_place_ladder|can_place_wire|can_place_mineral_deoxidizer|can_place_algae_habitat|blueprint_present|blueprint_instance_id|blueprint_prefab_id|blueprint_orientation|blueprint_material_tags|blueprint_in_progress|blueprint_is_utility|blueprint_progress_percent|blueprint_worker_instance_id|blueprint_root_cell|blueprint_footprint_cells|blueprint_priority_class|blueprint_priority_value|empty_fingerprint|fingerprint)$",
             RegexOptions.CultureInvariant);
 
         private static readonly Regex BlueprintInstancePath = new Regex(
@@ -559,6 +559,8 @@ namespace OniAiProbeMod.Contracts
                 case "empty_for_blueprint":
                 case "can_place_ladder":
                 case "can_place_wire":
+                case "can_place_mineral_deoxidizer":
+                case "can_place_algae_habitat":
                 case "blueprint_present":
                 case "blueprint_in_progress":
                 case "blueprint_is_utility":

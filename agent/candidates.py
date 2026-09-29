@@ -35,7 +35,9 @@ from agent.state_quality import safe_get
 
 CANDIDATE_SET_SCHEMA = "oni.action-candidates.v1"
 WAIT_CANDIDATE_ID = "wait"
-MAX_CANDIDATES = 8  # including the always-present "wait"; the paused set never truncates
+# Including the always-present "wait"; the full paused set (two research, two
+# priority, one dig, three buildings, resume) never truncates.
+MAX_CANDIDATES = 10
 # Early-game chore groups offered for a one-step raise, in preference order.
 PRIORITY_GROUPS = ("Dig", "Build")
 MAX_PRIORITY_CANDIDATES = 2
@@ -53,8 +55,15 @@ RESEARCH_SUMMARIES = {
     "BasicRefinement": "Basic Refinement: unlocks the Rock Crusher and Kiln",
 }
 MAX_RESEARCH_CANDIDATES = 2
-# The only building the Mod's blueprint allowlist accepts today.
-LADDER_BUILDING_ID = "Ladder"
+# Single-building blueprints offered while paused, in preference order: the
+# two early oxygen buildings (1x2, on a floor; the Probe lists candidate cells
+# only for a researched building with materials), then a Ladder.  Each entry
+# is (building_def_id, candidate id prefix, label shown to the model).
+BUILDING_CANDIDATES = (
+    ("MineralDeoxidizer", "oxygen_diffuser", "Oxygen Diffuser (MineralDeoxidizer, turns algae into oxygen)"),
+    ("AlgaeHabitat", "algae_terrarium", "Algae Terrarium (AlgaeHabitat, turns algae and water into oxygen)"),
+    ("Ladder", "ladder", "Ladder"),
+)
 MAX_NAME_CHARS = 32
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
 
@@ -212,10 +221,12 @@ def _research_candidates(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     return result
 
 
-def _ladder_candidate(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """One Ladder blueprint on the lowest catalogued empty cell (deterministic)."""
+def _building_candidate(
+    state: Dict[str, Any], building_def_id: str, prefix: str, label: str
+) -> Optional[Dict[str, Any]]:
+    """One blueprint of ``building_def_id`` on the lowest catalogued empty cell (deterministic)."""
 
-    catalog = safe_get(state, f"blueprints.catalog.{LADDER_BUILDING_ID}")
+    catalog = safe_get(state, f"blueprints.catalog.{building_def_id}")
     if not isinstance(catalog, dict):
         return None
     cells = catalog.get("candidate_cells")
@@ -225,15 +236,15 @@ def _ladder_candidate(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     for cell in sorted(item for item in cells if isinstance(item, int) and not isinstance(item, bool)):
         try:
             hint = build_place_building_blueprint_hint(
-                state, cells=[cell], material_tags=materials, building_def_id=LADDER_BUILDING_ID
+                state, cells=[cell], material_tags=materials, building_def_id=building_def_id
             )
         except ValueError:
             continue
         details = safe_get(state, f"cells.by_id.cell_{cell}") or {}
         material = display_text(materials[0], 40)
         return _candidate(
-            f"ladder_{cell}",
-            f"Place one Ladder blueprint at x={details.get('x')}, y={details.get('y')} built from {material}",
+            f"{prefix}_{cell}",
+            f"Place one {label} blueprint at x={details.get('x')}, y={details.get('y')} built from {material}",
             hint,
             risk="medium",
         )
@@ -266,9 +277,10 @@ def generate_candidates(
         dig = _dig_candidate(snapshot)
         if dig is not None:
             items.append(dig)
-        ladder = _ladder_candidate(snapshot)
-        if ladder is not None:
-            items.append(ladder)
+        for building_def_id, prefix, label in BUILDING_CANDIDATES:
+            building = _building_candidate(snapshot, building_def_id, prefix, label)
+            if building is not None:
+                items.append(building)
         resume = _resume_candidate(snapshot)
         if resume is not None:
             items.append(resume)

@@ -930,8 +930,16 @@ creation without changing element, mass, damage, or solidity, and cancel must
 verify exact removal while restoring the cell as a safe mark candidate.
 
 Batch-C blueprint placement additionally requires observed `sandbox_mode=false`
-and `instant_build_mode=false`. The initial allowlist is exactly `Ladder` for
-single-building commands and `Wire` for ordered four-neighbor utility paths.
+and `instant_build_mode=false`. The single-building allowlist is `Ladder`,
+`MineralDeoxidizer` (Oxygen Diffuser) and `AlgaeHabitat` (Algae Terrarium);
+`Wire` is the only ordered four-neighbor utility path. A `building_def_id`
+outside the allowlist is refused before any game lookup, and a cancellation
+names its building through the observed `blueprint_prefab_id` precondition of
+every target. Each allowlisted building has a per-cell `can_place_<snake_id>`
+field (for example `can_place_mineral_deoxidizer`) that is true only when
+every footprint cell is empty, the building's technology is researched
+(`TechItems.IsTechItemComplete`) and the game's placement rules accept the
+root cell; the catalog lists candidate cells under the same conditions.
 Orientation is fixed to `Neutral`, facade to `DEFAULT_FACADE`, and material tags
 must exactly match the current observed catalog selection. Every target cell
 must be visible, empty, non-liquid, in the active world, and valid through both
@@ -1039,14 +1047,15 @@ not require a mutation approval receipt.
 review 2026-09-26, M1) adds a third Bridge-side owner: `mode=model_selected`,
 `source.kind=model_choice`, a null `source_incident_id`, and ids of the form
 `cmd-model-<32 hex>`. Each generation `agent/candidates.py` derives at most
-eight candidates from the trusted snapshot: `pause_game` while running; up to
+ten candidates from the trusted snapshot: `pause_game` while running; up to
 two `set_research` selections from a fixed tier-1 ladder (`ImprovedOxygen`,
 `FarmingTech`, `PowerRegulation`, `BasicRefinement`, skipping the observed
 `research.current` and every id in an observed `research.complete`) in either
 pause state; while paused additionally up to two
 one-step `set_duplicant_chore_priority` raises for the Dig/Build groups, one
 horizontal `mark_dig_cells` run of at most four safe cells, one
-`place_building_blueprint` Ladder on the lowest catalogued empty cell, and
+`place_building_blueprint` each for `MineralDeoxidizer`, `AlgaeHabitat` and
+`Ladder` on that building's lowest catalogued empty cell, and
 `resume_game` only on an observed empty canonical alert set; each built by the
 catalogued `agent/advanced_actions.py` builders, plus `wait`. A
 background request with a total deadline asks the model for exactly one

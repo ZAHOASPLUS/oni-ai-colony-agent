@@ -381,7 +381,8 @@ py -3 .\scripts\verify_runtime.py collect --phase batch-c --minimum-duration-sec
 ```
 
 The selected utility cells must be ordered four-neighbor cells. Placement may
-create only unfinished `Ladder`/`Wire` blueprints through `TryPlace`; each
+create only unfinished allowlisted blueprints (`Ladder`, `MineralDeoxidizer`,
+`AlgaeHabitat`, `Wire`) through `TryPlace`; each
 cancel command binds the positive instance ids observed after placement and
 must restore every original empty-cell fingerprint.
 
@@ -445,7 +446,7 @@ never writes `approved` commands.
 ### Model loop (M1)
 
 `-ModelLoop` (watch mode only) lets the configured model pick one of at most
-eight catalogued candidates per decision (`docs/protocol.md`, `model_selected`).
+ten catalogued candidates per decision (`docs/protocol.md`, `model_selected`).
 The Bridge publishes the choice as one pending command; nothing runs until a
 human approves it:
 
@@ -460,8 +461,9 @@ the command awaiting approval, and the recent outcomes fed back to the model.
 The policy must enable actions and suggestions for the loaded save and allow the
 candidate actions (`set_paused`, `set_research`, `set_duplicant_chore_priority`,
 `mark_dig_cells`, `place_building_blueprint`); raise `command_ttl_seconds` (at
-most 300) so there is time to read and approve. Priority, dig, and Ladder
-candidates exist only while the game is paused; the research candidates
+most 300) so there is time to read and approve. Priority, dig, and building
+blueprint candidates (Oxygen Diffuser, Algae Terrarium, Ladder; each on its
+lowest catalogued empty cell) exist only while the game is paused; the research candidates
 (`research_<TechId>`, a fixed tier-1 ladder led by `ImprovedOxygen` because the
 first live colony consumed about four times the oxygen it produced) are offered
 in either pause state. The Probe reports the finished set as `research.complete`

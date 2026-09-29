@@ -149,6 +149,8 @@ _PATH_NATIVE_BOOLEAN_FIELDS = frozenset(
         "empty_for_blueprint",
         "can_place_ladder",
         "can_place_wire",
+        "can_place_mineral_deoxidizer",
+        "can_place_algae_habitat",
         "blueprint_present",
         "blueprint_in_progress",
         "blueprint_is_utility",
@@ -668,7 +670,7 @@ _CONTRACTS: Tuple[FieldContract, ...] = (
         contract_id=BLUEPRINT_CATALOG_CONTRACT_ID,
         paths=(),
         path_patterns=(
-            r"^blueprints\.catalog\.(Ladder|Wire)\."
+            r"^blueprints\.catalog\.(Ladder|Wire|MineralDeoxidizer|AlgaeHabitat)\."
             r"(available|prefab_id|is_utility|cancellable|orientation|facade_id|material_tags)$",
         ),
         statuses=("observed",),
@@ -688,6 +690,7 @@ _CONTRACTS: Tuple[FieldContract, ...] = (
             r"^cells\.by_id\.cell_[0-9]+\."
             r"(cell|x|y|world_id|visible|solid|foundation|element_id|mass_kg|damage|"
             r"object_count|empty_for_blueprint|can_place_ladder|can_place_wire|"
+            r"can_place_mineral_deoxidizer|can_place_algae_habitat|"
             r"blueprint_present|blueprint_instance_id|blueprint_prefab_id|"
             r"blueprint_orientation|blueprint_material_tags|blueprint_in_progress|"
             r"blueprint_is_utility|blueprint_progress_percent|"

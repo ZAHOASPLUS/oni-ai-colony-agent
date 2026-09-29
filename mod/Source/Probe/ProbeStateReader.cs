@@ -34,7 +34,19 @@ namespace OniAiProbeMod.Probe
         private const int BlueprintTrackedCellLimit = 256;
         private const int BlueprintCandidateRefreshSeconds = 30;
         private const double BlueprintCandidateScanBudgetMs = 10.0;
-        private static readonly string[] BlueprintAllowlist = { "Ladder", "Wire" };
+        // Every id is a catalog key and a per-cell "can_place_<snake>" field
+        // (BlueprintCanPlaceField).  2026-09-29: MineralDeoxidizer (Oxygen
+        // Diffuser) and AlgaeHabitat (Algae Terrarium), both 1x2 OnFloor
+        // buildings, join Ladder/Wire so the model loop can add oxygen
+        // production; the game's own placement rules and the research lock
+        // decide where they may go.
+        private static readonly string[] BlueprintAllowlist =
+        {
+            "Ladder",
+            "Wire",
+            "MineralDeoxidizer",
+            "AlgaeHabitat"
+        };
 
         private static Dictionary<string, object> cachedBuildings;
         private static int cachedBuildingsWorldId = int.MinValue;
@@ -1455,18 +1467,20 @@ namespace OniAiProbeMod.Probe
                 }
             }
 
-            BuildingDef ladder = Assets.GetBuildingDef("Ladder");
-            BuildingDef wire = Assets.GetBuildingDef("Wire");
-            List<Tag> ladderMaterials = selectedMaterialsByDef.TryGetValue("Ladder", out List<Tag> ladderSelection)
-                ? ladderSelection
-                : new List<Tag>();
-            List<Tag> wireMaterials = selectedMaterialsByDef.TryGetValue("Wire", out List<Tag> wireSelection)
-                ? wireSelection
-                : new List<Tag>();
             int objectCount = CountCellObjects(cell);
             bool empty = IsEmptyBlueprintCell(cell, worldId);
-            bool canPlaceLadder = IsSafeBlueprintPlacement(cell, worldId, ladder, ladderMaterials);
-            bool canPlaceWire = IsSafeBlueprintPlacement(cell, worldId, wire, wireMaterials);
+            Dictionary<string, bool> canPlaceByDef = new Dictionary<string, bool>(StringComparer.Ordinal);
+            foreach (string allowlistedId in BlueprintAllowlist)
+            {
+                List<Tag> selection = selectedMaterialsByDef.TryGetValue(allowlistedId, out List<Tag> chosen)
+                    ? chosen
+                    : new List<Tag>();
+                canPlaceByDef[allowlistedId] = IsSafeBlueprintPlacement(
+                    cell,
+                    worldId,
+                    Assets.GetBuildingDef(allowlistedId),
+                    selection);
+            }
             Element element = Grid.Element[cell];
             string elementId = element?.tag.Name ?? "unknown";
             float mass = Grid.Mass[cell];
@@ -1510,8 +1524,6 @@ namespace OniAiProbeMod.Probe
                 { "damage", damage },
                 { "object_count", objectCount },
                 { "empty_for_blueprint", empty },
-                { "can_place_ladder", canPlaceLadder },
-                { "can_place_wire", canPlaceWire },
                 { "blueprint_present", constructable != null },
                 { "blueprint_instance_id", instanceId },
                 { "blueprint_prefab_id", prefabId },
@@ -1522,6 +1534,10 @@ namespace OniAiProbeMod.Probe
                 { "empty_fingerprint", emptyFingerprint },
                 { "fingerprint", fingerprint }
             };
+            foreach (KeyValuePair<string, bool> pair in canPlaceByDef)
+            {
+                result[BlueprintCanPlaceField(pair.Key)] = pair.Value;
+            }
             if (progressPercent >= 0)
             {
                 result["blueprint_progress_percent"] = progressPercent;
@@ -1905,9 +1921,26 @@ namespace OniAiProbeMod.Probe
             }
             WorldContainer world = ClusterManager.Instance?.GetWorld(worldId);
             if (world == null ||
+                !IsBlueprintUnlocked(def) ||
                 !ValidateBlueprintMaterials(def, selectedMaterials))
             {
                 return false;
+            }
+            // Every footprint cell (a 1x2 oxygen building also covers the
+            // cell above its root) must be as empty as the root; the game's
+            // placement rules below then decide floor support and obstruction.
+            CellOffset[] offsets = def.PlacementOffsets;
+            if (offsets != null)
+            {
+                foreach (CellOffset offset in offsets)
+                {
+                    int footprintCell = Grid.OffsetCell(cell, offset);
+                    if (!Grid.IsValidCellInWorld(footprintCell, worldId) ||
+                        !IsEmptyBlueprintCell(footprintCell, worldId))
+                    {
+                        return false;
+                    }
+                }
             }
             try
             {
@@ -1924,6 +1957,45 @@ namespace OniAiProbeMod.Probe
                         Orientation.Neutral,
                         replace_tile: false,
                         out _);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        internal static string BlueprintCanPlaceField(string defId)
+        {
+            StringBuilder builder = new StringBuilder("can_place_");
+            for (int index = 0; index < defId.Length; index++)
+            {
+                char current = defId[index];
+                if (char.IsUpper(current))
+                {
+                    if (index > 0)
+                    {
+                        builder.Append('_');
+                    }
+                    builder.Append(char.ToLowerInvariant(current));
+                }
+                else
+                {
+                    builder.Append(current);
+                }
+            }
+            return builder.ToString();
+        }
+
+        // The build menu hides a building until its technology is researched
+        // (TechItems.IsTechItemComplete is true for buildings no tech unlocks);
+        // placing one through code respects the same lock.
+        private static bool IsBlueprintUnlocked(BuildingDef def)
+        {
+            try
+            {
+                return def != null &&
+                    def.IsAvailable() &&
+                    Db.Get()?.TechItems?.IsTechItemComplete(def.PrefabID) == true;
             }
             catch
             {

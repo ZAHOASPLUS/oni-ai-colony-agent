@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import pathlib
+import re
 from typing import Any, Dict, Iterable, List
 
 from agent.field_contracts import build_condition, contract_id_for_path, read_contract_field
@@ -14,7 +15,12 @@ MAX_DIG_CELLS = 32
 MAX_BUILDING_BLUEPRINT_CELLS = 8
 MAX_UTILITY_BLUEPRINT_CELLS = 64
 MAX_PATH_ID_LENGTH = 64
-BUILDING_BLUEPRINT_ALLOWLIST = {"Ladder"}
+# Single-building blueprints the executor accepts (mirrors the Mod's
+# BuildingBlueprintAllowlist).  MineralDeoxidizer (Oxygen Diffuser) and
+# AlgaeHabitat (Algae Terrarium) are the early oxygen buildings; both are 1x2
+# and the Probe reports a candidate cell only when the whole footprint is empty,
+# the building is researched and the game's own placement rules accept it.
+BUILDING_BLUEPRINT_ALLOWLIST = {"Ladder", "MineralDeoxidizer", "AlgaeHabitat"}
 UTILITY_BLUEPRINT_ALLOWLIST = {"Wire"}
 BLUEPRINT_PRIORITY_CLASSES = {"idle", "basic", "high", "personalNeeds", "topPriority", "compulsory"}
 
@@ -282,6 +288,12 @@ BLUEPRINT_CELL_FIELDS = (
 )
 
 
+def blueprint_can_place_field(building_def_id: str) -> str:
+    """The Probe's per-cell placement field for one building (Ladder -> can_place_ladder)."""
+
+    return "can_place_" + re.sub(r"(?<!^)(?=[A-Z])", "_", building_def_id).lower()
+
+
 def _require_blueprint_environment(state: Dict[str, Any]) -> None:
     _require_paused(state)
     if _require_contract_value(state, "game.sandbox_mode") is not False:
@@ -365,9 +377,15 @@ def _blueprint_catalog_conditions(
     ]
 
 
-def _blueprint_cell_values(state: Dict[str, Any], cell: int) -> Dict[str, Any]:
+def _blueprint_cell_values(
+    state: Dict[str, Any], cell: int, extra_fields: Iterable[str] = ()
+) -> Dict[str, Any]:
+    # The per-building placement field is read only for the building being
+    # placed or cancelled, so recordings and fixtures from a Probe that knew
+    # fewer buildings still validate for the buildings they report.
     prefix = blueprint_cell_path(cell)
-    return {field: _require_contract_value(state, f"{prefix}.{field}") for field in BLUEPRINT_CELL_FIELDS}
+    fields = BLUEPRINT_CELL_FIELDS + tuple(field for field in extra_fields if field not in BLUEPRINT_CELL_FIELDS)
+    return {field: _require_contract_value(state, f"{prefix}.{field}") for field in fields}
 
 
 def _blueprint_physical_conditions(prefix: str, values: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -392,7 +410,7 @@ def _build_blueprint_place_contract(
         material_tags,
         is_utility=is_utility,
     )
-    can_place_field = "can_place_wire" if is_utility else "can_place_ladder"
+    can_place_field = "can_place_wire" if is_utility else blueprint_can_place_field(building_def_id)
     preconditions = _blueprint_environment_conditions()
     preconditions.extend(
         _blueprint_catalog_conditions(
@@ -405,7 +423,7 @@ def _build_blueprint_place_contract(
     values_by_cell: Dict[int, Dict[str, Any]] = {}
     for cell in normalized_cells:
         prefix = blueprint_cell_path(cell)
-        values = _blueprint_cell_values(state, cell)
+        values = _blueprint_cell_values(state, cell, (can_place_field,))
         values_by_cell[cell] = values
         if (
             values["cell"] != cell
@@ -461,13 +479,13 @@ def _build_blueprint_cancel_target_contract(
     is_utility: bool,
 ) -> tuple[Dict[str, int], List[Dict[str, Any]], List[Dict[str, Any]]]:
     prefix = blueprint_cell_path(cell)
-    values = _blueprint_cell_values(state, cell)
+    can_place_field = "can_place_wire" if is_utility else blueprint_can_place_field(building_def_id)
+    values = _blueprint_cell_values(state, cell, (can_place_field,))
     instance_prefix = blueprint_instance_path(instance_id)
     instance_values = {
         field: _require_contract_value(state, f"{instance_prefix}.{field}")
         for field in ("instance_id", "cell", "prefab_id", "orientation", "material_tags", "in_progress", "is_utility")
     }
-    can_place_field = "can_place_wire" if is_utility else "can_place_ladder"
     if (
         values["cell"] != cell
         or values["blueprint_present"] is not True
@@ -572,11 +590,14 @@ def build_cancel_building_blueprint_hint(
         instance_id = values["blueprint_instance_id"]
         if isinstance(instance_id, bool) or not isinstance(instance_id, int) or instance_id <= 0:
             raise ValueError(f"cell {cell} does not expose a positive blueprint instance id.")
+        prefab_id = values["blueprint_prefab_id"]
+        if prefab_id not in BUILDING_BLUEPRINT_ALLOWLIST:
+            raise ValueError(f"cell {cell} holds a blueprint outside the single-building allowlist.")
         target, target_preconditions, target_effects = _build_blueprint_cancel_target_contract(
             state,
             cell=cell,
             instance_id=instance_id,
-            building_def_id="Ladder",
+            building_def_id=prefab_id,
             is_utility=False,
         )
         targets.append(target)

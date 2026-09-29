@@ -386,6 +386,45 @@ namespace OniAiProbeMod.Contracts
                     "active_world_tracked_cells",
                     "complete_for_tracked_cell");
                 AcceptDynamic(
+                    "valid_oxygen_building_catalog_contract",
+                    "blueprints.catalog.MineralDeoxidizer.available",
+                    true,
+                    CommandFieldContracts.BlueprintCatalogId,
+                    "BuildingDef+Grid+Constructable+WorldInventory",
+                    "blueprint_catalog_field",
+                    "field_native",
+                    "approved_blueprint_catalog",
+                    "complete");
+                AcceptDynamic(
+                    "valid_oxygen_building_cell_contract",
+                    "cells.by_id.cell_500.can_place_algae_habitat",
+                    true,
+                    CommandFieldContracts.BlueprintCellId,
+                    "BuildingDef+Grid+Constructable+WorldInventory",
+                    "blueprint_cell_state_field",
+                    "field_native",
+                    "active_world_tracked_cells",
+                    "complete_for_tracked_cell");
+                JObject unlistedCatalog = State(
+                    "blueprints.catalog.Electrolyzer.available",
+                    true,
+                    Entry(
+                        CommandFieldContracts.BlueprintCatalogId,
+                        "BuildingDef+Grid+Constructable+WorldInventory",
+                        "blueprint_catalog_field",
+                        "field_native",
+                        "approved_blueprint_catalog",
+                        "observed",
+                        "complete"));
+                Reject(
+                    "reject_unlisted_building_catalog_path",
+                    unlistedCatalog,
+                    Condition(
+                        "blueprints.catalog.Electrolyzer.available",
+                        true,
+                        CommandFieldContracts.BlueprintCatalogId,
+                        "observed"));
+                AcceptDynamic(
                     "valid_blueprint_instance_contract",
                     "blueprints.by_instance_id.id_9001.instance_id",
                     9001,

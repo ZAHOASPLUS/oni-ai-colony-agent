@@ -1331,9 +1331,13 @@ namespace OniAiProbeMod.Commands
                 }
                 case "place_building_blueprint":
                 {
+                    if (!TryReadBuildingBlueprintDefId(args, out string buildingDefId, out string defError))
+                    {
+                        return "place_building_blueprint: " + defError;
+                    }
                     if (!TryReadBlueprintPlacementArgs(
                             args,
-                            "Ladder",
+                            buildingDefId,
                             MaxBuildingBlueprintCells,
                             requiresPathId: false,
                             out _,
@@ -1365,7 +1369,7 @@ namespace OniAiProbeMod.Commands
                         ProbeStateReader.TrackBlueprintCell(target.Cell);
                         if (!TryValidateBlueprintCancelTarget(
                                 target,
-                                "Ladder",
+                                null, // any allowlisted single building
                                 expectedUtility: false,
                                 out _,
                                 out _,
@@ -1617,7 +1621,7 @@ namespace OniAiProbeMod.Commands
                 case "place_building_blueprint":
                     return TryPlaceBlueprints(args, isUtilityPath: false, out createdBlueprints, out message);
                 case "cancel_building_blueprint":
-                    return TryCancelBlueprints(args, "Ladder", expectedUtility: false, out message);
+                    return TryCancelBlueprints(args, null, expectedUtility: false, out message);
                 case "place_utility_blueprint_path":
                     return TryPlaceBlueprints(args, isUtilityPath: true, out createdBlueprints, out message);
                 case "cancel_utility_blueprint_path":
@@ -1912,7 +1916,11 @@ namespace OniAiProbeMod.Commands
             out string message)
         {
             created = new List<GameObject>();
-            string expectedDefId = isUtilityPath ? "Wire" : "Ladder";
+            string expectedDefId = isUtilityPath ? "Wire" : null;
+            if (!isUtilityPath && !TryReadBuildingBlueprintDefId(args, out expectedDefId, out message))
+            {
+                return false;
+            }
             int maximum = isUtilityPath ? MaxUtilityBlueprintCells : MaxBuildingBlueprintCells;
             if (!TryReadBlueprintPlacementArgs(
                     args,
@@ -2182,7 +2190,9 @@ namespace OniAiProbeMod.Commands
                 return false;
             }
             if (building.Def == null ||
-                !string.Equals(building.Def.PrefabID, expectedDefId, StringComparison.Ordinal) ||
+                !(expectedDefId == null
+                    ? IsAllowlistedBuildingBlueprint(building.Def.PrefabID)
+                    : string.Equals(building.Def.PrefabID, expectedDefId, StringComparison.Ordinal)) ||
                 building.Def.isUtility != expectedUtility ||
                 !building.Def.Cancellable ||
                 building.Orientation != Orientation.Neutral ||
@@ -3007,7 +3017,11 @@ namespace OniAiProbeMod.Commands
 
         private static bool VerifyPlacedBlueprints(JObject args, bool isUtilityPath, out string error)
         {
-            string expectedDefId = isUtilityPath ? "Wire" : "Ladder";
+            string expectedDefId = isUtilityPath ? "Wire" : null;
+            if (!isUtilityPath && !TryReadBuildingBlueprintDefId(args, out expectedDefId, out error))
+            {
+                return false;
+            }
             int maximum = isUtilityPath ? MaxUtilityBlueprintCells : MaxBuildingBlueprintCells;
             if (!TryReadBlueprintPlacementArgs(
                     args,
@@ -3604,8 +3618,23 @@ namespace OniAiProbeMod.Commands
                 action == "place_utility_blueprint_path";
             bool utility = action == "place_utility_blueprint_path" ||
                 action == "cancel_utility_blueprint_path";
-            string defId = utility ? "Wire" : "Ladder";
-            string canPlaceField = utility ? "can_place_wire" : "can_place_ladder";
+            string defId;
+            if (utility)
+            {
+                defId = "Wire";
+            }
+            else if (placement)
+            {
+                if (!TryReadBuildingBlueprintDefId(command["args"] as JObject, out defId, out string defError))
+                {
+                    return action + ": " + defError;
+                }
+            }
+            else if (!TryReadCancelledBuildingDefId(command, preconditions, out defId, out string cancelDefError))
+            {
+                return action + ": " + cancelDefError;
+            }
+            string canPlaceField = ProbeStateReader.BlueprintCanPlaceField(defId);
             if (placement)
             {
                 int maximum = utility ? MaxUtilityBlueprintCells : MaxBuildingBlueprintCells;
@@ -4108,6 +4137,78 @@ namespace OniAiProbeMod.Commands
                 cells.Add(cell);
             }
 
+            error = null;
+            return true;
+        }
+
+        // Non-utility blueprint ids the executor accepts; mirrors
+        // ProbeStateReader.BlueprintAllowlist without the Wire utility path.
+        private static readonly string[] BuildingBlueprintAllowlist =
+        {
+            "Ladder",
+            "MineralDeoxidizer",
+            "AlgaeHabitat"
+        };
+
+        private static bool IsAllowlistedBuildingBlueprint(string defId)
+        {
+            return !string.IsNullOrEmpty(defId) && Array.IndexOf(BuildingBlueprintAllowlist, defId) >= 0;
+        }
+
+        private static bool TryReadBuildingBlueprintDefId(JObject args, out string defId, out string error)
+        {
+            defId = args?["building_def_id"]?.Type == JTokenType.String
+                ? args["building_def_id"].ToString()
+                : null;
+            if (!IsAllowlistedBuildingBlueprint(defId))
+            {
+                defId = null;
+                error = "building_def_id must name an allowlisted single-building blueprint.";
+                return false;
+            }
+            error = null;
+            return true;
+        }
+
+        // A single-building cancellation names its building through the
+        // observed blueprint_prefab_id precondition of every target cell.
+        private static bool TryReadCancelledBuildingDefId(
+            JObject command,
+            JArray preconditions,
+            out string defId,
+            out string error)
+        {
+            defId = null;
+            if (!TryReadBlueprintCancelTargets(
+                    command["args"]?["targets"],
+                    MaxBuildingBlueprintCells,
+                    out List<BlueprintCancelTarget> targets,
+                    out error))
+            {
+                return false;
+            }
+            foreach (BlueprintCancelTarget target in targets)
+            {
+                string prefabId = TryGetObservedEquality(
+                        preconditions,
+                        BlueprintCellPath(target.Cell) + ".blueprint_prefab_id",
+                        out JToken prefab) && prefab.Type == JTokenType.String
+                    ? prefab.ToString()
+                    : null;
+                if (!IsAllowlistedBuildingBlueprint(prefabId) ||
+                    (defId != null && !string.Equals(defId, prefabId, StringComparison.Ordinal)))
+                {
+                    defId = null;
+                    error = "cancel_building_blueprint must bind one allowlisted observed blueprint_prefab_id for every target.";
+                    return false;
+                }
+                defId = prefabId;
+            }
+            if (defId == null)
+            {
+                error = "cancel_building_blueprint requires at least one target.";
+                return false;
+            }
             error = null;
             return true;
         }

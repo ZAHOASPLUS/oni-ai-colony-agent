@@ -46,6 +46,8 @@ from scripts import verify_bridge_reliability as fixtures  # noqa: E402
 SESSION = "session-model-loop"
 DIG_CELLS = (5000, 5001, 5002, 7003)
 LADDER_CELLS = (9001, 9000)  # unsorted on purpose: the candidate picks the lowest
+OXYGEN_DIFFUSER_CELLS = (9100,)
+ALGAE_TERRARIUM_CELLS = (9200,)
 ALL_CANDIDATE_ACTIONS = (
     "set_paused", "set_research", "set_duplicant_chore_priority", "mark_dig_cells", "place_building_blueprint",
 )
@@ -85,34 +87,57 @@ def enrich(state: dict, priorities: dict | None = None) -> dict:
     }}
     for path in ("designations.dig.tool.tiles_filter_on", "designations.dig.tool.natural_backwall_filter_on"):
         quality[path] = contract_quality_fixture(DIG_TOOL_CONTRACT_ID)
-    # One approved Ladder blueprint target set, as the Probe reports it.
+    # The approved blueprint catalogs, as the Probe reports them: a Ladder on
+    # two empty cells, an Oxygen Diffuser and an Algae Terrarium on one each.
     state["game"]["sandbox_mode"] = False
     state["game"]["instant_build_mode"] = False
     for path in ("game.sandbox_mode", "game.instant_build_mode"):
         quality[path] = contract_quality_fixture(GAME_BUILD_MODE_CONTRACT_ID)
-    ladder = {
-        "available": True, "prefab_id": "Ladder", "is_utility": False, "cancellable": True, "width": 1, "height": 1,
-        "build_location_rule": "Anywhere", "orientation": "Neutral", "facade_id": "DEFAULT_FACADE",
-        "material_categories": ["BuildableRaw&BuildingWood"], "material_tags": ["WoodLog"],
-        "required_mass_kg": [100.0], "available_mass_kg": [1500.0], "materials_available": True,
-        "candidate_cells": list(LADDER_CELLS),
+    catalogs = {
+        "Ladder": {
+            "available": True, "prefab_id": "Ladder", "is_utility": False, "cancellable": True, "width": 1,
+            "height": 1, "build_location_rule": "Anywhere", "orientation": "Neutral", "facade_id": "DEFAULT_FACADE",
+            "material_categories": ["BuildableRaw&BuildingWood"], "material_tags": ["WoodLog"],
+            "required_mass_kg": [100.0], "available_mass_kg": [1500.0], "materials_available": True,
+            "candidate_cells": list(LADDER_CELLS),
+        },
+        "MineralDeoxidizer": {
+            "available": True, "prefab_id": "MineralDeoxidizer", "is_utility": False, "cancellable": True,
+            "width": 1, "height": 2, "build_location_rule": "OnFloor", "orientation": "Neutral",
+            "facade_id": "DEFAULT_FACADE", "material_categories": ["Metal"], "material_tags": ["Cuprite"],
+            "required_mass_kg": [400.0], "available_mass_kg": [2400.0], "materials_available": True,
+            "candidate_cells": list(OXYGEN_DIFFUSER_CELLS),
+        },
+        "AlgaeHabitat": {
+            "available": True, "prefab_id": "AlgaeHabitat", "is_utility": False, "cancellable": True,
+            "width": 1, "height": 2, "build_location_rule": "OnFloor", "orientation": "Neutral",
+            "facade_id": "DEFAULT_FACADE", "material_categories": ["Farmable"], "material_tags": ["Dirt"],
+            "required_mass_kg": [400.0], "available_mass_kg": [800.0], "materials_available": True,
+            "candidate_cells": list(ALGAE_TERRARIUM_CELLS),
+        },
     }
-    for field in ladder:
-        quality[f"blueprints.catalog.Ladder.{field}"] = contract_quality_fixture(BLUEPRINT_CATALOG_CONTRACT_ID)
+    for def_id, catalog in catalogs.items():
+        for field in catalog:
+            quality[f"blueprints.catalog.{def_id}.{field}"] = contract_quality_fixture(BLUEPRINT_CATALOG_CONTRACT_ID)
     by_id = {}
-    for index, cell in enumerate(LADDER_CELLS):
+    placements = [(cell, 40 + index, 12, "Ladder") for index, cell in enumerate(LADDER_CELLS)]
+    placements += [(cell, 50, 12, "MineralDeoxidizer") for cell in OXYGEN_DIFFUSER_CELLS]
+    placements += [(cell, 52, 12, "AlgaeHabitat") for cell in ALGAE_TERRARIUM_CELLS]
+    for cell, x, y, def_id in placements:
         empty = "sha256:" + f"{cell:064x}"[-64:]
         by_id[f"cell_{cell}"] = {
-            "cell": cell, "x": 40 + index, "y": 12, "world_id": 0, "visible": True, "solid": False,
+            "cell": cell, "x": x, "y": y, "world_id": 0, "visible": True, "solid": False,
             "foundation": False, "element_id": "Vacuum", "mass_kg": 0.0, "damage": 0.0, "object_count": 0,
             "empty_for_blueprint": True, "can_place_ladder": True, "can_place_wire": True,
+            "can_place_mineral_deoxidizer": def_id == "MineralDeoxidizer",
+            "can_place_algae_habitat": def_id == "AlgaeHabitat",
             "blueprint_present": False, "blueprint_instance_id": 0, "blueprint_prefab_id": "none",
             "blueprint_orientation": "none", "blueprint_material_tags": [], "blueprint_in_progress": False,
             "blueprint_is_utility": False, "empty_fingerprint": empty, "fingerprint": empty,
         }
-        for field in BLUEPRINT_CELL_FIELDS:
+        for field in BLUEPRINT_CELL_FIELDS + ("can_place_mineral_deoxidizer", "can_place_algae_habitat"):
             quality[f"{blueprint_cell_path(cell)}.{field}"] = contract_quality_fixture(BLUEPRINT_CELL_CONTRACT_ID)
-    state["blueprints"] = {"catalog": {"Ladder": ladder}, "by_instance_id": {}, "utility_paths": {}}
+    state["blueprints"] = {"catalog": catalogs, "by_instance_id": {}, "utility_paths": {}}
     state["cells"] = {"by_id": by_id}
     return state
 
@@ -203,7 +228,8 @@ class ModelLoopTests(unittest.TestCase):
         self.assertEqual(first["phase"], "awaiting_model")
         self.assertEqual([c["candidate_id"] for c in first["candidates"]],
                          ["research_ImprovedOxygen", "research_PowerRegulation", "priority_102_Dig_2",
-                          "priority_101_Build_3", "dig_5000_3", "ladder_9000", "resume_game", "wait"])
+                          "priority_101_Build_3", "dig_5000_3", "oxygen_diffuser_9100", "algae_terrarium_9200",
+                          "ladder_9000", "resume_game", "wait"])
         self.assertTrue(loop.join_request(5))
         # The structured-output schema limits the answer to the offered ids.
         self.assertEqual(model.schemas[0]["properties"]["candidate_id"]["enum"],
@@ -506,20 +532,41 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual([(c["path"], c["value"]) for c in hint["preconditions"]], [("research.current", "FarmingTech")])
         self.assertEqual([(c["path"], c["value"]) for c in hint["expected_effects"]], [("research.current", "ImprovedOxygen")])
 
-    def test_ladder_candidate_targets_the_lowest_catalogued_empty_cell_only_while_paused(self):
-        self.assertNotIn("ladder_9000", self.ids(self.state(paused=False), allowed=ALL_CANDIDATE_ACTIONS))
+    def test_building_candidates_prefer_oxygen_buildings_and_exist_only_while_paused(self):
+        running = self.ids(self.state(paused=False), allowed=ALL_CANDIDATE_ACTIONS)
+        self.assertFalse({"ladder_9000", "oxygen_diffuser_9100", "algae_terrarium_9200"}.intersection(running))
         items = candidates.generate_candidates(self.state(paused=True), allowed_actions=("place_building_blueprint",))["items"]
-        [ladder, wait] = items
-        self.assertEqual((ladder["candidate_id"], ladder["risk"], wait["candidate_id"]), ("ladder_9000", "medium", "wait"))
+        [diffuser, terrarium, ladder, wait] = items
+        self.assertEqual(
+            [(item["candidate_id"], item["risk"]) for item in (diffuser, terrarium, ladder, wait)],
+            [("oxygen_diffuser_9100", "medium"), ("algae_terrarium_9200", "medium"), ("ladder_9000", "medium"), ("wait", "low")],
+        )
+        self.assertEqual(diffuser["hint"]["args"]["building_def_id"], "MineralDeoxidizer")
+        self.assertEqual(diffuser["hint"]["args"]["cells"], [9100])
+        self.assertEqual(diffuser["hint"]["args"]["material_tags"], ["Cuprite"])
+        self.assertIn("Oxygen Diffuser", diffuser["summary"])
+        self.assertIn("x=50, y=12", diffuser["summary"])
+        # Each contract binds the placement field of its own building.
+        bound = {c["path"].rsplit(".", 1)[-1] for c in diffuser["hint"]["preconditions"]}
+        self.assertIn("can_place_mineral_deoxidizer", bound)
+        self.assertNotIn("can_place_ladder", bound)
         self.assertEqual(ladder["hint"]["args"]["cells"], [9000])
         self.assertEqual(ladder["hint"]["args"]["material_tags"], ["WoodLog"])
         self.assertIn("x=41, y=12", ladder["summary"])
+
+    def test_a_locked_or_unsupplied_building_yields_no_candidate(self):
+        # The Probe lists no candidate cells for a building whose technology is
+        # not researched (or whose materials are missing); nothing is offered.
+        state = self.state(paused=True)
+        state["blueprints"]["catalog"]["AlgaeHabitat"]["candidate_cells"] = []
+        ids = self.ids(state, allowed=("place_building_blueprint",))
+        self.assertEqual(ids, ["oxygen_diffuser_9100", "ladder_9000", "wait"])
 
     def test_full_paused_set_keeps_resume_and_wait_within_the_cap(self):
         ids = self.ids(self.state(paused=True), allowed=ALL_CANDIDATE_ACTIONS)
         self.assertEqual(ids, [
             "research_ImprovedOxygen", "research_PowerRegulation", "priority_102_Dig_2", "priority_101_Build_3",
-            "dig_5000_3", "ladder_9000", "resume_game", "wait",
+            "dig_5000_3", "oxygen_diffuser_9100", "algae_terrarium_9200", "ladder_9000", "resume_game", "wait",
         ])
         self.assertLessEqual(len(ids), candidates.MAX_CANDIDATES)
 
