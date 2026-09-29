@@ -84,6 +84,12 @@ RESULT_KEYS = frozenset(
 # --------------------------------------------------------------------------
 
 
+# The executor quarantines an approved command whose fresh current-state
+# precondition no longer holds at dispatch (the game moved on while the human
+# approved; live run m1-0930b: FarmingTech finished before set_research ran).
+# That is a terminal behavior_fail without any mutation, not an anomaly.
+PRECONDITION_QUARANTINE_PREFIX = "Current-state precondition failed"
+
 # The Mod's ValidationCheckpointController keeps this empty subdirectory inside
 # the validation-control quarantine stage (live run m1-0930a); anything inside
 # it is reload-recovery evidence and refuses the finalization.
@@ -136,6 +142,7 @@ def m1_session_window(
     *,
     expected_done_command_ids: Optional[Iterable[str]] = None,
     allow_no_done_commands: bool = False,
+    allow_precondition_quarantine: bool = False,
 ) -> dict[str, Any]:
     """Prove the terminal M1 pipeline and bind every command record.
 
@@ -160,12 +167,31 @@ def m1_session_window(
         if stage == "done":
             for entry in entries:
                 records.append(_command_record(entry, stage))
+    quarantined: list[dict[str, Any]] = []
     for stage in COMMAND_ANOMALY_STAGES:
         directory = commands / stage
         if not directory.exists():
             stage_counts[stage] = 0
             continue
         entries = _json_files(directory, f"command {stage}")
+        if entries and stage == "quarantine" and allow_precondition_quarantine:
+            for entry in entries:
+                record = _command_record(entry, stage)
+                document = wf.load_json(entry, f"quarantine command {entry.name}")
+                reason = str(document.get("quarantine_reason") or document.get("quarantine_detail") or "")
+                if (
+                    document.get("status") != "quarantined"
+                    or document.get("classification") != "behavior_fail"
+                    or not reason.startswith(PRECONDITION_QUARANTINE_PREFIX)
+                ):
+                    raise WorkflowError(
+                        "command quarantine holds a record that is not a current-state precondition failure; "
+                        "M1 finalize refuses anomalies"
+                    )
+                record["quarantine_reason"] = reason
+                quarantined.append(record)
+            stage_counts[stage] = len(entries)
+            continue
         if entries:
             raise WorkflowError(f"command {stage} is not empty; M1 finalize refuses anomalies")
         stage_counts[stage] = 0
@@ -220,6 +246,8 @@ def m1_session_window(
         "policy_disabled": True,
         "policy_sha256": gate["policy_sha256"],
         "allow_no_done_commands": bool(allow_no_done_commands),
+        "allow_precondition_quarantine": bool(allow_precondition_quarantine),
+        "quarantined_commands": quarantined,
         "command_stage_counts": stage_counts,
         "control_stage_counts": control_counts,
         "done_commands": records,
@@ -471,6 +499,7 @@ def finalize_m1_locked(args: argparse.Namespace, roots: "wf.Roots") -> dict[str,
         bridge,
         expected_done_command_ids=args.expect_done_command_id or None,
         allow_no_done_commands=bool(getattr(args, "allow_no_done_commands", False)),
+        allow_precondition_quarantine=bool(getattr(args, "allow_precondition_quarantine", False)),
     )
     runtime_bridge_snapshot = window.pop("_snapshot")
     operations = m1_file_operations(
@@ -539,6 +568,7 @@ def finalize_m1_locked(args: argparse.Namespace, roots: "wf.Roots") -> dict[str,
         bridge,
         expected_done_command_ids=args.expect_done_command_id or None,
         allow_no_done_commands=bool(getattr(args, "allow_no_done_commands", False)),
+        allow_precondition_quarantine=bool(getattr(args, "allow_precondition_quarantine", False)),
     )
     current_window.pop("_snapshot")
     if current_window != window:
@@ -683,6 +713,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Restore a run that produced session evidence but no commands/done record "
             "(for example the game hung before the first approval); such a run is closed to abort."
+        ),
+    )
+    parser.add_argument(
+        "--allow-precondition-quarantine",
+        action="store_true",
+        help=(
+            "Admit quarantine records whose reason is a current-state precondition failure at dispatch "
+            "(the game moved on while the human approved); any other quarantine record still refuses."
         ),
     )
     parser.add_argument("--test-fail-after-step", type=int, default=0, help=argparse.SUPPRESS)

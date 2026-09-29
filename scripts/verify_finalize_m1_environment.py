@@ -396,6 +396,66 @@ def test_no_done_commands_flag(base: pathlib.Path) -> dict[str, Any]:
     return {"refused_without_flag": True, "finalized_with_flag": True, "done_command_count": 0}
 
 
+def test_precondition_quarantine_flag(base: pathlib.Path) -> dict[str, Any]:
+    """A command quarantined at dispatch because its fresh precondition no
+    longer held (live run m1-0930b) is refused by default, admitted with
+    --allow-precondition-quarantine, and any other quarantine reason still
+    refuses even with the flag."""
+
+    fixture = env.make_fixture(base, "m1-quarantine", run_id="m1-fixture-quarantine")
+    env.prepare_fixture(fixture)
+    session = simulate_m1_session(fixture)
+    quarantine = session["bridge"] / "commands" / "quarantine"
+    env.write_json(
+        quarantine / "cmd-model-race.json",
+        {
+            "id": "cmd-model-race",
+            "action": "set_research",
+            "status": "quarantined",
+            "classification": "behavior_fail",
+            "ack_status": "rejected",
+            "quarantine_reason": 'Current-state precondition failed: research.current did not satisfy eq "FarmingTech".',
+        },
+    )
+    refused(fixture, needle="quarantine is not empty")
+    other = quarantine / "cmd-model-other.json"
+    env.write_json(
+        other,
+        {
+            "id": "cmd-model-other",
+            "action": "set_paused",
+            "status": "quarantined",
+            "classification": "behavior_fail",
+            "quarantine_reason": "Approval receipt is invalid.",
+        },
+    )
+    refused(fixture, "--allow-precondition-quarantine", needle="not a current-state precondition failure")
+    other.unlink()
+
+    plan = json.loads(run_m1(fixture, "--allow-precondition-quarantine", what_if=True).stdout)
+    assert_true(plan.get("status") == "would_finalize_m1", "what-if status is wrong")
+    assert_true(
+        [item["command_id"] for item in plan["session_window"]["quarantined_commands"]] == ["cmd-model-race"],
+        "plan did not bind the quarantined command",
+    )
+    assert_true(plan["session_window"]["command_stage_counts"]["quarantine"] == 1, "quarantine count is wrong")
+    result = json.loads(
+        run_m1(
+            fixture,
+            "--allow-precondition-quarantine",
+            "--expect-done-command-id",
+            session["done_id"],
+            apply=True,
+        ).stdout
+    )
+    assert_true(result.get("status") == "finalized", "apply did not finalize")
+    assert_true(result["session_window"]["allow_precondition_quarantine"] is True, "result does not record the flag")
+    assert_true(len(result["session_window"]["quarantined_commands"]) == 1, "result lost the quarantined command")
+    assert_true(result["post_boundary"]["status"] == "passed", "post-boundary comparison did not pass")
+    assert_restored(fixture, "apply-with-quarantine")
+    return {"refused_without_flag": True, "other_reason_refused": True, "finalized_with_flag": True}
+
+
 def test_fault_rollback_and_latch(base: pathlib.Path) -> dict[str, Any]:
     fixture = env.make_fixture(base, "m1-fault", run_id="m1-fixture-fault")
     env.prepare_fixture(fixture)
@@ -433,6 +493,7 @@ def main() -> int:
         ("whatif_apply_replay_exact_restore", test_whatif_apply_replay),
         ("zero_write_refusals", test_refusals),
         ("no_done_commands_flag", test_no_done_commands_flag),
+        ("precondition_quarantine_flag", test_precondition_quarantine_flag),
         ("fault_rollback_and_nonreplay_latch", test_fault_rollback_and_latch),
     ]
     results: list[dict[str, Any]] = []
