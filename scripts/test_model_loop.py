@@ -34,6 +34,7 @@ from agent.field_contracts import (  # noqa: E402
     DIG_TOOL_CONTRACT_ID,
     DUPLICANT_CHORE_PRIORITY_CONTRACT_ID,
     GAME_BUILD_MODE_CONTRACT_ID,
+    RESEARCH_COMPLETE_CONTRACT_ID,
     contract_quality_fixture,
 )
 from agent.llm_planner import ModelRequestError  # noqa: E402
@@ -474,6 +475,29 @@ class CandidateTests(unittest.TestCase):
             self.ids(self.state(paused=True), allowed=("set_research",)),
             ["research_ImprovedOxygen", "research_PowerRegulation", "wait"],
         )
+
+    def test_research_candidates_skip_finished_techs_reported_by_the_probe(self):
+        # ImprovedOxygen and PowerRegulation are finished and FarmingTech is
+        # current, so only the last ladder entry remains.
+        state = self.state(paused=False)
+        state["research"]["complete"] = ["ImprovedOxygen", "PowerRegulation"]
+        state["quality"]["research.complete"] = contract_quality_fixture(RESEARCH_COMPLETE_CONTRACT_ID)
+        self.assertEqual(self.ids(state, allowed=("set_research",)), ["research_BasicRefinement", "wait"])
+
+    def test_research_candidates_ignore_a_finished_set_outside_its_contract(self):
+        # An unsupported (older Probe) or malformed set falls back to offering
+        # the ladder; the executor still refuses a finished tech itself.
+        unsupported = self.state(paused=False)
+        unsupported["research"]["complete"] = None
+        unsupported["quality"]["research.complete"] = {"status": "unsupported", "source": "none"}
+        unsorted = self.state(paused=False)
+        unsorted["research"]["complete"] = ["PowerRegulation", "ImprovedOxygen"]
+        unsorted["quality"]["research.complete"] = contract_quality_fixture(RESEARCH_COMPLETE_CONTRACT_ID)
+        for state in (unsupported, unsorted):
+            self.assertEqual(
+                self.ids(state, allowed=("set_research",)),
+                ["research_ImprovedOxygen", "research_PowerRegulation", "wait"],
+            )
 
     def test_research_candidate_binds_the_observed_current_selection(self):
         items = candidates.generate_candidates(self.state(paused=False), allowed_actions=("set_research",))["items"]

@@ -25,6 +25,7 @@ from agent.canonical_hash import canonical_hash
 from agent.field_contracts import (
     ALERTS_CANONICAL_CONTRACT_ID,
     GAME_PAUSED_CONTRACT_ID,
+    RESEARCH_COMPLETE_CONTRACT_ID,
     RESEARCH_CURRENT_CONTRACT_ID,
     build_condition,
     read_contract_field,
@@ -40,9 +41,10 @@ PRIORITY_GROUPS = ("Dig", "Build")
 MAX_PRIORITY_CANDIDATES = 2
 MAX_DIG_RUN_CELLS = 4
 # Tier-1 technologies (no prerequisites) in the order an oxygen-starved early
-# colony needs them.  The Probe does not yet report research.complete, so a
-# finished tech is refused by the executor ("already researched") and that
-# refusal reaches the model as outcome feedback; the next entry is offered too.
+# colony needs them.  Entries in an observed research.complete set are skipped;
+# when that set is unobserved (older Probe) every entry is offered, a finished
+# tech is refused by the executor ("already researched") and that refusal
+# reaches the model as outcome feedback.
 RESEARCH_LADDER = ("ImprovedOxygen", "FarmingTech", "PowerRegulation", "BasicRefinement")
 RESEARCH_SUMMARIES = {
     "ImprovedOxygen": "Air Systems: unlocks the Electrolyzer, which makes oxygen from water",
@@ -190,9 +192,14 @@ def _research_candidates(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     current = _observed(state, "research.current", RESEARCH_CURRENT_CONTRACT_ID)
     if not isinstance(current, str):
         return []
+    # A finished set that fails its contract (unsorted, oversized, wrong
+    # source) is ignored rather than trusted: the fallback only offers more
+    # candidates, each still checked by the executor.
+    complete = _observed(state, "research.complete", RESEARCH_COMPLETE_CONTRACT_ID)
+    finished = set(complete) if isinstance(complete, list) else set()
     result: List[Dict[str, Any]] = []
     for tech in RESEARCH_LADDER:
-        if tech == current:
+        if tech == current or tech in finished:
             continue
         try:
             hint = build_set_research_hint(state, tech=tech)

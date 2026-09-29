@@ -46,6 +46,7 @@ namespace OniAiProbeMod.Contracts
         internal const string GamePausedId = "oni.qc.game.paused.v1";
         internal const string GameBuildModeId = "oni.qc.game.build_mode.v1";
         internal const string ResearchCurrentId = "oni.qc.research.current.v1";
+        internal const string ResearchCompleteId = "oni.qc.research.complete.v1";
         internal const string RegisteredFoodId = "oni.qc.resources.registered_food.v1";
         internal const string CanonicalAlertsId = "oni.qc.alerts.canonical.v1";
         internal const string ActiveWorldDuplicantCountId = "oni.qc.duplicants.active_world_count.v1";
@@ -60,6 +61,10 @@ namespace OniAiProbeMod.Contracts
         internal const string UtilityPathId = "oni.qc.blueprints.utility_path.v1";
 
         private const int MaxCaptureAgeSeconds = 5;
+        private const int MaxResearchIdLength = 128;
+        // Db.Techs holds roughly 120 technologies; the bound only guards the wire size.
+        private const int MaxCompletedTechIds = 512;
+        internal const string ResearchCompleteSource = "Db.Techs+Research.Get+TechInstance.IsComplete";
         private const string FoodSource =
             "ClusterManager.activeWorld.worldInventory.GetPickupables(GameTags.Edible)+!GameTags.StoredPrivate";
         internal const string DuplicantIdleSource =
@@ -92,6 +97,19 @@ namespace OniAiProbeMod.Contracts
             "technology_id_or_empty",
             "save_research",
             "observed|complete");
+
+        private static readonly CommandFieldContract ResearchComplete = new CommandFieldContract(
+            ResearchCompleteId,
+            ResearchCompleteSource,
+            "completed_technology_ids",
+            "technology_id_list",
+            "save_research",
+            "observed|complete")
+        {
+            // The finished set only informs candidate selection (a finished
+            // tech is not offered); set_research binds research.current alone.
+            MutationConditionAllowed = false
+        };
 
         private static readonly CommandFieldContract RegisteredFood = new CommandFieldContract(
             RegisteredFoodId,
@@ -201,6 +219,10 @@ namespace OniAiProbeMod.Contracts
             "probe_tracked_utility_paths",
             "observed|complete_for_tracked_path");
 
+        private static readonly Regex TechIdPattern = new Regex(
+            @"^[A-Za-z0-9_]{1,128}$",
+            RegexOptions.CultureInvariant);
+
         private static readonly Regex DuplicantPriorityPath = new Regex(
             @"^duplicants\.by_instance_id\.id_[1-9][0-9]*\.chore_priorities\.[A-Za-z0-9_]{1,64}$",
             RegexOptions.CultureInvariant);
@@ -238,6 +260,9 @@ namespace OniAiProbeMod.Contracts
                     return true;
                 case "research.current":
                     contract = ResearchCurrent;
+                    return true;
+                case "research.complete":
+                    contract = ResearchComplete;
                     return true;
                 case "resources.food_kcal":
                     contract = RegisteredFood;
@@ -462,7 +487,11 @@ namespace OniAiProbeMod.Contracts
             }
             if (path == "research.current")
             {
-                return value.Type == JTokenType.String && value.ToString().Length <= 128;
+                return value.Type == JTokenType.String && value.ToString().Length <= MaxResearchIdLength;
+            }
+            if (path == "research.complete")
+            {
+                return IsSortedTechIdArray(value);
             }
             if (path == "resources.food_kcal")
             {
@@ -594,6 +623,28 @@ namespace OniAiProbeMod.Contracts
             }
         }
 
+        // Ordinal strictly ascending: sorted and free of duplicates in one pass.
+        private static bool IsSortedTechIdArray(JToken value)
+        {
+            if (!(value is JArray items) || items.Count > MaxCompletedTechIds)
+            {
+                return false;
+            }
+            string previous = null;
+            foreach (JToken item in items)
+            {
+                string current = item.Type == JTokenType.String ? item.ToString() : null;
+                if (current == null ||
+                    !TechIdPattern.IsMatch(current) ||
+                    (previous != null && string.CompareOrdinal(previous, current) >= 0))
+                {
+                    return false;
+                }
+                previous = current;
+            }
+            return true;
+        }
+
         private static bool ContractAllowsStatus(CommandFieldContract contract, string status)
         {
             foreach (string pair in contract.StatusCompletenessPairs)
@@ -626,6 +677,10 @@ namespace OniAiProbeMod.Contracts
                 return value?.Type == JTokenType.String &&
                     Regex.IsMatch(value.ToString(), @"^[a-z][a-z0-9_]{0,63}$", RegexOptions.CultureInvariant) &&
                     CanonicalAlertCatalog.IsKnown(value.ToString());
+            }
+            if (path == "research.complete")
+            {
+                return value?.Type == JTokenType.String && TechIdPattern.IsMatch(value.ToString());
             }
 
             string field = path.Substring(path.LastIndexOf('.') + 1);

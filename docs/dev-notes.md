@@ -464,7 +464,9 @@ most 300) so there is time to read and approve. Priority, dig, and Ladder
 candidates exist only while the game is paused; the research candidates
 (`research_<TechId>`, a fixed tier-1 ladder led by `ImprovedOxygen` because the
 first live colony consumed about four times the oxygen it produced) are offered
-in either pause state. The Probe does not report `research.complete`, so a
+in either pause state. The Probe reports the finished set as `research.complete`
+(contract `oni.qc.research.complete.v1`), and the ladder skips those entries;
+when that field is unobserved (an older Probe) every entry is offered, a
 finished tech is refused by the executor and that refusal reaches the model as
 outcome feedback. The loop stands aside while a rule suggests a mutation (the arbitrated
 survival pause); other open rule findings, such as idle duplicants or a

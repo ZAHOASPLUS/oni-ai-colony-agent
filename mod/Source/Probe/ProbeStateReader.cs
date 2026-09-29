@@ -27,6 +27,9 @@ namespace OniAiProbeMod.Probe
         private const int DigCandidateRefreshSeconds = 30;
         private const int CandidateScanCellBudget = 4096;
         private const double DigCandidateScanBudgetMs = 8.0;
+        // Mirrors CommandFieldContracts.MaxCompletedTechIds (Db.Techs holds about 120).
+        private const int CompletedTechLimit = 512;
+        private const int TechIdLengthLimit = 128;
         private const int BlueprintCandidateLimit = 32;
         private const int BlueprintTrackedCellLimit = 256;
         private const int BlueprintCandidateRefreshSeconds = 30;
@@ -303,6 +306,8 @@ namespace OniAiProbeMod.Probe
             resources.Remove("_food_completeness");
             research.Remove("_current_status");
             research.Remove("_current_source");
+            research.Remove("_complete_status");
+            research.Remove("_complete_source");
             functionalBuildings.Remove("_status");
             functionalBuildings.Remove("_source");
             functionalBuildings.Remove("_reason");
@@ -2291,12 +2296,62 @@ namespace OniAiProbeMod.Probe
                 status = "error";
             }
 
+            // 2026-09-29: the model loop's research ladder skips finished
+            // technologies when this set is observed (before, a finished tech
+            // was offered and refused by the executor).  Ordinal-sorted,
+            // duplicate-free tech ids, bounded; null with "unsupported" when
+            // the research database is not available.
+            object complete = null;
+            string completeStatus = "unsupported";
+            try
+            {
+                List<Tech> techs = Db.Get()?.Techs?.resources;
+                if (Research.Instance != null && techs != null)
+                {
+                    HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+                    List<string> finished = new List<string>();
+                    foreach (Tech tech in techs)
+                    {
+                        string id = tech?.Id;
+                        if (string.IsNullOrEmpty(id) || id.Length > TechIdLengthLimit || !seen.Add(id))
+                        {
+                            continue;
+                        }
+
+                        TechInstance instance = Research.Instance.Get(tech);
+                        if (instance != null && instance.IsComplete())
+                        {
+                            finished.Add(id);
+                        }
+                    }
+
+                    if (finished.Count <= CompletedTechLimit)
+                    {
+                        finished.Sort(StringComparer.Ordinal);
+                        List<object> items = new List<object>(finished.Count);
+                        foreach (string id in finished)
+                        {
+                            items.Add(id);
+                        }
+
+                        complete = items;
+                        completeStatus = "observed";
+                    }
+                }
+            }
+            catch
+            {
+                completeStatus = "error";
+            }
+
             return new Dictionary<string, object>
             {
                 { "current", current },
-                { "complete", null },
+                { "complete", complete },
                 { "_current_status", status },
-                { "_current_source", source }
+                { "_current_source", source },
+                { "_complete_status", completeStatus },
+                { "_complete_source", CommandFieldContracts.ResearchCompleteSource }
             };
         }
 
@@ -2710,6 +2765,11 @@ namespace OniAiProbeMod.Probe
             string foodCompleteness = ReadMetadata(resources, "_food_completeness", "unknown");
             string researchStatus = ReadMetadata(research, "_current_status", "unsupported");
             string researchSource = ReadMetadata(research, "_current_source", "Research.GetActiveResearch");
+            string researchCompleteStatus = ReadMetadata(research, "_complete_status", "unsupported");
+            string researchCompleteSource = ReadMetadata(
+                research,
+                "_complete_source",
+                CommandFieldContracts.ResearchCompleteSource);
             string duplicantTotalStatus = ReadMetadata(duplicants, "_total_status", "unsupported");
             string duplicantTotalSource = ReadMetadata(
                 duplicants,
@@ -3131,7 +3191,14 @@ namespace OniAiProbeMod.Probe
                     "save_research",
                     researchStatus == "observed" ? "complete" : "unknown",
                     CommandFieldContracts.ResearchCurrentId) },
-                { "research.complete", Quality("unsupported", "none") },
+                { "research.complete", Quality(
+                    researchCompleteStatus,
+                    researchCompleteSource,
+                    "completed_technology_ids",
+                    "technology_id_list",
+                    "save_research",
+                    researchCompleteStatus == "observed" ? "complete" : "unknown",
+                    CommandFieldContracts.ResearchCompleteId) },
                 { "buildings.oxygen_diffuser", Quality(buildingStatus, buildingSource) },
                 { "buildings.outhouse", Quality(buildingStatus, buildingSource) },
                 { "buildings.manual_generator", Quality(buildingStatus, buildingSource) },

@@ -34,6 +34,7 @@ from agent.field_contracts import (
     DUPLICANTS_TOTAL_CONTRACT_ID,
     GAME_PAUSED_CONTRACT_ID,
     REGISTERED_FOOD_CONTRACT_ID,
+    RESEARCH_COMPLETE_CONTRACT_ID,
     RESEARCH_CURRENT_CONTRACT_ID,
     contract_quality_fixture,
 )
@@ -114,7 +115,7 @@ def make_state(
             "resources.water_kg_estimate": {"status": "observed", "source": "fixture"},
             "alerts": contract_quality_fixture(ALERTS_CANONICAL_CONTRACT_ID),
             "research.current": contract_quality_fixture(RESEARCH_CURRENT_CONTRACT_ID),
-            "research.complete": {"status": "observed", "source": "fixture"},
+            "research.complete": contract_quality_fixture(RESEARCH_COMPLETE_CONTRACT_ID),
             "buildings.oxygen_diffuser": contract_quality_fixture(BUILDING_COMPLETED_COUNT_CONTRACT_ID),
             "buildings.outhouse": contract_quality_fixture(BUILDING_COMPLETED_COUNT_CONTRACT_ID),
             "buildings.manual_generator": contract_quality_fixture(BUILDING_COMPLETED_COUNT_CONTRACT_ID),

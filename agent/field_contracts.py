@@ -20,6 +20,8 @@ from agent.state_quality import (
 GAME_PAUSED_CONTRACT_ID = "oni.qc.game.paused.v1"
 GAME_BUILD_MODE_CONTRACT_ID = "oni.qc.game.build_mode.v1"
 RESEARCH_CURRENT_CONTRACT_ID = "oni.qc.research.current.v1"
+RESEARCH_COMPLETE_CONTRACT_ID = "oni.qc.research.complete.v1"
+RESEARCH_COMPLETE_SOURCE = "Db.Techs+Research.Get+TechInstance.IsComplete"
 REGISTERED_FOOD_CONTRACT_ID = "oni.qc.resources.registered_food.v1"
 ALERTS_CANONICAL_CONTRACT_ID = "oni.qc.alerts.canonical.v1"
 CANONICAL_ALERT_IDS = (
@@ -294,6 +296,25 @@ _CONTRACTS: Tuple[FieldContract, ...] = (
         captures=("snapshot.ts",),
         value_type="string",
         maximum_text_length=128,
+    ),
+    FieldContract(
+        # The finished technology ids (ordinal-sorted, unique).  It only
+        # informs candidate selection (agent.candidates skips finished techs);
+        # a set_research command binds research.current alone.
+        contract_id=RESEARCH_COMPLETE_CONTRACT_ID,
+        paths=("research.complete",),
+        statuses=("observed",),
+        semantics=("completed_technology_ids",),
+        units=("technology_id_list",),
+        scopes=("save_research",),
+        completeness=("complete",),
+        sources=(RESEARCH_COMPLETE_SOURCE,),
+        captures=("snapshot.ts",),
+        value_type="string_list",
+        maximum_items=512,
+        maximum_text_length=128,
+        sorted_items=True,
+        mutating_condition_allowed=False,
     ),
     FieldContract(
         contract_id=REGISTERED_FOOD_CONTRACT_ID,

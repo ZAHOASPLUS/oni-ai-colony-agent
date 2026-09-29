@@ -212,7 +212,7 @@ code consumes them (code review 2026-09-26, L13). The operational
     "landing": 0
   },
   "alerts": null,
-  "research": {"current": "FarmingTech", "complete": null},
+  "research": {"current": "FarmingTech", "complete": ["ImprovedOxygen"]},
   "buildings": {
     "oxygen_diffuser": 1,
     "outhouse": 1,
@@ -261,6 +261,16 @@ code consumes them (code review 2026-09-26, L13). The operational
       "completeness": "complete",
       "captured_at": "snapshot.ts"
     },
+    "research.complete": {
+      "status": "observed",
+      "source": "Db.Techs+Research.Get+TechInstance.IsComplete",
+      "contract_id": "oni.qc.research.complete.v1",
+      "semantic": "completed_technology_ids",
+      "unit": "technology_id_list",
+      "scope": "save_research",
+      "completeness": "complete",
+      "captured_at": "snapshot.ts"
+    },
     "alerts": {"status": "unsupported", "source": "none"}
   },
   "sample": {"interval_seconds": 5.0, "duration_ms": 2.1},
@@ -283,7 +293,14 @@ Quality status is `observed`, `estimated`, `unsupported`, `error`, or `stale`.
 Rules and action preconditions may use only explicitly allowed trustworthy
 statuses. In particular, `research.current=null` with `unsupported` quality is
 not interpreted as no active research. An observed empty string means the game
-API positively reported no active research.
+API positively reported no active research. `research.complete` is the
+ordinal-sorted, duplicate-free list of finished technology ids (at most 512,
+each `[A-Za-z0-9_]{1,128}`) under contract `oni.qc.research.complete.v1`. It
+informs candidate selection only (`agent/candidates.py` skips finished ladder
+entries) and is not mutation-eligible: no command precondition or expected
+effect binds it, `set_research` binds `research.current` alone. A Probe
+without the research database publishes `null` with `unsupported` quality, and
+the candidate generator then offers the whole ladder.
 
 The additive survival telemetry deliberately publishes raw measurements and
 explicitly unsupported decision fields instead of manufacturing conclusions:
@@ -1015,7 +1032,8 @@ review 2026-09-26, M1) adds a third Bridge-side owner: `mode=model_selected`,
 eight candidates from the trusted snapshot: `pause_game` while running; up to
 two `set_research` selections from a fixed tier-1 ladder (`ImprovedOxygen`,
 `FarmingTech`, `PowerRegulation`, `BasicRefinement`, skipping the observed
-`research.current`) in either pause state; while paused additionally up to two
+`research.current` and every id in an observed `research.complete`) in either
+pause state; while paused additionally up to two
 one-step `set_duplicant_chore_priority` raises for the Dig/Build groups, one
 horizontal `mark_dig_cells` run of at most four safe cells, one
 `place_building_blueprint` Ladder on the lowest catalogued empty cell, and

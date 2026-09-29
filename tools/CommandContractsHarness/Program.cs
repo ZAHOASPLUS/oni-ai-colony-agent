@@ -65,6 +65,56 @@ namespace OniAiProbeMod.Contracts
                 researchContains["op"] = "contains";
                 Reject("reject_string_contains_operand", research, researchContains);
 
+                JObject researchComplete = State(
+                    "research.complete",
+                    new JArray("FarmingTech", "ImprovedOxygen"),
+                    Entry(
+                        CommandFieldContracts.ResearchCompleteId,
+                        CommandFieldContracts.ResearchCompleteSource,
+                        "completed_technology_ids",
+                        "technology_id_list",
+                        "save_research",
+                        "observed",
+                        "complete"));
+                JObject researchCompleteContains = Condition(
+                    "research.complete",
+                    "ImprovedOxygen",
+                    CommandFieldContracts.ResearchCompleteId,
+                    "observed");
+                researchCompleteContains["op"] = "contains";
+                Accept("valid_research_complete_contains", researchComplete, researchCompleteContains);
+                RejectMutationEligibility(
+                    "reject_research_complete_mutation_eligibility",
+                    researchCompleteContains);
+                JObject researchCompleteEquality = (JObject)researchCompleteContains.DeepClone();
+                researchCompleteEquality["op"] = "eq";
+                researchCompleteEquality["value"] = new JArray("FarmingTech", "ImprovedOxygen");
+                Accept("valid_research_complete_equality", researchComplete, researchCompleteEquality);
+                JObject researchCompleteWrongSource = (JObject)researchComplete.DeepClone();
+                researchCompleteWrongSource["quality"]["research.complete"]["source"] = "Research.GetActiveResearch";
+                Reject("reject_research_complete_wrong_source", researchCompleteWrongSource, researchCompleteContains);
+                JObject unsortedComplete = (JObject)researchComplete.DeepClone();
+                unsortedComplete["research"]["complete"] = new JArray("ImprovedOxygen", "FarmingTech");
+                Reject("reject_unsorted_research_complete", unsortedComplete, researchCompleteContains);
+                JObject duplicateComplete = (JObject)researchComplete.DeepClone();
+                duplicateComplete["research"]["complete"] = new JArray("FarmingTech", "FarmingTech");
+                Reject("reject_duplicate_research_complete", duplicateComplete, researchCompleteContains);
+                JObject malformedComplete = (JObject)researchComplete.DeepClone();
+                malformedComplete["research"]["complete"] = new JArray("Improved Oxygen");
+                Reject("reject_malformed_research_complete_id", malformedComplete, researchCompleteContains);
+                JObject scalarComplete = (JObject)researchComplete.DeepClone();
+                scalarComplete["research"]["complete"] = "ImprovedOxygen";
+                Reject("reject_scalar_research_complete", scalarComplete, researchCompleteContains);
+                JObject completeMalformedOperand = (JObject)researchCompleteContains.DeepClone();
+                completeMalformedOperand["value"] = "Improved Oxygen";
+                Reject(
+                    "reject_research_complete_contains_malformed_operand",
+                    researchComplete,
+                    completeMalformedOperand);
+                JObject completeOrderedOperator = (JObject)researchCompleteContains.DeepClone();
+                completeOrderedOperator["op"] = "gt";
+                Reject("reject_research_complete_ordered_operator", researchComplete, completeOrderedOperator);
+
                 JObject foodObserved = State(
                     "resources.food_kcal",
                     12000.0,
