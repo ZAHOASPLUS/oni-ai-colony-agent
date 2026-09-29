@@ -127,6 +127,8 @@ def simulate_m1_session(fixture: dict[str, pathlib.Path | str]) -> dict[str, Any
         [{"schema": "oni.state.v2", "event": "state_snapshot", "session_id": "session-m1-fixture", "seq": 1}],
     )
     env.write_json(bridge / "health.json", {"schema": "oni.bridge-health.v1", "status": "stopped"})
+    # The Mod keeps an empty reload-recovery folder inside the control quarantine stage.
+    (bridge / "validation-controls" / "quarantine" / "reload-recovery").mkdir(parents=True, exist_ok=True)
     # The game and the runtime install changed configs, the probe, and the loader.
     env.write_bytes(oni / "kplayerprefs.yaml", b"SaveFilenameKey: RuntimeLoader\n")
     env.write_bytes(oni / "mods" / "mods.json", b'{"version":1,"mods":["runtime"]}\n')
@@ -312,6 +314,13 @@ def test_refusals(base: pathlib.Path) -> dict[str, Any]:
     quarantine.unlink()
     evidence["quarantine_entry"] = "refused"
 
+    # 4b. Reload-recovery evidence inside the control quarantine stage.
+    recovery = bridge / "validation-controls" / "quarantine" / "reload-recovery" / "reload-recovery-abc.json"
+    env.write_json(recovery, {"schema": "oni.validation-reload-recovery.v1"})
+    refused(fixture, needle="reload-recovery evidence")
+    recovery.unlink()
+    evidence["reload_recovery_evidence"] = "refused"
+
     # 5. Expected done ids mismatch.
     refused(fixture, "--expect-done-command-id", "cmd-not-there", needle="expected done command ids")
     evidence["expected_done_mismatch"] = "refused"
@@ -357,6 +366,36 @@ def test_refusals(base: pathlib.Path) -> dict[str, Any]:
     return evidence
 
 
+def test_no_done_commands_flag(base: pathlib.Path) -> dict[str, Any]:
+    """Session evidence but no completed command (live run m1-0930a: the game
+    hung before the first approval) is refused by default, restored exactly
+    with --allow-no-done-commands, and the flag is recorded in the window."""
+
+    fixture = env.make_fixture(base, "m1-nodone", run_id="m1-fixture-nodone")
+    env.prepare_fixture(fixture)
+    session = simulate_m1_session(fixture)
+    (session["bridge"] / "commands" / "done" / f"{session['done_id']}.json").unlink()
+    oni = pathlib.Path(fixture["oni"])
+    before = env.file_inventory(oni)
+    message = refused(fixture, needle="no commands/done evidence")
+    assert_true("--allow-no-done-commands" in message, "refusal does not name the flag")
+    assert_true(env.file_inventory(oni) == before, "refusal changed the ONI fixture")
+
+    plan = json.loads(run_m1(fixture, "--allow-no-done-commands", what_if=True).stdout)
+    assert_true(plan.get("status") == "would_finalize_m1", "what-if status is wrong")
+    assert_true(plan.get("write_count") == 0, "what-if reported writes")
+    assert_true(plan["session_window"]["done_commands"] == [], "plan invented a done command")
+    assert_true(plan["session_window"]["allow_no_done_commands"] is True, "plan does not record the flag")
+
+    result = json.loads(run_m1(fixture, "--allow-no-done-commands", apply=True).stdout)
+    assert_true(result.get("status") == "finalized", "apply did not finalize")
+    assert_true(result["session_window"]["done_commands"] == [], "result invented a done command")
+    assert_true(result["session_window"]["allow_no_done_commands"] is True, "result does not record the flag")
+    assert_true(result["post_boundary"]["status"] == "passed", "post-boundary comparison did not pass")
+    assert_restored(fixture, "apply-without-done")
+    return {"refused_without_flag": True, "finalized_with_flag": True, "done_command_count": 0}
+
+
 def test_fault_rollback_and_latch(base: pathlib.Path) -> dict[str, Any]:
     fixture = env.make_fixture(base, "m1-fault", run_id="m1-fixture-fault")
     env.prepare_fixture(fixture)
@@ -393,6 +432,7 @@ def main() -> int:
         ("syntax_and_parser", test_syntax),
         ("whatif_apply_replay_exact_restore", test_whatif_apply_replay),
         ("zero_write_refusals", test_refusals),
+        ("no_done_commands_flag", test_no_done_commands_flag),
         ("fault_rollback_and_nonreplay_latch", test_fault_rollback_and_latch),
     ]
     results: list[dict[str, Any]] = []

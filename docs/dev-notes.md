@@ -1056,7 +1056,9 @@ and the post-boundary comparison with the G0 workflow; only the evidence gate
 differs. It requires ONI and Bridge stopped, the action policy disabled, every
 nonterminal queue and `quarantine`/`lifecycle-recovery` empty, and at least
 one `commands/done` record (with `--expect-done-command-id` the done set must
-match exactly). The runtime Bridge is preserved as `environment/rb` plus
+match exactly; `--allow-no-done-commands` admits a run that produced session
+evidence but no completed command, such as a game that hung before the first
+approval, because `abort` is already closed to it). The runtime Bridge is preserved as `environment/rb` plus
 `rb-snapshot.json`; the runtime Probe, configs, and pre-restore loader pair are
 preserved under `environment/finalization-m1/`; the loader pair, configs, Probe,
 pre-existing Bridge, and archive-root timestamp are restored exactly from the

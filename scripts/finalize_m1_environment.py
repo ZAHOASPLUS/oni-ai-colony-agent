@@ -84,18 +84,35 @@ RESULT_KEYS = frozenset(
 # --------------------------------------------------------------------------
 
 
-def _json_files(directory: pathlib.Path, label: str) -> list[pathlib.Path]:
+# The Mod's ValidationCheckpointController keeps this empty subdirectory inside
+# the validation-control quarantine stage (live run m1-0930a); anything inside
+# it is reload-recovery evidence and refuses the finalization.
+CONTROL_QUARANTINE_SUBDIRECTORIES = ("reload-recovery",)
+
+
+def _json_files(
+    directory: pathlib.Path,
+    label: str,
+    *,
+    allowed_empty_subdirectories: tuple[str, ...] = (),
+) -> list[pathlib.Path]:
     if not directory.is_dir() or wf.is_reparse(directory):
         raise WorkflowError(f"{label} stage directory is missing or unsafe")
     entries = sorted(directory.iterdir(), key=lambda item: item.name.casefold())
+    files: list[pathlib.Path] = []
     for entry in entries:
         if wf.is_reparse(entry):
             raise WorkflowError(f"{label} stage contains a reparse point")
         if entry.is_dir():
-            raise WorkflowError(f"{label} stage contains a directory")
+            if entry.name not in allowed_empty_subdirectories:
+                raise WorkflowError(f"{label} stage contains a directory")
+            if any(entry.iterdir()):
+                raise WorkflowError(f"{label} stage contains {entry.name} evidence")
+            continue
         if entry.name.casefold().endswith(".tmp"):
             raise WorkflowError(f"{label} stage contains a temporary file")
-    return entries
+        files.append(entry)
+    return files
 
 
 def _command_record(path: pathlib.Path, stage: str) -> dict[str, Any]:
@@ -118,12 +135,17 @@ def m1_session_window(
     bridge: pathlib.Path,
     *,
     expected_done_command_ids: Optional[Iterable[str]] = None,
+    allow_no_done_commands: bool = False,
 ) -> dict[str, Any]:
     """Prove the terminal M1 pipeline and bind every command record.
 
     Raises when a nonterminal queue, quarantine, or lifecycle-recovery holds
     anything, when the action policy is still enabled, or when the run left
-    no ``commands/done`` record at all (that would be an abort case).
+    no ``commands/done`` record at all (that would be an abort case) unless
+    ``allow_no_done_commands`` says so explicitly: a run that produced session
+    evidence but no completed command (live run m1-0930a, 2026-09-30, where the
+    game hung before the first approval) is closed to ``abort`` as well and
+    still needs its environment restored.
     """
 
     gate = wf.bridge_gate(bridge, require_bridge=True)
@@ -147,8 +169,11 @@ def m1_session_window(
         if entries:
             raise WorkflowError(f"command {stage} is not empty; M1 finalize refuses anomalies")
         stage_counts[stage] = 0
-    if not records:
-        raise WorkflowError("no commands/done evidence: this run is not an M1 run (use abort)")
+    if not records and not allow_no_done_commands:
+        raise WorkflowError(
+            "no commands/done evidence: this run is not an M1 run (use abort, or "
+            "--allow-no-done-commands for a run that produced session evidence but no completed command)"
+        )
     done_ids = [record["command_id"] for record in records]
     if len(set(done_ids)) != len(done_ids):
         raise WorkflowError("commands/done contains duplicate command ids")
@@ -171,7 +196,15 @@ def m1_session_window(
         for stage in CONTROL_TERMINAL_STAGES:
             directory = controls / stage
             control_counts[stage] = len(
-                _json_files(directory, f"validation-control {stage}") if directory.exists() else []
+                _json_files(
+                    directory,
+                    f"validation-control {stage}",
+                    allowed_empty_subdirectories=(
+                        CONTROL_QUARANTINE_SUBDIRECTORIES if stage == "quarantine" else ()
+                    ),
+                )
+                if directory.exists()
+                else []
             )
 
     frames = bridge / "decision-frames"
@@ -186,6 +219,7 @@ def m1_session_window(
         "schema": WINDOW_SCHEMA,
         "policy_disabled": True,
         "policy_sha256": gate["policy_sha256"],
+        "allow_no_done_commands": bool(allow_no_done_commands),
         "command_stage_counts": stage_counts,
         "control_stage_counts": control_counts,
         "done_commands": records,
@@ -433,7 +467,11 @@ def finalize_m1_locked(args: argparse.Namespace, roots: "wf.Roots") -> dict[str,
     wf.require_processes_stopped(counts)
     bridge = roots.oni_root / wf.BRIDGE_RELATIVE
     _bootstrap_path, bootstrap, old_archive = wf.validate_bootstrap(roots, manifest, bridge)
-    window = m1_session_window(bridge, expected_done_command_ids=args.expect_done_command_id or None)
+    window = m1_session_window(
+        bridge,
+        expected_done_command_ids=args.expect_done_command_id or None,
+        allow_no_done_commands=bool(getattr(args, "allow_no_done_commands", False)),
+    )
     runtime_bridge_snapshot = window.pop("_snapshot")
     operations = m1_file_operations(
         roots,
@@ -497,7 +535,11 @@ def finalize_m1_locked(args: argparse.Namespace, roots: "wf.Roots") -> dict[str,
         old_archive is not None and current_old_archive is not None and not wf.same_path(old_archive, current_old_archive)
     ):
         raise WorkflowError("archived old Bridge changed before the M1 transaction")
-    current_window = m1_session_window(bridge, expected_done_command_ids=args.expect_done_command_id or None)
+    current_window = m1_session_window(
+        bridge,
+        expected_done_command_ids=args.expect_done_command_id or None,
+        allow_no_done_commands=bool(getattr(args, "allow_no_done_commands", False)),
+    )
     current_window.pop("_snapshot")
     if current_window != window:
         raise WorkflowError("runtime bridge changed before the M1 transaction")
@@ -634,6 +676,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--expect-done-command-id",
         action="append",
         help="When given, commands/done must contain exactly these command ids.",
+    )
+    parser.add_argument(
+        "--allow-no-done-commands",
+        action="store_true",
+        help=(
+            "Restore a run that produced session evidence but no commands/done record "
+            "(for example the game hung before the first approval); such a run is closed to abort."
+        ),
     )
     parser.add_argument("--test-fail-after-step", type=int, default=0, help=argparse.SUPPRESS)
     return parser
