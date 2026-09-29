@@ -5,6 +5,7 @@ import errno
 import hashlib
 import json
 import math
+import os
 import pathlib
 import tempfile
 import time
@@ -71,6 +72,20 @@ OPERATOR_RESOLUTION_OUTCOMES = frozenset({"effect_present", "effect_absent"})
 ALLOWED_ACTIONS = set(ACTION_POLICY_ALLOWED_ACTIONS)
 DEFAULT_TTL_SECONDS = 30
 DEFAULT_MAX_PENDING = 20
+# Live run m1-0927c (2026-09-27): while the game ran, every snapshot
+# superseded the source binding of the pending idle_dupes focus_note, so it
+# was rejected as stale and re-issued once per snapshot (29 rejected records
+# in five minutes).  After such a rejection a non-mutating suggestion for the
+# same incident is re-issued at most once per this window.  Mutating survival
+# suggestions (the arbitrated pause) keep their per-generation refresh.
+NON_MUTATING_RESUGGEST_SECONDS = 120
+SOURCE_STALE_REJECTION_REASONS = frozenset(
+    {
+        "pending_source_snapshot_stale",
+        "pending_source_state_hash_stale",
+        "pending_source_frame_stale",
+    }
+)
 _ATOMIC_REPLACE_ATTEMPTS = 8
 _ATOMIC_REPLACE_INITIAL_DELAY_SECONDS = 0.025
 _ATOMIC_REPLACE_MAX_DELAY_SECONDS = 0.2
@@ -1211,6 +1226,9 @@ def _sync_pending_commands_locked(
     created: List[Dict[str, Any]] = []
     mutating_created = False
     ttl_seconds = _positive_int(policy.get("command_ttl_seconds"), DEFAULT_TTL_SECONDS)
+    current = now()
+    resuggest_window = dt.timedelta(seconds=NON_MUTATING_RESUGGEST_SECONDS)
+    recent_stale: Optional[Dict[str, dt.datetime]] = None
 
     for item in eligible_advice:
         if len(created) >= creation_limit:
@@ -1230,6 +1248,14 @@ def _sync_pending_commands_locked(
                 or mutating_created
             ):
                 continue
+        else:
+            if recent_stale is None:
+                recent_stale = _recent_source_stale_rejections(
+                    dirs["rejected"], since=current - resuggest_window
+                )
+            last_stale = recent_stale.get(str(item.get("incident_id") or ""))
+            if last_stale is not None and current - last_stale < resuggest_window:
+                continue
 
         command = build_command(
             state,
@@ -1248,6 +1274,57 @@ def _sync_pending_commands_locked(
             mutating_created = True
 
     return created
+
+
+def _recent_source_stale_rejections(
+    rejected_dir: pathlib.Path,
+    *,
+    since: dt.datetime,
+) -> Dict[str, dt.datetime]:
+    """Latest source-stale rejection per incident among recent non-mutating suggestions.
+
+    Only files written since ``since`` are read (rejected/ grows for the whole
+    session); a torn or malformed record simply does not throttle.
+    """
+
+    latest: Dict[str, dt.datetime] = {}
+    # File mtimes are set by the rejection transition; a small slack covers
+    # clock granularity between the transition and ``rejected_at``.
+    threshold = since.timestamp() - 5.0
+    try:
+        entries = list(os.scandir(rejected_dir))
+    except OSError:
+        return latest
+    for entry in entries:
+        try:
+            if (
+                not entry.name.endswith(".json")
+                or not entry.is_file()
+                or entry.stat().st_mtime < threshold
+            ):
+                continue
+            payload = json.loads(
+                pathlib.Path(entry.path).read_text(encoding="utf-8-sig"),
+                parse_constant=_reject_json_constant,
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+            continue
+        if (
+            not isinstance(payload, dict)
+            or payload.get("mode") != "suggested"
+            or str(payload.get("action") or "") not in NON_MUTATING_ACTIONS
+            or payload.get("rejection_reason") not in SOURCE_STALE_REJECTION_REASONS
+        ):
+            continue
+        incident_id = str(payload.get("source_incident_id") or "")
+        rejected_at = parse_timestamp(payload.get("rejected_at"))
+        if not incident_id or rejected_at is None:
+            continue
+        if rejected_at.tzinfo is None:
+            rejected_at = rejected_at.replace(tzinfo=since.tzinfo)
+        if incident_id not in latest or rejected_at > latest[incident_id]:
+            latest[incident_id] = rejected_at
+    return latest
 
 
 def trusted_proposal_state(state: Optional[Dict[str, Any]]) -> bool:
