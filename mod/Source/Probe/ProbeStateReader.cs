@@ -3459,8 +3459,13 @@ namespace OniAiProbeMod.Probe
                     "damage",
                     "object_count",
                     "empty_for_blueprint",
+                    // One per BlueprintAllowlist entry (BlueprintCanPlaceField);
+                    // live run m1-0930a showed that a field without its quality
+                    // entry never reaches the candidate builders.
                     "can_place_ladder",
                     "can_place_wire",
+                    "can_place_mineral_deoxidizer",
+                    "can_place_algae_habitat",
                     "blueprint_present",
                     "blueprint_instance_id",
                     "blueprint_prefab_id",
