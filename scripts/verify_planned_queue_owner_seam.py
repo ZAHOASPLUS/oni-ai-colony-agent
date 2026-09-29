@@ -66,9 +66,16 @@ def main() -> int:
                 "ts": state["ts"],
             })
             runtime.process(state)
-            clone_save = pathlib.Path(r"C:\Users\user\Documents\Klei\OxygenNotIncluded\save_files\粘粘的夹层\auto_save\oni-m15-autoplay-cycle3-test-20260913.sav")
+            # A real named clone on this machine: the launch guard refuses an
+            # autosave clone (review P0-1, a659015), so the 2026-09-13 autosave
+            # fixture no longer passes; m1-0927c is a non-autosave clone in its
+            # own colony folder with the manifest that created it.
+            clone_save = pathlib.Path(r"C:\Users\user\Documents\Klei\OxygenNotIncluded\cloud_save_files\76561190000000000\oni-m1-0927c\oni-m1-0927c.sav")
             clone_preview = clone_save.with_suffix(".png")
-            clone_manifest = ROOT / "reports" / "controller-plan-sequence-20260913" / "canonical-clone-20260913" / "canonical-clone-20260913" / "test-clone-manifest.json"
+            clone_manifest = ROOT / "reports" / "m1" / "c" / "m1-0927c" / "test-clone-manifest.json"
+            for label, path in (("clone save", clone_save), ("clone preview", clone_preview), ("clone manifest", clone_manifest)):
+                if not path.is_file():
+                    raise RuntimeError(f"seam fixture {label} is missing on this machine: {path}")
             owner_config = pathlib.Path(temp) / "planned-owner.json"
             owner_config.write_text(json.dumps({
                 "schema": oni_bridge.PLANNED_OWNER_CONFIG_SCHEMA,
