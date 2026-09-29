@@ -25,6 +25,11 @@ MAX_PROMPT_TOKENS = 8_000
 HARD_PROMPT_TOKEN_LIMIT = 100_000
 MIN_CALL_INTERVAL_SECONDS = 60
 REQUEST_TIMEOUT_SECONDS = 30
+# Optional OPENAI_REQUEST_TIMEOUT_SECONDS in the secrets document (live run
+# m1-0930b: the free qwen model needed more than 30 s per answer); bounded so
+# a request can never outlive the model loop's 90 s total deadline.
+MIN_REQUEST_TIMEOUT_SECONDS = 5.0
+MAX_REQUEST_TIMEOUT_SECONDS = 80.0
 RANKING_SCHEMA = "oni.llm-ranking.v1"
 _ATOMIC_REPLACE_ATTEMPTS = 8
 _ATOMIC_REPLACE_INITIAL_DELAY_SECONDS = 0.025
@@ -538,6 +543,9 @@ def read_secret_file(path: pathlib.Path) -> Dict[str, Optional[str]]:
             values["base_url"] = first_present(document, "OPENAI_BASE_URL", "base_url", "url")
             values["model"] = first_present(document, "OPENAI_MODEL", "model")
             values["wire_api"] = first_present(document, "OPENAI_WIRE_API", "wire_api")
+            values["request_timeout_seconds"] = first_present(
+                document, "OPENAI_REQUEST_TIMEOUT_SECONDS", "request_timeout_seconds"
+            )
             values["input_cost_per_million"] = first_present(
                 document, "ONI_AI_INPUT_COST_PER_1M", "input_cost_per_million"
             )
@@ -583,6 +591,19 @@ def first_present(mapping: Dict[str, Any], *keys: str) -> Optional[str]:
     return None
 
 
+def effective_request_timeout(config: Any) -> float:
+    """Per-request timeout: the optional bounded secrets value, else the default."""
+
+    raw = config.get("request_timeout_seconds") if isinstance(config, dict) else None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return float(REQUEST_TIMEOUT_SECONDS)
+    if not math.isfinite(value):
+        return float(REQUEST_TIMEOUT_SECONDS)
+    return min(MAX_REQUEST_TIMEOUT_SECONDS, max(MIN_REQUEST_TIMEOUT_SECONDS, value))
+
+
 def config_health(config: Dict[str, Any]) -> Dict[str, Any]:
     host = urllib.parse.urlsplit(str(config.get("base_url") or DEFAULT_BASE_URL)).hostname
     return {
@@ -591,7 +612,7 @@ def config_health(config: Dict[str, Any]) -> Dict[str, Any]:
         "base_url_host": str(host or "")[:200],
         "model": str(config.get("model") or DEFAULT_MODEL)[:200],
         "wire_api": "responses" if str(config.get("wire_api") or "").lower().startswith("responses") else "chat_completions",
-        "request_timeout_seconds": REQUEST_TIMEOUT_SECONDS,
+        "request_timeout_seconds": effective_request_timeout(config),
         "minimum_call_interval_seconds": MIN_CALL_INTERVAL_SECONDS,
         "pricing_configured": parse_rate(config.get("input_cost_per_million")) is not None
         and parse_rate(config.get("output_cost_per_million")) is not None,

@@ -47,6 +47,7 @@ from agent.command_queue import (
 )
 from agent.field_contracts import NON_MUTATING_ACTIONS
 from agent.llm_planner import (
+    effective_request_timeout,
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
     MAX_PROMPT_TOKENS,
@@ -651,7 +652,7 @@ class ModelLoop:
                     config,
                     prompt_text,
                     response_schema,
-                    timeout=min(PER_OPERATION_TIMEOUT_SECONDS, remaining),
+                    timeout=min(max(PER_OPERATION_TIMEOUT_SECONDS, effective_request_timeout(config)), remaining),
                 )
             except ModelRequestError as exc:
                 # Gateways without structured output answer 400; retry once

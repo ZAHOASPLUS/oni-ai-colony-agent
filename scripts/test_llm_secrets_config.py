@@ -9,6 +9,7 @@ unrelated host or in clear text.
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import sys
@@ -82,6 +83,26 @@ class SecretsConfigTests(unittest.TestCase):
         self.assertFalse(plan["llm"]["api_key_present"])
         self.assertEqual(plan["llm"]["base_url_host"], "relay.example")
         self.assertEqual(called, [])
+
+    def test_request_timeout_is_read_from_the_secrets_document_and_bounded(self):
+        self.write("oni-llm.json", json.dumps({
+            "OPENAI_API_KEY": "sk-json-key-000000000000000000000000",
+            "OPENAI_BASE_URL": "https://relay.example/v1",
+            "OPENAI_MODEL": "m",
+            "OPENAI_REQUEST_TIMEOUT_SECONDS": 75,
+        }))
+        config = llm_planner.load_llm_config(self.secrets)
+        self.assertEqual(llm_planner.effective_request_timeout(config), 75.0)
+        self.assertEqual(llm_planner.config_health(config)["request_timeout_seconds"], 75.0)
+        self.assertEqual(
+            llm_planner.effective_request_timeout({"request_timeout_seconds": "900"}),
+            llm_planner.MAX_REQUEST_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(
+            llm_planner.effective_request_timeout({"request_timeout_seconds": "nan"}),
+            float(llm_planner.REQUEST_TIMEOUT_SECONDS),
+        )
+        self.assertEqual(llm_planner.effective_request_timeout({}), float(llm_planner.REQUEST_TIMEOUT_SECONDS))
 
     def test_local_http_gateway_is_allowed(self):
         self.assertIsNone(llm_planner.base_url_error("http://127.0.0.1:8317/v1"))
