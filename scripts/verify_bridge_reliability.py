@@ -905,6 +905,8 @@ def case_archive_identity_noop_fail_closed(root: pathlib.Path) -> Dict[str, Any]
             check=False,
             capture_output=True,
             text=True,
+            # cmd.exe answers in the console code page (GBK here), not UTF-8.
+            errors="replace",
         )
         require(junction.returncode == 0, f"junction fixture failed: {junction.stderr.strip()}")
     else:
