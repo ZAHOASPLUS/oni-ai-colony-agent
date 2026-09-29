@@ -684,9 +684,12 @@ allows at most one pending command. Recovery rejects its unapproved pending
 command with `source_incident_not_open`. A pending suggestion is also rejected
 once its source binding is superseded (`pending_source_snapshot_stale`,
 `pending_source_state_hash_stale`, `pending_source_frame_stale`, or the
-session/save/world/policy forms). While the game runs that happens on every
-snapshot, so after such a rejection a non-mutating suggestion (`focus_note`,
-`noop`) for the same incident is re-issued at most once per 120 seconds
+session/save/world/policy forms). Publishing a suggestion changes the
+pipeline projection of the next frame, so a new suggestion is re-bound once
+through `pending_source_frame_stale` before it settles. While the game runs
+the snapshot form happens on every snapshot, so after a snapshot or
+state-hash rejection a non-mutating suggestion (`focus_note`, `noop`) for the
+same incident is re-issued at most once per 120 seconds
 (`NON_MUTATING_RESUGGEST_SECONDS`); a mutating survival suggestion is
 re-issued every generation so an approver always sees a current one.
 

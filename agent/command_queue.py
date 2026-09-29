@@ -75,15 +75,18 @@ DEFAULT_MAX_PENDING = 20
 # Live run m1-0927c (2026-09-27): while the game ran, every snapshot
 # superseded the source binding of the pending idle_dupes focus_note, so it
 # was rejected as stale and re-issued once per snapshot (29 rejected records
-# in five minutes).  After such a rejection a non-mutating suggestion for the
-# same incident is re-issued at most once per this window.  Mutating survival
-# suggestions (the arbitrated pause) keep their per-generation refresh.
+# in five minutes).  After a rejection caused by a changed game state a
+# non-mutating suggestion for the same incident is re-issued at most once per
+# this window.  A frame-only rejection is not throttled: publishing a
+# suggestion changes the pipeline projection of the next decision frame, so
+# every new suggestion is re-bound once (pending_source_frame_stale) before it
+# settles, and throttling that step would leave nothing pending.  Mutating
+# survival suggestions (the arbitrated pause) keep their per-generation refresh.
 NON_MUTATING_RESUGGEST_SECONDS = 120
 SOURCE_STALE_REJECTION_REASONS = frozenset(
     {
         "pending_source_snapshot_stale",
         "pending_source_state_hash_stale",
-        "pending_source_frame_stale",
     }
 )
 _ATOMIC_REPLACE_ATTEMPTS = 8

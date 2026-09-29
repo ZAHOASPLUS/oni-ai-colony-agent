@@ -123,6 +123,17 @@ class ResuggestThrottleTests(unittest.TestCase):
             [c["source_incident_id"] for c in self.generation(12, other)], ["low_food"]
         )
 
+    def test_a_frame_only_rejection_does_not_throttle(self):
+        # Publishing a suggestion changes the next frame's pipeline projection,
+        # so a fresh suggestion is re-bound once; that step must not be blocked.
+        self.generation(8, note_advice)
+        self.generation(9, note_advice)
+        path = next((self.bridge / "commands" / "rejected").glob("*.json"))
+        record = json.loads(path.read_text(encoding="utf-8-sig"))
+        record["rejection_reason"] = "pending_source_frame_stale"
+        path.write_text(json.dumps(record), encoding="utf-8")
+        self.assertEqual([c["action"] for c in self.generation(10, note_advice)], ["focus_note"])
+
     def test_a_mutating_suggestion_keeps_its_per_generation_refresh(self):
         fixtures.write_policy(self.bridge, enabled=True)
         self.assertEqual([c["action"] for c in self.generation(8, pause_advice)], ["set_paused"])
