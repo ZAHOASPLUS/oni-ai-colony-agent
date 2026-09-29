@@ -445,7 +445,7 @@ never writes `approved` commands.
 ### Model loop (M1)
 
 `-ModelLoop` (watch mode only) lets the configured model pick one of at most
-five catalogued candidates per decision (`docs/protocol.md`, `model_selected`).
+eight catalogued candidates per decision (`docs/protocol.md`, `model_selected`).
 The Bridge publishes the choice as one pending command; nothing runs until a
 human approves it:
 
@@ -458,10 +458,15 @@ Get-Content "$HOME\Documents\Klei\OxygenNotIncluded\ai-bridge\model-loop.json"
 `model-loop.json` shows the candidates, the model's last choice and reason,
 the command awaiting approval, and the recent outcomes fed back to the model.
 The policy must enable actions and suggestions for the loaded save and allow the
-candidate actions (`set_paused`, `set_duplicant_chore_priority`,
-`mark_dig_cells`); raise `command_ttl_seconds` (at most 300) so there is time to
-read and approve. Priority and dig candidates exist only while the game is
-paused. The loop stands aside while a rule suggests a mutation (the arbitrated
+candidate actions (`set_paused`, `set_research`, `set_duplicant_chore_priority`,
+`mark_dig_cells`, `place_building_blueprint`); raise `command_ttl_seconds` (at
+most 300) so there is time to read and approve. Priority, dig, and Ladder
+candidates exist only while the game is paused; the research candidates
+(`research_<TechId>`, a fixed tier-1 ladder led by `ImprovedOxygen` because the
+first live colony consumed about four times the oxygen it produced) are offered
+in either pause state. The Probe does not report `research.complete`, so a
+finished tech is refused by the executor and that refusal reaches the model as
+outcome feedback. The loop stands aside while a rule suggests a mutation (the arbitrated
 survival pause); other open rule findings, such as idle duplicants or a
 non-operational building, are passed to the model as context. `-ModelLoop`
 refuses `-EnableLlm`: that older ranker calls the model synchronously inside

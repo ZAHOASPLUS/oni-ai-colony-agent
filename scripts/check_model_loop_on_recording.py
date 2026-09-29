@@ -39,7 +39,10 @@ from bridge import oni_bridge  # noqa: E402
 from scripts import commit_command_approval  # noqa: E402
 
 HARNESS = ROOT / "tools" / "ActionExecutorHarness"
-CANDIDATE_ACTIONS = ["noop", "focus_note", "set_paused", "set_duplicant_chore_priority", "mark_dig_cells"]
+CANDIDATE_ACTIONS = [
+    "noop", "focus_note", "set_paused", "set_research", "set_duplicant_chore_priority", "mark_dig_cells",
+    "place_building_blueprint",
+]
 SMALL_RECORD_BYTES = 65536
 _TIMESTAMP = re.compile(r'"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})"')
 
@@ -160,7 +163,13 @@ def main() -> int:
             loop.join_request(30)
             second = generation()
             report["published"] = second.get("phase") == "awaiting_human_approval"
-            pending = sorted((bridge / "commands" / "pending").glob("*.json"))
+            # Rule suggestions (focus_note) share the pending queue with the
+            # model's command; approve only the command the loop published.
+            awaiting = second.get("awaiting_approval") or {}
+            pending = [
+                path for path in sorted((bridge / "commands" / "pending").glob("*.json"))
+                if path.stem == awaiting.get("command_id")
+            ]
             if pending:
                 command = json.loads(pending[0].read_text(encoding="utf-8"))
                 digest = command["source_frame_id"].split(":", 1)[1]
@@ -180,7 +189,12 @@ def main() -> int:
     ok = report.get("command", {}).get("approval") == "validated"
     if args.executor_check:
         check = report.get("executor_check") or {}
-        ok = ok and check.get("shape_error") is None and check.get("receipt_error") is None and "error" not in check
+        # A check that needed live game state (for example Assets.GetBuildingDef
+        # for a Ladder blueprint) is reported as *_exception; that is not a pass.
+        ok = (
+            ok and check.get("shape_error") is None and check.get("receipt_error") is None
+            and not any(key == "error" or key.endswith("_exception") for key in check)
+        )
     return 0 if ok else 1
 
 

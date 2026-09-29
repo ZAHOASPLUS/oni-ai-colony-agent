@@ -727,6 +727,41 @@ def build_cancel_utility_blueprint_path_hint(
     }
 
 
+MAX_RESEARCH_ID_LENGTH = 128  # ActionExecutor.MaxResearchIdLength
+
+
+def build_set_research_hint(state: Dict[str, Any], *, tech: str) -> Dict[str, Any]:
+    """Build the executor's ``set_research`` contract for one tech id.
+
+    The executor requires the precondition to bind the observed
+    ``research.current`` value (which must differ from ``tech``) and the
+    expected effect ``research.current == tech``.  It validates the tech id
+    against ``Db.Techs`` itself and refuses a finished tech or one with
+    unfinished prerequisites deterministically, so this builder only needs the
+    observed current selection.  Research needs no pause.
+    """
+
+    if (
+        not isinstance(tech, str)
+        or not tech
+        or len(tech) > MAX_RESEARCH_ID_LENGTH
+        or not tech.isalnum()
+        or not tech.isascii()
+    ):
+        raise ValueError("tech must be a bounded ASCII alphanumeric technology id.")
+    current = _require_contract_value(state, "research.current")
+    if not isinstance(current, str):
+        raise ValueError("research.current must be an observed string (empty when idle).")
+    if current == tech:
+        raise ValueError(f"research.current already equals {tech}.")
+    return {
+        "action": "set_research",
+        "args": {"tech": tech},
+        "preconditions": [_observed_eq("research.current", current)],
+        "expected_effects": [_observed_eq("research.current", tech)],
+    }
+
+
 def build_duplicant_priority_hint(
     state: Dict[str, Any],
     *,

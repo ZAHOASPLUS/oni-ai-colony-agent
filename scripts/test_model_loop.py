@@ -24,13 +24,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agent import approval_receipt, candidates  # noqa: E402
-from agent.advanced_actions import dig_cell_path  # noqa: E402
+from agent.advanced_actions import BLUEPRINT_CELL_FIELDS, blueprint_cell_path, dig_cell_path  # noqa: E402
 from agent.command_queue import command_pipeline_readiness, load_policy, move_to_rejected  # noqa: E402
 from agent.field_contracts import (  # noqa: E402
     ALERTS_CANONICAL_CONTRACT_ID,
+    BLUEPRINT_CATALOG_CONTRACT_ID,
+    BLUEPRINT_CELL_CONTRACT_ID,
     DIG_CELL_CONTRACT_ID,
     DIG_TOOL_CONTRACT_ID,
     DUPLICANT_CHORE_PRIORITY_CONTRACT_ID,
+    GAME_BUILD_MODE_CONTRACT_ID,
     contract_quality_fixture,
 )
 from agent.llm_planner import ModelRequestError  # noqa: E402
@@ -41,6 +44,10 @@ from scripts import verify_bridge_reliability as fixtures  # noqa: E402
 
 SESSION = "session-model-loop"
 DIG_CELLS = (5000, 5001, 5002, 7003)
+LADDER_CELLS = (9001, 9000)  # unsorted on purpose: the candidate picks the lowest
+ALL_CANDIDATE_ACTIONS = (
+    "set_paused", "set_research", "set_duplicant_chore_priority", "mark_dig_cells", "place_building_blueprint",
+)
 TEST_CONFIG = {"api_key": "sk-test-not-a-real-key-000000", "base_url": "https://model.invalid/v1", "model": "fake"}
 
 
@@ -77,6 +84,35 @@ def enrich(state: dict, priorities: dict | None = None) -> dict:
     }}
     for path in ("designations.dig.tool.tiles_filter_on", "designations.dig.tool.natural_backwall_filter_on"):
         quality[path] = contract_quality_fixture(DIG_TOOL_CONTRACT_ID)
+    # One approved Ladder blueprint target set, as the Probe reports it.
+    state["game"]["sandbox_mode"] = False
+    state["game"]["instant_build_mode"] = False
+    for path in ("game.sandbox_mode", "game.instant_build_mode"):
+        quality[path] = contract_quality_fixture(GAME_BUILD_MODE_CONTRACT_ID)
+    ladder = {
+        "available": True, "prefab_id": "Ladder", "is_utility": False, "cancellable": True, "width": 1, "height": 1,
+        "build_location_rule": "Anywhere", "orientation": "Neutral", "facade_id": "DEFAULT_FACADE",
+        "material_categories": ["BuildableRaw&BuildingWood"], "material_tags": ["WoodLog"],
+        "required_mass_kg": [100.0], "available_mass_kg": [1500.0], "materials_available": True,
+        "candidate_cells": list(LADDER_CELLS),
+    }
+    for field in ladder:
+        quality[f"blueprints.catalog.Ladder.{field}"] = contract_quality_fixture(BLUEPRINT_CATALOG_CONTRACT_ID)
+    by_id = {}
+    for index, cell in enumerate(LADDER_CELLS):
+        empty = "sha256:" + f"{cell:064x}"[-64:]
+        by_id[f"cell_{cell}"] = {
+            "cell": cell, "x": 40 + index, "y": 12, "world_id": 0, "visible": True, "solid": False,
+            "foundation": False, "element_id": "Vacuum", "mass_kg": 0.0, "damage": 0.0, "object_count": 0,
+            "empty_for_blueprint": True, "can_place_ladder": True, "can_place_wire": True,
+            "blueprint_present": False, "blueprint_instance_id": 0, "blueprint_prefab_id": "none",
+            "blueprint_orientation": "none", "blueprint_material_tags": [], "blueprint_in_progress": False,
+            "blueprint_is_utility": False, "empty_fingerprint": empty, "fingerprint": empty,
+        }
+        for field in BLUEPRINT_CELL_FIELDS:
+            quality[f"{blueprint_cell_path(cell)}.{field}"] = contract_quality_fixture(BLUEPRINT_CELL_CONTRACT_ID)
+    state["blueprints"] = {"catalog": {"Ladder": ladder}, "by_instance_id": {}, "utility_paths": {}}
+    state["cells"] = {"by_id": by_id}
     return state
 
 
@@ -122,7 +158,7 @@ class ModelLoopTests(unittest.TestCase):
         self.seq = 1
         self.policy = {
             "schema": "oni.action-policy.v1", "actions_enabled": True, "suggestions_enabled": True,
-            "allowed_actions": ["noop", "focus_note", "set_paused", "set_duplicant_chore_priority", "mark_dig_cells"],
+            "allowed_actions": ["noop", "focus_note", *ALL_CANDIDATE_ACTIONS],
             "allowed_save_hashes": [self.expected["loader_save_sha256"]],
             "command_ttl_seconds": 120, "max_pending_commands": 20,
         }
@@ -165,7 +201,8 @@ class ModelLoopTests(unittest.TestCase):
         first = self.tick(loop)
         self.assertEqual(first["phase"], "awaiting_model")
         self.assertEqual([c["candidate_id"] for c in first["candidates"]],
-                         ["priority_102_Dig_2", "priority_101_Build_3", "dig_5000_3", "resume_game", "wait"])
+                         ["research_ImprovedOxygen", "research_PowerRegulation", "priority_102_Dig_2",
+                          "priority_101_Build_3", "dig_5000_3", "ladder_9000", "resume_game", "wait"])
         self.assertTrue(loop.join_request(5))
         # The structured-output schema limits the answer to the offered ids.
         self.assertEqual(model.schemas[0]["properties"]["candidate_id"]["enum"],
@@ -426,6 +463,41 @@ class CandidateTests(unittest.TestCase):
 
     def test_policy_filters_candidates(self):
         self.assertEqual(self.ids(self.state(paused=True), allowed=("set_paused",)), ["resume_game", "wait"])
+
+    def test_research_candidates_skip_the_current_tech_in_both_pause_states(self):
+        # The fixture researches FarmingTech, so the ladder offers the next two tier-1 techs.
+        self.assertEqual(
+            self.ids(self.state(paused=False), allowed=("set_paused", "set_research")),
+            ["pause_game", "research_ImprovedOxygen", "research_PowerRegulation", "wait"],
+        )
+        self.assertEqual(
+            self.ids(self.state(paused=True), allowed=("set_research",)),
+            ["research_ImprovedOxygen", "research_PowerRegulation", "wait"],
+        )
+
+    def test_research_candidate_binds_the_observed_current_selection(self):
+        items = candidates.generate_candidates(self.state(paused=False), allowed_actions=("set_research",))["items"]
+        hint = next(item for item in items if item["candidate_id"] == "research_ImprovedOxygen")["hint"]
+        self.assertEqual(hint["args"], {"tech": "ImprovedOxygen"})
+        self.assertEqual([(c["path"], c["value"]) for c in hint["preconditions"]], [("research.current", "FarmingTech")])
+        self.assertEqual([(c["path"], c["value"]) for c in hint["expected_effects"]], [("research.current", "ImprovedOxygen")])
+
+    def test_ladder_candidate_targets_the_lowest_catalogued_empty_cell_only_while_paused(self):
+        self.assertNotIn("ladder_9000", self.ids(self.state(paused=False), allowed=ALL_CANDIDATE_ACTIONS))
+        items = candidates.generate_candidates(self.state(paused=True), allowed_actions=("place_building_blueprint",))["items"]
+        [ladder, wait] = items
+        self.assertEqual((ladder["candidate_id"], ladder["risk"], wait["candidate_id"]), ("ladder_9000", "medium", "wait"))
+        self.assertEqual(ladder["hint"]["args"]["cells"], [9000])
+        self.assertEqual(ladder["hint"]["args"]["material_tags"], ["WoodLog"])
+        self.assertIn("x=41, y=12", ladder["summary"])
+
+    def test_full_paused_set_keeps_resume_and_wait_within_the_cap(self):
+        ids = self.ids(self.state(paused=True), allowed=ALL_CANDIDATE_ACTIONS)
+        self.assertEqual(ids, [
+            "research_ImprovedOxygen", "research_PowerRegulation", "priority_102_Dig_2", "priority_101_Build_3",
+            "dig_5000_3", "ladder_9000", "resume_game", "wait",
+        ])
+        self.assertLessEqual(len(ids), candidates.MAX_CANDIDATES)
 
     def test_set_is_stable_across_snapshots_of_the_same_state(self):
         first = candidates.generate_candidates(self.state(paused=True), allowed_actions=["mark_dig_cells"])

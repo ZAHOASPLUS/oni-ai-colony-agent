@@ -82,6 +82,8 @@ class ExecutorModelCommandContractTests(unittest.TestCase):
             ("dig_run", "dig_5000_3", True),
             ("resume", "resume_game", True),
             ("pause", "pause_game", False),
+            ("research_while_running", "research_ImprovedOxygen", False),
+            ("ladder", "ladder_9000", True),
         ):
             command, policy = approved_choice(candidate_id, paused=paused)
             cases.append({"name": name, "command": command, "policy": policy})
@@ -98,8 +100,18 @@ class ExecutorModelCommandContractTests(unittest.TestCase):
         cases.append(unpaused)
 
         results = self.run_harness(cases)
-        for name in ("priority_non_ascii_name", "dig_run", "resume", "pause"):
+        for name in ("priority_non_ascii_name", "dig_run", "resume", "pause", "research_while_running"):
             self.assertEqual((results[name]["shape_error"], results[name]["receipt_error"]), (None, None), name)
+            # A check that needed live game state would be reported as an exception, not as a pass.
+            self.assertEqual(
+                {key: value for key, value in results[name].items() if key.endswith("_exception")}, {}, name
+            )
+        # The blueprint shape check resolves the allowlisted BuildingDef through
+        # Assets.GetBuildingDef, which only exists inside the running game, so the
+        # harness can prove the Ladder receipt but not its shape offline.
+        self.assertEqual(results["ladder"]["receipt_error"], None)
+        self.assertNotIn("receipt_exception", results["ladder"])
+        self.assertIn("NullReferenceException", results["ladder"].get("shape_exception", ""))
         self.assertIn("intent hash", results["tampered_after_approval"]["receipt_error"])
         self.assertIn("game.paused", results["priority_without_paused_precondition"]["shape_error"])
 

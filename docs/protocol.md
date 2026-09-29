@@ -1012,11 +1012,15 @@ not require a mutation approval receipt.
 review 2026-09-26, M1) adds a third Bridge-side owner: `mode=model_selected`,
 `source.kind=model_choice`, a null `source_incident_id`, and ids of the form
 `cmd-model-<32 hex>`. Each generation `agent/candidates.py` derives at most
-five candidates from the trusted snapshot (`pause_game` while running;
-while paused up to two one-step `set_duplicant_chore_priority` raises for the
-Dig/Build groups, one horizontal `mark_dig_cells` run of at most four safe
-cells, and `resume_game` only on an observed empty canonical alert set), each
-built by the catalogued `agent/advanced_actions.py` builders, plus `wait`. A
+eight candidates from the trusted snapshot: `pause_game` while running; up to
+two `set_research` selections from a fixed tier-1 ladder (`ImprovedOxygen`,
+`FarmingTech`, `PowerRegulation`, `BasicRefinement`, skipping the observed
+`research.current`) in either pause state; while paused additionally up to two
+one-step `set_duplicant_chore_priority` raises for the Dig/Build groups, one
+horizontal `mark_dig_cells` run of at most four safe cells, one
+`place_building_blueprint` Ladder on the lowest catalogued empty cell, and
+`resume_game` only on an observed empty canonical alert set; each built by the
+catalogued `agent/advanced_actions.py` builders, plus `wait`. A
 background request with a total deadline asks the model for exactly one
 `candidate_id` (structured output restricted to the offered ids, local
 validation authoritative); the chosen candidate's complete local contract is

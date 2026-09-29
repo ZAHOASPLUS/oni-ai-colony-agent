@@ -38,12 +38,12 @@ namespace ActionExecutorHarness
                     JObject command = (JObject)item["command"];
                     JObject policy = (JObject)item["policy"];
                     string action = (string)command["action"];
-                    results.Add(new JObject
-                    {
-                        ["name"] = item["name"],
-                        ["shape_error"] = (string)shapes.Invoke(null, new object[] { command, action }),
-                        ["receipt_error"] = (string)receipt.Invoke(null, new object[] { command, policy }),
-                    });
+                    // A check that needs live game state (Grid, Db) throws here;
+                    // report it per case instead of failing the whole run.
+                    var result = new JObject { ["name"] = item["name"] };
+                    result["shape_error"] = Invoke(shapes, new object[] { command, action }, result, "shape_exception");
+                    result["receipt_error"] = Invoke(receipt, new object[] { command, policy }, result, "receipt_exception");
+                    results.Add(result);
                 }
                 Console.WriteLine(new JObject
                 {
@@ -56,6 +56,19 @@ namespace ActionExecutorHarness
             {
                 Console.Error.WriteLine(ex.ToString());
                 return 1;
+            }
+        }
+
+        private static string Invoke(MethodInfo method, object[] arguments, JObject result, string exceptionField)
+        {
+            try
+            {
+                return (string)method.Invoke(null, arguments);
+            }
+            catch (TargetInvocationException ex) when (ex.InnerException != null)
+            {
+                result[exceptionField] = ex.InnerException.GetType().Name + ": " + ex.InnerException.Message;
+                return null;
             }
         }
     }

@@ -15,11 +15,17 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
-from agent.advanced_actions import build_duplicant_priority_hint, build_mark_dig_hint
+from agent.advanced_actions import (
+    build_duplicant_priority_hint,
+    build_mark_dig_hint,
+    build_place_building_blueprint_hint,
+    build_set_research_hint,
+)
 from agent.canonical_hash import canonical_hash
 from agent.field_contracts import (
     ALERTS_CANONICAL_CONTRACT_ID,
     GAME_PAUSED_CONTRACT_ID,
+    RESEARCH_CURRENT_CONTRACT_ID,
     build_condition,
     read_contract_field,
 )
@@ -28,11 +34,25 @@ from agent.state_quality import safe_get
 
 CANDIDATE_SET_SCHEMA = "oni.action-candidates.v1"
 WAIT_CANDIDATE_ID = "wait"
-MAX_CANDIDATES = 5  # including the always-present "wait"
+MAX_CANDIDATES = 8  # including the always-present "wait"; the paused set never truncates
 # Early-game chore groups offered for a one-step raise, in preference order.
 PRIORITY_GROUPS = ("Dig", "Build")
 MAX_PRIORITY_CANDIDATES = 2
 MAX_DIG_RUN_CELLS = 4
+# Tier-1 technologies (no prerequisites) in the order an oxygen-starved early
+# colony needs them.  The Probe does not yet report research.complete, so a
+# finished tech is refused by the executor ("already researched") and that
+# refusal reaches the model as outcome feedback; the next entry is offered too.
+RESEARCH_LADDER = ("ImprovedOxygen", "FarmingTech", "PowerRegulation", "BasicRefinement")
+RESEARCH_SUMMARIES = {
+    "ImprovedOxygen": "Air Systems: unlocks the Electrolyzer, which makes oxygen from water",
+    "FarmingTech": "Basic Farming: unlocks the Algae Terrarium, Planter Box and Compost",
+    "PowerRegulation": "Power Regulation: unlocks batteries and power transformers",
+    "BasicRefinement": "Basic Refinement: unlocks the Rock Crusher and Kiln",
+}
+MAX_RESEARCH_CANDIDATES = 2
+# The only building the Mod's blueprint allowlist accepts today.
+LADDER_BUILDING_ID = "Ladder"
 MAX_NAME_CHARS = 32
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
 
@@ -166,6 +186,53 @@ def _dig_candidate(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _research_candidates(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    current = _observed(state, "research.current", RESEARCH_CURRENT_CONTRACT_ID)
+    if not isinstance(current, str):
+        return []
+    result: List[Dict[str, Any]] = []
+    for tech in RESEARCH_LADDER:
+        if tech == current:
+            continue
+        try:
+            hint = build_set_research_hint(state, tech=tech)
+        except ValueError:
+            continue
+        prefix = "Switch research" if current else "Start research"
+        result.append(_candidate(f"research_{tech}", f"{prefix} to {RESEARCH_SUMMARIES.get(tech, tech)}", hint))
+        if len(result) >= MAX_RESEARCH_CANDIDATES:
+            break
+    return result
+
+
+def _ladder_candidate(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """One Ladder blueprint on the lowest catalogued empty cell (deterministic)."""
+
+    catalog = safe_get(state, f"blueprints.catalog.{LADDER_BUILDING_ID}")
+    if not isinstance(catalog, dict):
+        return None
+    cells = catalog.get("candidate_cells")
+    materials = catalog.get("material_tags")
+    if not isinstance(cells, list) or not isinstance(materials, list) or not materials:
+        return None
+    for cell in sorted(item for item in cells if isinstance(item, int) and not isinstance(item, bool)):
+        try:
+            hint = build_place_building_blueprint_hint(
+                state, cells=[cell], material_tags=materials, building_def_id=LADDER_BUILDING_ID
+            )
+        except ValueError:
+            continue
+        details = safe_get(state, f"cells.by_id.cell_{cell}") or {}
+        material = display_text(materials[0], 40)
+        return _candidate(
+            f"ladder_{cell}",
+            f"Place one Ladder blueprint at x={details.get('x')}, y={details.get('y')} built from {material}",
+            hint,
+            risk="medium",
+        )
+    return None
+
+
 def generate_candidates(
     state: Optional[Mapping[str, Any]],
     *,
@@ -182,13 +249,19 @@ def generate_candidates(
         blockers.append("game_paused_unobserved")
     elif not paused:
         items.append(_pause_candidate())
+        # Research needs no pause: the executor only binds research.current.
+        items.extend(_research_candidates(snapshot))
     else:
         # Advanced actions require a paused game; resume is offered last so a
         # model that wants duplicants to act can still return to play.
+        items.extend(_research_candidates(snapshot))
         items.extend(_priority_candidates(snapshot))
         dig = _dig_candidate(snapshot)
         if dig is not None:
             items.append(dig)
+        ladder = _ladder_candidate(snapshot)
+        if ladder is not None:
+            items.append(ladder)
         resume = _resume_candidate(snapshot)
         if resume is not None:
             items.append(resume)
