@@ -344,6 +344,23 @@ def persist_confirmed_command_approval_bundle(
     command_id = final_command.get("id")
     if final_command.get("action") not in _APPROVAL_BUNDLE_ACTIONS:
         raise ActionOutcomeError("confirmed command approval bundle action is unsupported")
+    # An existing bundle already froze the source frame and policy.  Re-entry
+    # for a command that is already in ``done`` must accept it as it is: the
+    # frame is no longer referenced by any nonterminal command, so archive
+    # pruning may have removed it, and a stop disables the policy.  Rebuilding
+    # from those inputs raised "could not be frozen before done" for commands
+    # long since done and took the Bridge down (Phase 2 rounds 28 and 51,
+    # roadmap B8).  The bundle must still be valid and freeze exactly this
+    # final command; anything else stays a conflict.
+    target = confirmed_command_approval_bundle_path(pathlib.Path(bridge_dir), command_id)
+    if target.exists():
+        existing, existing_path = load_confirmed_command_approval_bundle(bridge_dir, command_id)
+        if (
+            not _strict_json_equal(existing.get("final_command"), dict(final_command))
+            or existing.get("final_command_hash") != _canonical_hash(final_command)
+        ):
+            raise ActionOutcomeError("existing confirmed command approval bundle conflicts")
+        return existing, existing_path
     try:
         frame, frame_path, _archive_hash = load_archived_decision_frame(
             pathlib.Path(bridge_dir),
