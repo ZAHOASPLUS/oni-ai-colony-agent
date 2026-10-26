@@ -78,7 +78,7 @@ The whole goal is complete only with actual evidence for autonomous observe/plan
 - No game, Bridge or controller process is expected to be running, and no run is
   admitted. Any next real test needs a fresh admission on this host.
 - Next: milestone M0 (offline hardening) in `docs/roadmap-20261027.md`; the
-  user decisions D1-D3 listed there gate milestone M1.
+  user decisions D1-D4 listed there gate milestone M1.
 
 ## Historical handoff (2026-10-11, superseded)
 
