@@ -2503,6 +2503,14 @@ namespace OniAiProbeMod.Probe
                 { "oxygen_diffuser", 0 },
                 { "outhouse", 0 },
                 { "manual_generator", 0 },
+                // Every building the controller can place gets a completed
+                // count.  Without one the controller could not see its own
+                // Electrolyzers and built six identical ones that could never
+                // run (docs/b2-blueprint-lifecycle-20261027.md).
+                { "algae_terrarium", 0 },
+                { "electrolyzer", 0 },
+                { "microbe_musher", 0 },
+                { "farm_tile", 0 },
                 { "_scanned", 0 },
                 { "_active_world_id", activeWorldId },
                 { "_source", "unavailable" },
@@ -2586,6 +2594,10 @@ namespace OniAiProbeMod.Probe
             IncrementIfExactMatch(counts, id, "oxygen_diffuser", "MineralDeoxidizer");
             IncrementIfMatch(counts, id, "outhouse", "Outhouse");
             IncrementIfMatch(counts, id, "manual_generator", "ManualGenerator");
+            IncrementIfExactMatch(counts, id, "algae_terrarium", "AlgaeHabitat");
+            IncrementIfExactMatch(counts, id, "electrolyzer", "Electrolyzer");
+            IncrementIfExactMatch(counts, id, "microbe_musher", "MicrobeMusher");
+            IncrementIfExactMatch(counts, id, "farm_tile", "FarmTile");
         }
 
         private static void CacheBuildings(
@@ -3369,6 +3381,10 @@ namespace OniAiProbeMod.Probe
                 { "buildings.oxygen_diffuser", BuildingCountQuality(buildingStatus, buildingSource, buildingCountObserved, buildingCompleteness) },
                 { "buildings.outhouse", BuildingCountQuality(buildingStatus, buildingSource, buildingCountObserved, buildingCompleteness) },
                 { "buildings.manual_generator", BuildingCountQuality(buildingStatus, buildingSource, buildingCountObserved, buildingCompleteness) },
+                { "buildings.algae_terrarium", BuildingCountQuality(buildingStatus, buildingSource, buildingCountObserved, buildingCompleteness) },
+                { "buildings.electrolyzer", BuildingCountQuality(buildingStatus, buildingSource, buildingCountObserved, buildingCompleteness) },
+                { "buildings.microbe_musher", BuildingCountQuality(buildingStatus, buildingSource, buildingCountObserved, buildingCompleteness) },
+                { "buildings.farm_tile", BuildingCountQuality(buildingStatus, buildingSource, buildingCountObserved, buildingCompleteness) },
                 { "buildings._source", Quality(buildingSource == "unavailable" ? "unsupported" : "observed", buildingSource) },
                 { "buildings._scanned", Quality(buildingSource == "unavailable" ? "unsupported" : "observed", buildingSource) },
                 { "functional_buildings", functionalBuildingQuality },

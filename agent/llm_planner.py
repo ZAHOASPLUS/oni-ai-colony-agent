@@ -373,6 +373,10 @@ def compact_state(latest: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "buildings.oxygen_diffuser",
         "buildings.outhouse",
         "buildings.manual_generator",
+        "buildings.algae_terrarium",
+        "buildings.electrolyzer",
+        "buildings.microbe_musher",
+        "buildings.farm_tile",
     )
     fields: Dict[str, Any] = {}
     for path in paths:

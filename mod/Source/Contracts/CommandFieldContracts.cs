@@ -48,7 +48,8 @@ namespace OniAiProbeMod.Contracts
         internal const string ResearchCurrentId = "oni.qc.research.current.v1";
         internal const string ResearchCompleteId = "oni.qc.research.complete.v1";
         // Completed-prefab counts (buildings.oxygen_diffuser/outhouse/
-        // manual_generator) are diagnostic only: the Bridge's rules and the
+        // manual_generator/algae_terrarium/electrolyzer/microbe_musher/
+        // farm_tile) are diagnostic only: the Bridge's rules and the
         // model loop's colony summary consume them and no command may bind
         // them, so TryResolve deliberately does not know their paths.  Their
         // capture binding is buildings.captured_at (the reader caches for

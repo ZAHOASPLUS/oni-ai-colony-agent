@@ -41,7 +41,9 @@ from agent.canonical_hash import canonical_bytes, loads_strict
 from agent.candidates import (
     WAIT_CANDIDATE_ID,
     _pending_blueprint_count,
+    building_status,
     display_text,
+    electrolyzer_supply_offered,
     generate_candidates,
     oxygen_balance,
 )
@@ -381,7 +383,14 @@ def colony_summary(state: Mapping[str, Any]) -> Dict[str, Any]:
                     },
                 }
             )
-    return {"fields": fields, "duplicants": duplicants, "oxygen_balance": oxygen_balance(snapshot)}
+    return {
+        "fields": fields,
+        "duplicants": duplicants,
+        "oxygen_balance": oxygen_balance(snapshot),
+        # Built and working counts per placeable building, so the model sees an
+        # idle building it already has instead of placing another (B14).
+        "buildings": building_status(snapshot),
+    }
 
 
 def _instance_order(entry: Mapping[str, Any]) -> int:
@@ -421,6 +430,9 @@ def oxygen_outlook(state: Mapping[str, Any]) -> Dict[str, Any]:
         "world_scan_progress": None,
         "oxygen_buildings_can_operate": None,
         "electrolyzer_can_operate": None,
+        # Water alone does not run an Electrolyzer: it needs power and a liquid
+        # pipe input, and this reports whether the action catalog can lay one.
+        "electrolyzer_supply_offered": electrolyzer_supply_offered(),
     }
 
     instances = safe_get(state, "life_support_buildings.instances")
@@ -462,7 +474,9 @@ def oxygen_outlook(state: Mapping[str, Any]) -> Dict[str, Any]:
     ]
     if waters:
         outlook["world_water_kg"] = round(sum(waters), 3)
-        outlook["electrolyzer_can_operate"] = sum(waters) > 0
+        # "The world holds water" used to be reported as "the Electrolyzer can
+        # operate", and the model built six that never ran (B14).
+        outlook["electrolyzer_can_operate"] = sum(waters) > 0 and outlook["electrolyzer_supply_offered"]
 
     available = outlook["consumable_available_kg"]
     if isinstance(available, (int, float)) and not isinstance(available, bool):
@@ -499,6 +513,12 @@ def build_choice_payload(
             "a negative value means the colony is losing breathable air. resource_outlook reports that the world "
             "holds none of the consumable the placeable oxygen producers need, so placing another one cannot help "
             "and no such candidate is offered; prefer a candidate that changes what the colony can reach."
+        )
+    if outlook["electrolyzer_supply_offered"] is False:
+        oxygen_rule += (
+            " An electrolyser needs power and a liquid pipe carrying water into it; duplicants never carry water to "
+            "it, and no pipe can be laid yet, so no electrolyser is offered. colony.buildings reports how many of "
+            "each building exist and how many work."
         )
     return {
         "schema": CHOICE_INPUT_SCHEMA,

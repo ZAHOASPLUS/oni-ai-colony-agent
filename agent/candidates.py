@@ -18,6 +18,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from agent.advanced_actions import (
     BUILDING_BLUEPRINT_ALLOWLIST,
+    UTILITY_BLUEPRINT_ALLOWLIST,
     build_cancel_building_blueprint_hint,
     build_duplicant_priority_hint,
     build_mark_dig_hint,
@@ -207,6 +208,84 @@ def _building_needs_consumable(building_def_id: str, consumable: str) -> bool:
 
     needed = CONSUMABLE_BY_BUILDING.get(building_def_id)
     return needed is not None and needed.lower() == str(consumable).strip().lower()
+
+
+# The completed-prefab count each placeable building is reported under.
+# ``buildings.oxygen_diffuser`` also counts the legacy OxygenDiffuser prefab.
+BUILDING_COUNT_PATHS = {
+    "MineralDeoxidizer": "buildings.oxygen_diffuser",
+    "AlgaeHabitat": "buildings.algae_terrarium",
+    "Electrolyzer": "buildings.electrolyzer",
+    "FarmTile": "buildings.farm_tile",
+    "MicrobeMusher": "buildings.microbe_musher",
+}
+# The Electrolyzer takes water only through a liquid pipe input and needs
+# power (ElectrolyzerConfig: InputConduitType + ConduitConsumer,
+# RequiresPowerInput); duplicants never carry water to it.  Until the action
+# catalog can lay a liquid pipe, every Electrolyzer the controller places is
+# dead: Phase 2 built six and none ever ran (docs/b2-blueprint-lifecycle-20261027.md).
+ELECTROLYZER_SUPPLY_UTILITIES = ("LiquidConduit",)
+
+
+def electrolyzer_supply_offered() -> bool:
+    """True when the action catalog can lay the pipe an Electrolyzer needs."""
+
+    return all(utility in UTILITY_BLUEPRINT_ALLOWLIST for utility in ELECTROLYZER_SUPPLY_UTILITIES)
+
+
+def building_status(state: Optional[Mapping[str, Any]]) -> Dict[str, Dict[str, Optional[int]]]:
+    """Per placeable building: how many are built and how many are working.
+
+    ``built`` is the observed completed-prefab count.  ``operational`` counts the
+    life-support instances the game reports as operational, and is only given for
+    buildings that reader tracks while its quality is observed.  ``None`` means
+    not observed, which is deliberately distinct from a measured zero.
+    """
+
+    snapshot = dict(state) if isinstance(state, Mapping) else {}
+    result: Dict[str, Dict[str, Optional[int]]] = {}
+    for building_def_id, path in BUILDING_COUNT_PATHS.items():
+        count = read_contract_field(
+            snapshot, path, BUILDING_COMPLETED_COUNT_CONTRACT_ID, allowed_statuses=("observed",)
+        )
+        built = None
+        if not count.blockers and isinstance(count.value, int) and not isinstance(count.value, bool):
+            built = count.value
+        result[building_def_id] = {"built": built, "operational": None}
+    if field_status(snapshot, "life_support_buildings") != "observed":
+        return result
+    tracked = safe_get(snapshot, "life_support_buildings.tracked_prefab_ids")
+    instances = safe_get(snapshot, "life_support_buildings.instances")
+    if not isinstance(tracked, Sequence) or isinstance(tracked, (str, bytes)):
+        return result
+    if not isinstance(instances, Sequence) or isinstance(instances, (str, bytes)):
+        return result
+    for building_def_id in result:
+        if building_def_id not in tracked:
+            continue
+        working = 0
+        for entry in instances:
+            if isinstance(entry, Mapping) and entry.get("prefab_id") == building_def_id:
+                if entry.get("operational") is True:
+                    working += 1
+        result[building_def_id]["operational"] = working
+    return result
+
+
+def _idle_built_buildings(status: Mapping[str, Mapping[str, Optional[int]]]) -> Dict[str, int]:
+    """Buildings that exist but of which not a single one is working.
+
+    Placing another of these adds a second idle building rather than output; the
+    reason one is idle (missing consumable, power or pipe) has to be fixed first.
+    """
+
+    idle: Dict[str, int] = {}
+    for building_def_id, item in status.items():
+        built = item.get("built")
+        operational = item.get("operational")
+        if isinstance(built, int) and built > 0 and operational == 0:
+            idle[building_def_id] = built
+    return idle
 
 
 def _pause_candidate(snapshot: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
@@ -918,8 +997,22 @@ def generate_candidates(
                 cancel = _cancel_blueprint_candidate(snapshot)
                 if cancel is not None:
                     items.append(cancel)
+            # A building that exists but of which none works is not offered again:
+            # Phase 2 built six identical Electrolyzers that could never run, because
+            # the controller could not see the first one (B14).  The Electrolyzer is
+            # withheld outright while no liquid pipe can be laid for it.
+            idle = _idle_built_buildings(building_status(snapshot))
+            for building_def_id, count in sorted(idle.items()):
+                notes.append(f"built_not_operational:{building_def_id}:{count}")
+            supply = electrolyzer_supply_offered()
+            if not supply:
+                notes.append("electrolyzer_needs_power_and_liquid_pipe")
             for building_def_id, prefix, label in BUILDING_CANDIDATES:
                 if starved is not None and _building_needs_consumable(building_def_id, starved):
+                    continue
+                if building_def_id in idle:
+                    continue
+                if building_def_id == "Electrolyzer" and not supply:
                     continue
                 note = oxygen_note if building_def_id in OXYGEN_BUILDING_DEF_IDS else ""
                 building = _building_candidate(snapshot, building_def_id, prefix, label, note)
