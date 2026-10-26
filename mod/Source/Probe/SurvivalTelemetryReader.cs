@@ -205,6 +205,7 @@ namespace OniAiProbeMod.Probe
                 { "polluted_water_kg", null },
                 { "salt_water_kg", null },
                 { "brine_kg", null },
+                { "algae_kg", null },
                 { "valid_cell_count", null },
                 { "candidate_cell_count", null },
                 { "scanned_candidate_cell_count", null },
@@ -321,6 +322,9 @@ namespace OniAiProbeMod.Probe
                             case SimHashes.Brine:
                                 scan.Brine += mass;
                                 break;
+                            case SimHashes.Algae:
+                                scan.Algae += mass;
+                                break;
                         }
 
                         // A valid grid cell can still be vacuum.  Temperature
@@ -429,6 +433,7 @@ namespace OniAiProbeMod.Probe
             cells["polluted_water_kg"] = RoundMass(completed.PollutedWater);
             cells["salt_water_kg"] = RoundMass(completed.SaltWater);
             cells["brine_kg"] = RoundMass(completed.Brine);
+            cells["algae_kg"] = RoundMass(completed.Algae);
             cells["valid_cell_count"] = completed.ScannedValidCellCount;
             cells["aggregate_available"] = true;
             cells["aggregate_scan_generation"] = completed.Generation;
@@ -466,7 +471,8 @@ namespace OniAiProbeMod.Probe
                 "clean_water_kg",
                 "polluted_water_kg",
                 "salt_water_kg",
-                "brine_kg"
+                "brine_kg",
+                "algae_kg"
             };
             foreach (string field in massFields)
             {
@@ -1304,6 +1310,12 @@ namespace OniAiProbeMod.Probe
             internal double PollutedWater { get; set; }
             internal double SaltWater { get; set; }
             internal double Brine { get; set; }
+            // The consumable the placeable oxygen buildings request.  It is a
+            // solid, so it never appears in the gas/liquid fields above, and the
+            // world inventory only counts pickupables: without this the colony
+            // could not tell "no algae exists" from "nobody fetched it"
+            // (2026-10-26 rounds 33-36).
+            internal double Algae { get; set; }
             internal double MinimumKelvin { get; set; }
             internal double MaximumKelvin { get; set; }
             internal bool Complete { get; set; }

@@ -118,6 +118,19 @@ namespace OniAiProbeMod.Probe
                 });
             }
 
+            // A timelapse screenshot queued for a world that is no longer loaded
+            // never completes, and the stuck queue freezes the simulation clock
+            // (2026-10-25 rounds 13, 15, 17).  Report only the transitions so the
+            // event log stays small.
+            bool? timelapseEnforced = TimelapseGuard.Tick(Time.unscaledTime);
+            if (timelapseEnforced.HasValue && timelapseEnforced.Value)
+            {
+                ProbeWriter.WriteEvent("timelapse_guard_enforced", new Dictionary<string, object>
+                {
+                    { "timelapse", TimelapseGuard.Describe() }
+                });
+            }
+
             if (ProbeWriter.HasSafetyFault)
             {
                 StopControllers();

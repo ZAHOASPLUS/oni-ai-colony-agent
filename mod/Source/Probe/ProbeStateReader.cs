@@ -31,6 +31,8 @@ namespace OniAiProbeMod.Probe
         private const int CompletedTechLimit = 512;
         private const int TechIdLengthLimit = 128;
         private const int BlueprintCandidateLimit = 32;
+        /// <summary>The duplicant navigation grid's id in the game's Pathfinding registry.</summary>
+        private const string MinionNavGridId = "MinionNavGrid";
         private const int BlueprintTrackedCellLimit = 256;
         private const int BlueprintCandidateRefreshSeconds = 30;
         private const double BlueprintCandidateScanBudgetMs = 10.0;
@@ -45,7 +47,19 @@ namespace OniAiProbeMod.Probe
             "Ladder",
             "Wire",
             "MineralDeoxidizer",
-            "AlgaeHabitat"
+            "AlgaeHabitat",
+            // 2026-10-26: the visible world holds no algae, so both algae-fed
+            // oxygen producers are dead ends here, but it does hold about 5.5 t
+            // of water.  The Electrolyser is the only water-fed oxygen producer,
+            // so it joins the list; whether it can actually be fed without a
+            // liquid pipe is exactly what the loop should find out.
+            "Electrolyzer",
+            // The colony ran out of stored food entirely (food_kcal 0, observed)
+            // and the catalog had no way to make any.  A Farm Tile needs a seed,
+            // a Microbe Musher needs dirt and water; the game's own research lock
+            // and placement rules decide which of them is actually usable.
+            "FarmTile",
+            "MicrobeMusher"
         };
 
         private static Dictionary<string, object> cachedBuildings;
@@ -224,6 +238,12 @@ namespace OniAiProbeMod.Probe
                 "functional_buildings",
                 FunctionalBuildingTelemetryReader.Read,
                 metrics);
+            // Always on: filtered to a tiny prefab allowlist, so it costs a few
+            // buildings rather than the whole world.
+            Dictionary<string, object> lifeSupportBuildings = Timed(
+                "life_support_buildings",
+                FunctionalBuildingLifeSupportTelemetryReader.Read,
+                metrics);
             bool extended = extendedBuildingTelemetry;
             Dictionary<string, object> functionalBuildingGeometry = extended
                 ? Timed("functional_building_geometry", FunctionalBuildingGeometryTelemetryReader.Read, metrics)
@@ -272,6 +292,7 @@ namespace OniAiProbeMod.Probe
                 research,
                 buildings,
                 functionalBuildings,
+                lifeSupportBuildings,
                 functionalBuildingGeometry,
                 functionalBuildingPorts,
                 functionalBuildingOccupancy,
@@ -397,7 +418,13 @@ namespace OniAiProbeMod.Probe
                 { "quality", quality },
                 { "read_metrics_ms", metrics },
                 // P0-1: lets tooling assert that a validation session cannot autosave.
-                { "autosave", AutosaveGuard.Describe() }
+                { "autosave", AutosaveGuard.Describe() },
+                // Lets tooling assert that no timelapse screenshot queue can wedge
+                // the simulation clock during a validation session.
+                { "timelapse", TimelapseGuard.Describe() },
+                // Cheap and always on: a handful of life-support buildings, and the
+                // only way to tell why one is not working.
+                { "life_support_buildings", lifeSupportBuildings }
             };
             Dictionary<string, object>[] extendedPayloads =
             {
@@ -1519,6 +1546,15 @@ namespace OniAiProbeMod.Probe
                 { "visible", Grid.IsVisible(cell) },
                 { "solid", Grid.Solid[cell] },
                 { "foundation", Grid.Foundation[cell] },
+                // Whether a duplicant can actually stand here, and on the tile
+                // below.  Grid.Foundation only says whether THIS tile is solid
+                // terrain, so it cannot answer "is there a floor under this
+                // placement" -- reading it that way produced a wrong "no floor"
+                // conclusion (2026-10-26 rounds 46-47).  A placed blueprint whose
+                // cells are unreachable never gets a construction chore, which is
+                // what left every duplicant idle beside a stalled placement.
+                { "nav_floor", NavFloorValid(cell, worldId) },
+                { "nav_floor_below", NavFloorValid(Grid.CellBelow(cell), worldId) },
                 { "element_id", elementId },
                 { "mass_kg", mass },
                 { "damage", damage },
@@ -1754,6 +1790,28 @@ namespace OniAiProbeMod.Probe
                 rootCell = 0;
                 footprintCells = new List<object>();
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Whether a duplicant can stand on this cell (``null`` when unreadable).
+        /// </summary>
+        private static object NavFloorValid(int cell, int worldId)
+        {
+            try
+            {
+                if (!Grid.IsValidCellInWorld(cell, worldId))
+                {
+                    return null;
+                }
+                Pathfinding pathfinding = Pathfinding.Instance;
+                NavGrid grid = pathfinding == null ? null : pathfinding.GetNavGrid(MinionNavGridId);
+                NavTable table = grid == null ? null : grid.NavTable;
+                return table == null ? (object)null : table.IsValid(cell, NavType.Floor);
+            }
+            catch
+            {
+                return null;
             }
         }
 
@@ -2818,6 +2876,7 @@ namespace OniAiProbeMod.Probe
             Dictionary<string, object> research,
             Dictionary<string, object> buildings,
             Dictionary<string, object> functionalBuildings,
+            Dictionary<string, object> lifeSupportBuildings,
             Dictionary<string, object> functionalBuildingGeometry,
             Dictionary<string, object> functionalBuildingPorts,
             Dictionary<string, object> functionalBuildingOccupancy,
@@ -2901,6 +2960,26 @@ namespace OniAiProbeMod.Probe
                 functionalBuildingCompleteness,
                 "oni.qc.buildings.functional_instances.v1");
             functionalBuildingQuality["captured_at"] = "functional_buildings.captured_at";
+            // The always-on life-support read is a small allowlisted subset, so it
+            // reports its own quality entry.
+            string lifeSupportStatus = ReadMetadata(lifeSupportBuildings, "status", "unsupported");
+            string lifeSupportSource = ReadMetadata(
+                lifeSupportBuildings,
+                "source",
+                FunctionalBuildingLifeSupportTelemetryReader.Source);
+            object lifeSupportComplete = lifeSupportBuildings.ContainsKey("complete")
+                ? lifeSupportBuildings["complete"]
+                : null;
+            string lifeSupportCompleteness =
+                lifeSupportComplete is bool && (bool)lifeSupportComplete ? "complete" : "unknown";
+            Dictionary<string, object> lifeSupportQuality = Quality(
+                lifeSupportStatus,
+                lifeSupportSource,
+                "life_support_building_working_instances",
+                "instance_records",
+                "active_world",
+                lifeSupportCompleteness,
+                FunctionalBuildingLifeSupportTelemetryReader.Schema);
             string functionalBuildingGeometryStatus = ReadMetadata(
                 functionalBuildingGeometry,
                 "_status",
@@ -3293,6 +3372,7 @@ namespace OniAiProbeMod.Probe
                 { "buildings._source", Quality(buildingSource == "unavailable" ? "unsupported" : "observed", buildingSource) },
                 { "buildings._scanned", Quality(buildingSource == "unavailable" ? "unsupported" : "observed", buildingSource) },
                 { "functional_buildings", functionalBuildingQuality },
+                { "life_support_buildings", lifeSupportQuality },
                 { "functional_building_geometry", functionalBuildingGeometryQuality },
                 { "functional_building_ports", functionalBuildingPortsQuality },
                 { "functional_building_occupancy", functionalBuildingOccupancyQuality },
@@ -3482,6 +3562,9 @@ namespace OniAiProbeMod.Probe
                     "can_place_wire",
                     "can_place_mineral_deoxidizer",
                     "can_place_algae_habitat",
+                    "can_place_electrolyzer",
+                    "can_place_farm_tile",
+                    "can_place_microbe_musher",
                     "blueprint_present",
                     "blueprint_instance_id",
                     "blueprint_prefab_id",

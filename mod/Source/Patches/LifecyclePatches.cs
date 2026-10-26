@@ -35,8 +35,60 @@ namespace OniAiProbeMod.Patches
             PatchFirst(harmony, "Game", StopMethods, nameof(OnGameStopped), "game_stop");
             PatchSaveLifecycle(harmony);
             PatchAutosaveSuppression(harmony);
+            PatchTimelapseSuppression(harmony);
             PatchPauseLedger(harmony);
             PatchModDialogSuppression(harmony);
+        }
+
+        // A timelapse screenshot queued for a world that is no longer loaded never
+        // completes, so the queue never drains and the simulation clock stops
+        // advancing (2026-10-25 rounds 13, 15, 17).  The guard must not touch the
+        // queue itself: clearing it while the Render coroutine iterates by index
+        // threw ArgumentOutOfRangeException and ended the session (round 19).  The
+        // prefix simply refuses Timelapser.Update, so no render is ever started.
+        private static void PatchTimelapseSuppression(Harmony harmony)
+        {
+            if (!TimelapseGuard.IsActive)
+            {
+                return;
+            }
+            try
+            {
+                MethodInfo target = AccessTools.Method(typeof(Timelapser), "Update", Type.EmptyTypes);
+                if (target == null)
+                {
+                    ProbeWriter.WriteError("patch_timelapse_suppression", "Timelapser.Update() was not found.");
+                    Debug.LogWarning(Mod.LogPrefix + " Timelapser.Update() was not found");
+                    return;
+                }
+
+                harmony.Patch(
+                    target,
+                    prefix: new HarmonyMethod(AccessTools.Method(typeof(LifecyclePatches), nameof(OnTimelapserUpdate))));
+                TimelapseGuard.MarkSuppressionPatchInstalled();
+                ProbeWriter.WriteEvent("probe_patch_registered", new Dictionary<string, object>
+                {
+                    { "target", "Timelapser.Update" },
+                    { "patch", "timelapse_suppression" }
+                });
+            }
+            catch (Exception ex)
+            {
+                ProbeWriter.WriteError("patch_timelapse_suppression", ex);
+            }
+        }
+
+        private static bool OnTimelapserUpdate()
+        {
+            try
+            {
+                return !TimelapseGuard.ShouldSuppressUpdate();
+            }
+            catch
+            {
+                // Only installed for a validation process: refuse on any doubt.
+                return false;
+            }
         }
 
         // A validation process loads a clone that was saved under a different

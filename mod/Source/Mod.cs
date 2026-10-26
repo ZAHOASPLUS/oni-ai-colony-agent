@@ -24,6 +24,11 @@ namespace OniAiProbeMod
                 // rotation, which deletes the user's own colony autosaves.
                 AutosaveGuard.Activate("startup_binding_accepted");
                 Debug.Log(LogPrefix + " Autosave disabled for this validation process");
+                // A timelapse screenshot queued for a world that is no longer
+                // loaded wedges the simulation clock, which an autonomous run
+                // depends on.
+                TimelapseGuard.Activate("startup_binding_accepted");
+                Debug.Log(LogPrefix + " Timelapse screenshot queue disabled for this validation process");
             }
             ProbeSession.InitializeProcess();
             ProbeWriter.WriteEvent("probe_loaded", new Dictionary<string, object>

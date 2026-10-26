@@ -1791,9 +1791,25 @@ namespace OniAiProbeMod.Commands
                 {
                     return "set_paused must expect game.paused to equal args.paused.";
                 }
-                if (!paused && !ContainsObservedEquality(preconditions, "alerts", new JArray()))
+                if (!paused)
                 {
-                    return "set_paused=false requires a complete observed empty canonical alert set.";
+                    // Resuming is refused while a canonical alert is open, because
+                    // an alert means something is already wrong.  Onset alerts are
+                    // the exception: they mean a duplicant's current need is just
+                    // starting to be unmet (breathable air, a toilet, rest), no
+                    // duplicant is taking harm, and the need clears by itself once
+                    // the game runs and the duplicant walks there.  Treating them as
+                    // hard blockers deadlocked the autonomous loop: the game stayed
+                    // paused, the duplicant could not move, the alert never cleared,
+                    // and every resume was refused (2026-10-25 rounds 9-11).
+                    // Genuine emergencies (suffocation, starvation, incapacitation,
+                    // hypothermia/hyperthermia, sickness, ...) still refuse it.
+                    if (!ContainsObservedEquality(preconditions, "alerts", new JArray())
+                        && !ContainsOnlyOnsetAlerts(preconditions))
+                    {
+                        return "set_paused=false requires an observed empty canonical alert set, "
+                            + "or one holding onset alerts only (" + string.Join(",", OnsetAlertIds) + ").";
+                    }
                 }
             }
             else if (action == "set_research")
@@ -2958,6 +2974,19 @@ namespace OniAiProbeMod.Commands
                 transientWitnessFailures = 0;
                 if (!confirmingExists)
                 {
+                    // The Bridge may have resolved this command outside
+                    // ``confirming``: when it can decide the outcome itself (the
+                    // declared effect never appeared) it moves the record to
+                    // ``rejected`` with its decision embedded.  That is a
+                    // resolution, not a disappearance.  Without this check the
+                    // Bridge's own terminal decision latched the executor for the
+                    // rest of the session, so every later command expired
+                    // unexecuted (2026-10-26 round 39).
+                    if (TryAcceptBridgeTerminalDecision(dirs, pendingWitnessId))
+                    {
+                        pendingWitnessId = null;
+                        return;
+                    }
                     SetSessionLatch();
                     string missingReason = "The executed command disappeared before trusted snapshot confirmation.";
                     PauseForUnknownOutcome();
@@ -2994,6 +3023,68 @@ namespace OniAiProbeMod.Commands
                 pendingWitnessId = null;
                 transientWitnessFailures = 0;
             }
+        }
+
+        /// <summary>
+        /// True when the Bridge recorded a terminal decision for this command.
+        ///
+        /// A confirmation the Bridge can decide itself (the declared effect never
+        /// appeared) moves the record from ``confirming`` to ``rejected`` with the
+        /// decision embedded.  The executor must read that as a resolution rather
+        /// than as a command that disappeared, otherwise the Bridge's own decision
+        /// latches the mutation safety latch and no later command can ever run
+        /// (2026-10-26 round 39).
+        /// </summary>
+        private static bool TryAcceptBridgeTerminalDecision(CommandDirectories dirs, string commandId)
+        {
+            if (string.IsNullOrEmpty(commandId))
+            {
+                return false;
+            }
+
+            string[] stages = { dirs.Rejected, dirs.Done };
+            foreach (string stage in stages)
+            {
+                string path = Path.Combine(stage, commandId + ".json");
+                if (!File.Exists(path))
+                {
+                    continue;
+                }
+                try
+                {
+                    JObject record = ParseObject(File.ReadAllText(path, Encoding.UTF8));
+                    JObject confirmation = record["confirmation"] as JObject;
+                    if (confirmation == null)
+                    {
+                        continue;
+                    }
+                    if (!string.Equals(
+                            ReadString(confirmation, "command_id"),
+                            commandId,
+                            StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+                    string status = ReadString(confirmation, "confirmation_status");
+                    if (!string.Equals(status, "rejected", StringComparison.Ordinal) &&
+                        !string.Equals(status, "snapshot_confirmed", StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+                    ProbeWriter.WriteEvent("command_terminal_decision_accepted", new Dictionary<string, object>
+                    {
+                        { "command_id", commandId },
+                        { "confirmation_status", status },
+                        { "stage", Path.GetFileName(stage) }
+                    });
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    ProbeWriter.WriteError("command_terminal_decision_read", ex);
+                }
+            }
+            return false;
         }
 
         private static void VerifyPendingCommands(float now)
@@ -3864,6 +3955,56 @@ namespace OniAiProbeMod.Commands
             return false;
         }
 
+        private static readonly string[] OnsetAlertIds = new[]
+        {
+            CanonicalAlertCatalog.Exhaustion,
+            CanonicalAlertCatalog.Hyperthermia,
+            CanonicalAlertCatalog.Hypothermia,
+            CanonicalAlertCatalog.LowOxygen,
+            CanonicalAlertCatalog.UrgentToilet,
+        };
+
+        /// <summary>
+        /// True when the alerts precondition is observed and holds only onset
+        /// alerts, i.e. needs that clear by themselves once the game runs.
+        /// </summary>
+        private static bool ContainsOnlyOnsetAlerts(JArray conditions)
+        {
+            foreach (JObject condition in conditions.Children<JObject>())
+            {
+                if (!string.Equals(ReadString(condition, "path"), "alerts", StringComparison.Ordinal) ||
+                    !string.Equals(ReadString(condition, "op"), "eq", StringComparison.Ordinal) ||
+                    !IsObservedOnly(condition["quality"]) ||
+                    !CommandFieldContracts.DeclarationMatches(condition, out _))
+                {
+                    continue;
+                }
+
+                if (condition["value"]?.Type != JTokenType.Array)
+                {
+                    continue;
+                }
+
+                bool onlyOnset = true;
+                foreach (JToken item in condition["value"].Children())
+                {
+                    if (item.Type != JTokenType.String ||
+                        Array.IndexOf(OnsetAlertIds, item.ToString()) < 0)
+                    {
+                        onlyOnset = false;
+                        break;
+                    }
+                }
+
+                if (onlyOnset)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         private static string ValidateDigConditionContract(
             JObject command,
             string action,
@@ -4512,7 +4653,15 @@ namespace OniAiProbeMod.Commands
         {
             "Ladder",
             "MineralDeoxidizer",
-            "AlgaeHabitat"
+            "AlgaeHabitat",
+            // The only water-fed oxygen producer.  The world holds no algae but
+            // about 5.5 t of water, so this is the colony's remaining oxygen
+            // route (2026-10-26 round 38).
+            "Electrolyzer",
+            // Food production, which the catalog lacked entirely while the
+            // colony's stored food reached zero (2026-10-26 round 42).
+            "FarmTile",
+            "MicrobeMusher"
         };
 
         private static bool IsAllowlistedBuildingBlueprint(string defId)
