@@ -30,7 +30,9 @@ namespace LifecycleCallbacksHarness
             "OnSaveFinished",
             "OnAutoSaveRequested",
             "OnPauseChanging",
-            "OnPauseChanged"
+            "OnPauseChanged",
+            // TimelapseGuard's Timelapser.Update prefix (2026-10-25 round 18).
+            "OnTimelapserUpdate"
         };
 
         private static int Main()

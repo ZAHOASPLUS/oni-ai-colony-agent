@@ -24,10 +24,22 @@ if str(ROOT) not in sys.path:
 from agent import llm_planner  # noqa: E402
 from scripts import verify_llm_fallback as fixtures  # noqa: E402
 
+# Every variable the model configuration reads, including the key aliases added
+# for the Cline-pass gateway (2026-10-25).  Without them a machine with
+# CLINE_API_KEY set leaked its real key and endpoint into these tests, which then
+# failed and printed the key in the assertion message.
+CONFIG_ENVIRONMENT_NAMES = frozenset(
+    llm_planner._KEY_ENVIRONMENT_NAMES
+    + llm_planner._BASE_URL_ENVIRONMENT_NAMES
+    + llm_planner._MODEL_ENVIRONMENT_NAMES
+    + llm_planner._WIRE_API_ENVIRONMENT_NAMES
+    + llm_planner._PROVIDER_ENVIRONMENT_NAMES
+    + llm_planner._REQUEST_TIMEOUT_ENVIRONMENT_NAMES
+)
 CLEAN_ENV = {
     name: value
     for name, value in os.environ.items()
-    if not name.startswith(("OPENAI_", "ONI_AI_"))
+    if not name.startswith(("OPENAI_", "ONI_AI_")) and name not in CONFIG_ENVIRONMENT_NAMES
 }
 
 

@@ -427,8 +427,10 @@ namespace OniAiProbeMod.Contracts
                     "field_native",
                     "active_world_tracked_cells",
                     "complete_for_tracked_cell");
+                // Electrolyzer was the example until it was allowlisted (2026-10-26
+                // round 44); LiquidPump is still outside the allowlist.
                 JObject unlistedCatalog = State(
-                    "blueprints.catalog.Electrolyzer.available",
+                    "blueprints.catalog.LiquidPump.available",
                     true,
                     Entry(
                         CommandFieldContracts.BlueprintCatalogId,
@@ -442,7 +444,7 @@ namespace OniAiProbeMod.Contracts
                     "reject_unlisted_building_catalog_path",
                     unlistedCatalog,
                     Condition(
-                        "blueprints.catalog.Electrolyzer.available",
+                        "blueprints.catalog.LiquidPump.available",
                         true,
                         CommandFieldContracts.BlueprintCatalogId,
                         "observed"));
