@@ -47,6 +47,13 @@ namespace OniAiProbeMod.Contracts
         internal const string GameBuildModeId = "oni.qc.game.build_mode.v1";
         internal const string ResearchCurrentId = "oni.qc.research.current.v1";
         internal const string ResearchCompleteId = "oni.qc.research.complete.v1";
+        // Completed-prefab counts (buildings.oxygen_diffuser/outhouse/
+        // manual_generator) are diagnostic only: the Bridge's rules and the
+        // model loop's colony summary consume them and no command may bind
+        // them, so TryResolve deliberately does not know their paths.  Their
+        // capture binding is buildings.captured_at (the reader caches for
+        // 30 s), which the snapshot.ts binding required here cannot express.
+        internal const string BuildingCompletedCountId = "oni.qc.buildings.completed_prefab_count.v1";
         internal const string RegisteredFoodId = "oni.qc.resources.registered_food.v1";
         internal const string CanonicalAlertsId = "oni.qc.alerts.canonical.v1";
         internal const string ActiveWorldDuplicantCountId = "oni.qc.duplicants.active_world_count.v1";
@@ -65,6 +72,7 @@ namespace OniAiProbeMod.Contracts
         // Db.Techs holds roughly 120 technologies; the bound only guards the wire size.
         private const int MaxCompletedTechIds = 512;
         internal const string ResearchCompleteSource = "Db.Techs+Research.Get+TechInstance.IsComplete";
+        internal const string BuildingCompletedCountSource = "Components.BuildingCompletes.GetWorldItems(activeWorldId)";
         private const string FoodSource =
             "ClusterManager.activeWorld.worldInventory.GetPickupables(GameTags.Edible)+!GameTags.StoredPrivate";
         internal const string DuplicantIdleSource =

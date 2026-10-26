@@ -33,7 +33,7 @@ import urllib.request
 from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from agent.action_policy import action_policy_hash, action_policy_is_valid
-from agent.candidates import WAIT_CANDIDATE_ID, display_text, generate_candidates
+from agent.candidates import WAIT_CANDIDATE_ID, display_text, generate_candidates, oxygen_balance
 from agent.colony_plan import TERMINAL_PLAN_STATUSES, load_active_plan
 from agent.command_custody import publish_pending_command, read_bytes_share_delete
 from agent.command_queue import (
@@ -153,6 +153,9 @@ SUMMARY_FIELDS = (
     "report_counters.current.report_day",
     "report_counters.current.oxygen_created.positive_kg",
     "report_counters.current.oxygen_created.negative_kg",
+    # Completed Oxygen Diffusers (MineralDeoxidizer) in the active world; the
+    # interpreted balance is colony.oxygen_balance (agent.candidates).
+    "buildings.oxygen_diffuser",
     "power.generator_count",
     "power.battery_count",
     "power.active_load_watts",
@@ -184,7 +187,7 @@ def colony_summary(state: Mapping[str, Any]) -> Dict[str, Any]:
                     },
                 }
             )
-    return {"fields": fields, "duplicants": duplicants}
+    return {"fields": fields, "duplicants": duplicants, "oxygen_balance": oxygen_balance(snapshot)}
 
 
 def _instance_order(entry: Mapping[str, Any]) -> int:
@@ -229,6 +232,9 @@ def build_choice_payload(
             "A chosen action still needs local human approval and is verified against the game.",
             "recent_outcomes lists earlier choices and whether the game confirmed their effect.",
             "colony.fields holds only values the game observed; null means not observed.",
+            "colony.oxygen_balance.*_net_kg is oxygen made minus oxygen breathed per cycle from the game's report; "
+            "a negative value means the colony is losing breathable air, and a candidate that places an oxygen "
+            "producer (Oxygen Diffuser, Algae Terrarium) addresses it before an alert fires.",
             "rule_findings lists open findings of the local safety rules (informational).",
         ],
     }

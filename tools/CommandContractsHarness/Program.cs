@@ -65,6 +65,28 @@ namespace OniAiProbeMod.Contracts
                 researchContains["op"] = "contains";
                 Reject("reject_string_contains_operand", research, researchContains);
 
+                JObject buildingCount = State(
+                    "buildings.oxygen_diffuser",
+                    0,
+                    Entry(
+                        CommandFieldContracts.BuildingCompletedCountId,
+                        CommandFieldContracts.BuildingCompletedCountSource,
+                        "completed_prefab_instance_count",
+                        "count",
+                        "active_world",
+                        "observed",
+                        "complete"));
+                // The completed-prefab count is diagnostic: the Bridge consumes it,
+                // no command may bind it, and TryResolve refuses the path.
+                Reject(
+                    "reject_building_count_precondition",
+                    buildingCount,
+                    Condition(
+                        "buildings.oxygen_diffuser",
+                        0,
+                        CommandFieldContracts.BuildingCompletedCountId,
+                        "observed"));
+
                 JObject researchComplete = State(
                     "research.complete",
                     new JArray("FarmingTech", "ImprovedOxygen"),

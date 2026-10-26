@@ -1,9 +1,11 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using OniAiProbeMod.Commands;
+using OniAiProbeMod.Probe;
 
 namespace ActionExecutorHarness
 {
@@ -41,8 +43,55 @@ namespace ActionExecutorHarness
                     // A check that needs live game state (Grid, Db) throws here;
                     // report it per case instead of failing the whole run.
                     var result = new JObject { ["name"] = item["name"] };
-                    result["shape_error"] = Invoke(shapes, new object[] { command, action }, result, "shape_exception");
+                    string shapeError = Invoke(shapes, new object[] { command, action }, result, "shape_exception");
+                    result["shape_error"] = shapeError;
+                    result["full_shape_validated"] = shapeError == null && result.Property("shape_exception") == null;
                     result["receipt_error"] = Invoke(receipt, new object[] { command, policy }, result, "receipt_exception");
+                    // This is a separate, pure contract check, never a substitute
+                    // for the full shape/native BuildingDef validation above.
+                    if (action == "place_building_blueprint")
+                    {
+                        MethodInfo cellContract = typeof(ActionExecutor).GetMethod("ValidateBlueprintPlaceCellContract", Static);
+                        if (cellContract == null) throw new MissingMethodException("Blueprint place cell contract not found");
+                        string defId = (string)command["args"]["building_def_id"];
+                        var cellResults = new JArray();
+                        foreach (JToken cell in (JArray)command["args"]["cells"])
+                        {
+                            var cellResult = new JObject { ["cell"] = cell };
+                            cellResult["error"] = Invoke(cellContract, new object[] {
+                                (int)cell, defId, false, ProbeStateReader.BlueprintCanPlaceField(defId),
+                                (JArray)command["args"]["material_tags"],
+                                (JArray)command["preconditions"], (JArray)command["expected_effects"]
+                            }, cellResult, "exception");
+                            cellResults.Add(cellResult);
+                        }
+                        result["cell_contracts"] = cellResults;
+                    }
+                    else if (action == "cancel_building_blueprint")
+                    {
+                        MethodInfo cellContract = typeof(ActionExecutor).GetMethod("ValidateBlueprintCancelCellContract", Static);
+                        Type targetType = typeof(ActionExecutor).GetNestedType("BlueprintCancelTarget", BindingFlags.NonPublic);
+                        if (cellContract == null || targetType == null) throw new MissingMethodException("Blueprint cancel contract not found");
+                        var cellResults = new JArray();
+                        foreach (JObject target in (JArray)command["args"]["targets"])
+                        {
+                            int cell = (int)target["cell"];
+                            string prefabPath = "cells.by_id.cell_" + cell + ".blueprint_prefab_id";
+                            string defId = (string)((JArray)command["preconditions"])
+                                .OfType<JObject>().Single(condition => (string)condition["path"] == prefabPath)["value"];
+                            object typedTarget = Activator.CreateInstance(targetType, true);
+                            targetType.GetField("Cell", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(typedTarget, cell);
+                            targetType.GetField("BlueprintInstanceId", BindingFlags.Instance | BindingFlags.NonPublic)
+                                .SetValue(typedTarget, (int)target["blueprint_instance_id"]);
+                            var cellResult = new JObject { ["cell"] = cell };
+                            cellResult["error"] = Invoke(cellContract, new object[] {
+                                typedTarget, defId, false, ProbeStateReader.BlueprintCanPlaceField(defId),
+                                (JArray)command["preconditions"], (JArray)command["expected_effects"]
+                            }, cellResult, "exception");
+                            cellResults.Add(cellResult);
+                        }
+                        result["cell_contracts"] = cellResults;
+                    }
                     results.Add(result);
                 }
                 Console.WriteLine(new JObject

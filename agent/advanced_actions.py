@@ -585,6 +585,7 @@ def build_cancel_building_blueprint_hint(
     targets: List[Dict[str, int]] = []
     preconditions = _blueprint_environment_conditions()
     effects: List[Dict[str, Any]] = []
+    common_prefab_id: str | None = None
     for cell in normalized_cells:
         values = _blueprint_cell_values(state, cell)
         instance_id = values["blueprint_instance_id"]
@@ -593,6 +594,13 @@ def build_cancel_building_blueprint_hint(
         prefab_id = values["blueprint_prefab_id"]
         if prefab_id not in BUILDING_BLUEPRINT_ALLOWLIST:
             raise ValueError(f"cell {cell} holds a blueprint outside the single-building allowlist.")
+        if common_prefab_id is None:
+            common_prefab_id = prefab_id
+        elif prefab_id != common_prefab_id:
+            raise ValueError(
+                "cancel_building_blueprint must bind one allowlisted observed "
+                "blueprint_prefab_id for every target."
+            )
         target, target_preconditions, target_effects = _build_blueprint_cancel_target_contract(
             state,
             cell=cell,

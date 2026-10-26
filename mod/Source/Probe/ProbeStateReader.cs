@@ -2448,6 +2448,10 @@ namespace OniAiProbeMod.Probe
                 { "_scanned", 0 },
                 { "_active_world_id", activeWorldId },
                 { "_source", "unavailable" },
+                // The counts are cached for BuildingRefreshSeconds; the
+                // quality entries bind this capture time, not snapshot.ts.
+                { "captured_at", currentTime.ToString("o", CultureInfo.InvariantCulture) },
+                { "_completeness", "unknown" },
                 { "_sample_ids", sampleIds },
                 { "_top_prefabs", new List<object>() }
             };
@@ -2506,6 +2510,7 @@ namespace OniAiProbeMod.Probe
             }
 
             counts["_scanned"] = scanned;
+            counts["_completeness"] = scanned >= EnumerationLimit ? "bounded" : "complete";
             counts["_top_prefabs"] = BuildTopPrefabs(prefabCounts);
             CacheBuildings(counts, activeWorldId, currentTime, BuildingRefreshSeconds);
             return counts;
@@ -2863,7 +2868,18 @@ namespace OniAiProbeMod.Probe
                 "_stressed_source",
                 CommandFieldContracts.DuplicantStressedSource);
             string buildingSource = ReadMetadata(buildings, "_source", "unavailable");
-            string buildingStatus = buildingSource == "unavailable" ? "unsupported" : "estimated";
+            string buildingCompleteness = ReadMetadata(buildings, "_completeness", "unknown");
+            // Only the typed active-world enumeration that finished under the
+            // limit is the complete count the Bridge's completed-prefab
+            // contract accepts; the reflection fallback and a bounded scan
+            // stay estimates.  Until 2026-09-30 every count was published as
+            // an estimate, so the "missing oxygen diffuser" rule and the model
+            // loop's oxygen balance never saw a zero.
+            bool buildingCountObserved =
+                buildingSource == "typed_active_world" && buildingCompleteness == "complete";
+            string buildingStatus = buildingSource == "unavailable"
+                ? "unsupported"
+                : (buildingCountObserved ? "observed" : "estimated");
             string functionalBuildingStatus = ReadMetadata(functionalBuildings, "_status", "unsupported");
             string functionalBuildingSource = ReadMetadata(
                 functionalBuildings,
@@ -3271,9 +3287,9 @@ namespace OniAiProbeMod.Probe
                     "save_research",
                     researchCompleteStatus == "observed" ? "complete" : "unknown",
                     CommandFieldContracts.ResearchCompleteId) },
-                { "buildings.oxygen_diffuser", Quality(buildingStatus, buildingSource) },
-                { "buildings.outhouse", Quality(buildingStatus, buildingSource) },
-                { "buildings.manual_generator", Quality(buildingStatus, buildingSource) },
+                { "buildings.oxygen_diffuser", BuildingCountQuality(buildingStatus, buildingSource, buildingCountObserved, buildingCompleteness) },
+                { "buildings.outhouse", BuildingCountQuality(buildingStatus, buildingSource, buildingCountObserved, buildingCompleteness) },
+                { "buildings.manual_generator", BuildingCountQuality(buildingStatus, buildingSource, buildingCountObserved, buildingCompleteness) },
                 { "buildings._source", Quality(buildingSource == "unavailable" ? "unsupported" : "observed", buildingSource) },
                 { "buildings._scanned", Quality(buildingSource == "unavailable" ? "unsupported" : "observed", buildingSource) },
                 { "functional_buildings", functionalBuildingQuality },
@@ -3675,6 +3691,24 @@ namespace OniAiProbeMod.Probe
             }
 
             return value;
+        }
+
+        private static Dictionary<string, object> BuildingCountQuality(
+            string status,
+            string source,
+            bool observed,
+            string completeness)
+        {
+            Dictionary<string, object> quality = Quality(
+                status,
+                observed ? CommandFieldContracts.BuildingCompletedCountSource : source,
+                "completed_prefab_instance_count",
+                "count",
+                "active_world",
+                observed ? "complete" : (completeness == "bounded" ? "bounded" : "unknown"),
+                CommandFieldContracts.BuildingCompletedCountId);
+            quality["captured_at"] = "buildings.captured_at";
+            return quality;
         }
 
         private static string ReadMetadata(Dictionary<string, object> mapping, string key, string fallback)

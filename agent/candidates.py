@@ -12,6 +12,7 @@ snapshots later can still be matched to the identical contract.
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
@@ -24,13 +25,14 @@ from agent.advanced_actions import (
 from agent.canonical_hash import canonical_hash
 from agent.field_contracts import (
     ALERTS_CANONICAL_CONTRACT_ID,
+    BUILDING_COMPLETED_COUNT_CONTRACT_ID,
     GAME_PAUSED_CONTRACT_ID,
     RESEARCH_COMPLETE_CONTRACT_ID,
     RESEARCH_CURRENT_CONTRACT_ID,
     build_condition,
     read_contract_field,
 )
-from agent.state_quality import safe_get
+from agent.state_quality import field_status, safe_get
 
 
 CANDIDATE_SET_SCHEMA = "oni.action-candidates.v1"
@@ -60,10 +62,16 @@ MAX_RESEARCH_CANDIDATES = 2
 # only for a researched building with materials), then a Ladder.  Each entry
 # is (building_def_id, candidate id prefix, label shown to the model).
 BUILDING_CANDIDATES = (
-    ("MineralDeoxidizer", "oxygen_diffuser", "Oxygen Diffuser (MineralDeoxidizer, turns algae into oxygen)"),
-    ("AlgaeHabitat", "algae_terrarium", "Algae Terrarium (AlgaeHabitat, turns algae and water into oxygen)"),
+    ("MineralDeoxidizer", "oxygen_diffuser", "Oxygen Diffuser (MineralDeoxidizer, algae to oxygen)"),
+    ("AlgaeHabitat", "algae_terrarium", "Algae Terrarium (AlgaeHabitat, algae and water to oxygen)"),
     ("Ladder", "ladder", "Ladder"),
 )
+# The oxygen buildings carry the observed oxygen balance in their summary
+# (see oxygen_balance): the first live colonies breathed about four times what
+# they made and the model still waited, because the raw report counters in
+# the colony summary carried no interpretation (run m1-0930b).
+OXYGEN_BUILDING_DEF_IDS = frozenset({"MineralDeoxidizer", "AlgaeHabitat"})
+MAX_SUMMARY_CHARS = 200
 MAX_NAME_CHARS = 32
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
 
@@ -77,7 +85,7 @@ def display_text(value: Any, limit: int = MAX_NAME_CHARS) -> str:
 def _candidate(candidate_id: str, summary: str, hint: Dict[str, Any], *, risk: str = "low") -> Dict[str, Any]:
     return {
         "candidate_id": candidate_id,
-        "summary": summary[:160],
+        "summary": summary[:MAX_SUMMARY_CHARS],
         "action": hint["action"],
         "risk": risk,
         "hint": hint,
@@ -88,6 +96,77 @@ def _candidate(candidate_id: str, summary: str, hint: Dict[str, Any], *, risk: s
 def _observed(state: Mapping[str, Any], path: str, contract_id: str) -> Any:
     read = read_contract_field(state, path, contract_id, allowed_statuses=("observed",))
     return None if read.blockers else read.value
+
+
+def oxygen_balance(state: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """The colony's oxygen picture from observed fields only.
+
+    ``*_net_kg`` is the game's own report counter for oxygen made plus oxygen
+    breathed (the latter is negative) over the closed previous report epoch
+    and the open current one; ``oxygen_diffusers_built`` is the trustworthy
+    completed-prefab count.  Whatever the Probe did not observe is None, and
+    the assessment stays ``unobserved`` until at least one net value exists.
+    """
+
+    snapshot = dict(state) if isinstance(state, Mapping) else {}
+    previous_net = _observed_net_oxygen(snapshot, "previous_closed")
+    current_net = _observed_net_oxygen(snapshot, "current")
+    count = read_contract_field(
+        snapshot, "buildings.oxygen_diffuser", BUILDING_COMPLETED_COUNT_CONTRACT_ID, allowed_statuses=("observed",)
+    )
+    diffusers = None
+    if not count.blockers and isinstance(count.value, int) and not isinstance(count.value, bool):
+        diffusers = count.value
+    reference = previous_net if previous_net is not None else current_net
+    if reference is None:
+        assessment = "unobserved"
+    elif reference < 0:
+        assessment = "deficit"
+    elif reference > 0:
+        assessment = "surplus"
+    else:
+        assessment = "balanced"
+    return {
+        "previous_cycle_net_kg": previous_net,
+        "current_cycle_net_kg": current_net,
+        "oxygen_diffusers_built": diffusers,
+        "assessment": assessment,
+    }
+
+
+def _observed_net_oxygen(snapshot: Dict[str, Any], epoch: str) -> Optional[float]:
+    total = 0.0
+    for field in ("positive_kg", "negative_kg"):
+        path = f"report_counters.{epoch}.oxygen_created.{field}"
+        value = safe_get(snapshot, path)
+        if field_status(snapshot, path) != "observed" or isinstance(value, bool):
+            return None
+        if not isinstance(value, (int, float)):
+            return None
+        try:
+            number = float(value)
+        except OverflowError:
+            return None
+        if not math.isfinite(number):
+            return None
+        total += number
+        if not math.isfinite(total):
+            return None
+    return round(total, 1)
+
+
+def _oxygen_note(balance: Mapping[str, Any]) -> str:
+    """Short suffix for an oxygen-building summary; empty when nothing is observed."""
+
+    parts: List[str] = []
+    if balance.get("previous_cycle_net_kg") is not None:
+        parts.append(f"oxygen net {balance['previous_cycle_net_kg']:+.1f} kg last cycle")
+    elif balance.get("current_cycle_net_kg") is not None:
+        parts.append(f"oxygen net {balance['current_cycle_net_kg']:+.1f} kg so far this cycle")
+    built = balance.get("oxygen_diffusers_built")
+    if built is not None:
+        parts.append(f"{built} oxygen diffuser{'' if built == 1 else 's'} built")
+    return "; " + ", ".join(parts) if parts else ""
 
 
 def _pause_candidate() -> Dict[str, Any]:
@@ -222,7 +301,7 @@ def _research_candidates(state: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _building_candidate(
-    state: Dict[str, Any], building_def_id: str, prefix: str, label: str
+    state: Dict[str, Any], building_def_id: str, prefix: str, label: str, note: str = ""
 ) -> Optional[Dict[str, Any]]:
     """One blueprint of ``building_def_id`` on the lowest catalogued empty cell (deterministic)."""
 
@@ -244,7 +323,7 @@ def _building_candidate(
         material = display_text(materials[0], 40)
         return _candidate(
             f"{prefix}_{cell}",
-            f"Place one {label} blueprint at x={details.get('x')}, y={details.get('y')} built from {material}",
+            f"Place one {label} blueprint at x={details.get('x')}, y={details.get('y')} built from {material}{note}",
             hint,
             risk="medium",
         )
@@ -277,8 +356,10 @@ def generate_candidates(
         dig = _dig_candidate(snapshot)
         if dig is not None:
             items.append(dig)
+        oxygen_note = _oxygen_note(oxygen_balance(snapshot))
         for building_def_id, prefix, label in BUILDING_CANDIDATES:
-            building = _building_candidate(snapshot, building_def_id, prefix, label)
+            note = oxygen_note if building_def_id in OXYGEN_BUILDING_DEF_IDS else ""
+            building = _building_candidate(snapshot, building_def_id, prefix, label, note)
             if building is not None:
                 items.append(building)
         resume = _resume_candidate(snapshot)

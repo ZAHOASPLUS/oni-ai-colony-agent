@@ -38,7 +38,7 @@ from agent.field_contracts import (  # noqa: E402
     contract_quality_fixture,
 )
 from agent.llm_planner import ModelRequestError  # noqa: E402
-from agent.model_loop import CHOICE_SCHEMA, ModelLoop, colony_summary  # noqa: E402
+from agent.model_loop import CHOICE_SCHEMA, ModelLoop, build_choice_payload, colony_summary  # noqa: E402
 from bridge import oni_bridge  # noqa: E402
 from scripts import commit_command_approval  # noqa: E402
 from scripts import verify_bridge_reliability as fixtures  # noqa: E402
@@ -333,12 +333,23 @@ class ModelLoopTests(unittest.TestCase):
                      "report_counters.current.oxygen_created.negative_kg", "power.generator_count"):
             state["quality"][path] = {"status": "observed", "source": "fixture"}
         state["quality"]["power.battery_count"] = {"status": "error", "source": "fixture"}
-        fields = colony_summary(state)["fields"]
+        summary = colony_summary(state)
+        fields = summary["fields"]
         self.assertEqual(fields["report_counters.current.oxygen_created.negative_kg"], -127.0)
         self.assertEqual(fields["report_counters.current.report_day"], 6)
         self.assertEqual(fields["power.generator_count"], 1)
         self.assertIsNone(fields["power.battery_count"])  # reader error
         self.assertIsNone(fields["report_counters.previous_closed.oxygen_created.negative_kg"])  # no quality entry
+        # The interpreted balance uses the same observed-only inputs (the
+        # fixture's completed-count contract observes one diffuser).
+        self.assertEqual(fields["buildings.oxygen_diffuser"], 1)
+        self.assertEqual(summary["oxygen_balance"], {
+            "previous_cycle_net_kg": None, "current_cycle_net_kg": -101.5,
+            "oxygen_diffusers_built": 1, "assessment": "deficit",
+        })
+        payload = build_choice_payload(state, [], [], "goal")
+        self.assertEqual(payload["colony"]["oxygen_balance"]["assessment"], "deficit")
+        self.assertTrue(any(rule.startswith("colony.oxygen_balance") for rule in payload["rules"]))
 
     def test_cli_refuses_the_model_loop_outside_watch_mode_or_with_the_ranker(self):
         for extra, message in ((["--once"], "needs watch mode"),
@@ -553,6 +564,71 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(ladder["hint"]["args"]["cells"], [9000])
         self.assertEqual(ladder["hint"]["args"]["material_tags"], ["WoodLog"])
         self.assertIn("x=41, y=12", ladder["summary"])
+
+    def test_oxygen_building_summaries_carry_the_observed_oxygen_balance(self):
+        # Run m1-0930b: the colony made 49.7 kg and breathed 240.1 kg of oxygen
+        # in cycle 9 with no diffuser built, and the model still chose to wait
+        # because the raw counters carried no interpretation.
+        state = self.state(paused=True)
+        state["report_counters"] = {
+            "previous_closed": {"report_day": 9, "oxygen_created": {"positive_kg": 49.65157, "negative_kg": -240.094467}},
+            "current": {"report_day": 10, "oxygen_created": {"positive_kg": 11.79, "negative_kg": -60.96}},
+        }
+        for field in ("positive_kg", "negative_kg"):
+            state["quality"][f"report_counters.previous_closed.oxygen_created.{field}"] = {
+                "status": "observed", "source": "fixture",
+            }
+        state["buildings"]["oxygen_diffuser"] = 0
+        self.assertEqual(candidates.oxygen_balance(state), {
+            "previous_cycle_net_kg": -190.4, "current_cycle_net_kg": None,  # current epoch unobserved
+            "oxygen_diffusers_built": 0, "assessment": "deficit",
+        })
+        items = candidates.generate_candidates(state, allowed_actions=("place_building_blueprint",))["items"]
+        summaries = {item["candidate_id"]: item["summary"] for item in items}
+        self.assertTrue(
+            summaries["oxygen_diffuser_9100"].endswith("; oxygen net -190.4 kg last cycle, 0 oxygen diffusers built"),
+            summaries["oxygen_diffuser_9100"],
+        )
+        self.assertIn("; oxygen net -190.4 kg last cycle", summaries["algae_terrarium_9200"])
+        self.assertNotIn("oxygen net", summaries["ladder_9000"])
+        self.assertTrue(all(len(item["summary"]) <= candidates.MAX_SUMMARY_CHARS for item in items))
+        # The count alone (one diffuser, no counters) is still worth stating.
+        self.assertTrue(
+            self.ids(self.state(paused=True), allowed=("place_building_blueprint",))
+            and candidates.generate_candidates(self.state(paused=True), allowed_actions=("place_building_blueprint",))
+            ["items"][0]["summary"].endswith("built from Cuprite; 1 oxygen diffuser built")
+        )
+        # Nothing observed (an older Probe estimates the count): no note at all.
+        bare = self.state(paused=True)
+        bare["quality"]["buildings.oxygen_diffuser"] = {"status": "estimated", "source": "typed_active_world"}
+        self.assertEqual(candidates.oxygen_balance(bare), {
+            "previous_cycle_net_kg": None, "current_cycle_net_kg": None,
+            "oxygen_diffusers_built": None, "assessment": "unobserved",
+        })
+        bare_items = candidates.generate_candidates(bare, allowed_actions=("place_building_blueprint",))["items"]
+        self.assertTrue(bare_items[0]["summary"].endswith("built from Cuprite"), bare_items[0]["summary"])
+
+    def test_oxygen_balance_invalid_numbers_do_not_break_payload_generation(self):
+        cases = ((10**400, -1.0), (1.0, -(10**400)),
+                 (float("nan"), -1.0), (float("inf"), -1.0),
+                 (True, -1.0), (1.0, None), (1e308, 1e308))
+        for positive, negative in cases:
+            with self.subTest(positive=positive, negative=negative):
+                state = self.state(paused=True)
+                state["report_counters"] = {
+                    "current": {"oxygen_created": {"positive_kg": positive, "negative_kg": negative}},
+                }
+                for field in ("positive_kg", "negative_kg"):
+                    state["quality"][f"report_counters.current.oxygen_created.{field}"] = {
+                        "status": "observed", "source": "fixture",
+                    }
+                balance = candidates.oxygen_balance(state)
+                self.assertIsNone(balance["current_cycle_net_kg"])
+                self.assertEqual(balance["assessment"], "unobserved")
+                items = candidates.generate_candidates(
+                    state, allowed_actions=("place_building_blueprint",))
+                self.assertFalse(any("oxygen net" in item["summary"] for item in items["items"]))
+                self.assertEqual(build_choice_payload(state, [], [], "goal")["colony"]["oxygen_balance"], balance)
 
     def test_a_locked_or_unsupplied_building_yields_no_candidate(self):
         # The Probe lists no candidate cells for a building whose technology is
