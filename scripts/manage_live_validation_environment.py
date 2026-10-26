@@ -1903,6 +1903,23 @@ def live_process_counts() -> dict[str, int]:
         raise WorkflowError("live process guard returned invalid evidence") from exc
 
 
+# Subdirectories the Mod creates inside validation-controls/quarantine at
+# every validation start (ValidationCheckpointController's reload-recovery
+# quarantine).  Empty, they are layout rather than evidence; anything inside
+# them is control evidence like every other record.
+CONTROL_QUARANTINE_SUBDIRECTORIES = ("reload-recovery",)
+
+
+def _is_empty_control_subdirectory(stage: str, entry: pathlib.Path) -> bool:
+    return (
+        stage == "quarantine"
+        and entry.name in CONTROL_QUARANTINE_SUBDIRECTORIES
+        and entry.is_dir()
+        and not is_reparse(entry)
+        and not any(entry.iterdir())
+    )
+
+
 def process_counts(args: argparse.Namespace, roots: "Roots") -> dict[str, int]:
     if roots.test_root is not None:
         if not args.process_state_fixture:
@@ -9879,7 +9896,9 @@ def _validate_abort_window(
         directory = controls / stage
         if not directory.is_dir() or is_reparse(directory):
             raise WorkflowError("abort requires every validation-control stage directory")
-        entries = list(directory.iterdir())
+        # The Mod's empty quarantine/reload-recovery folder is layout, not
+        # evidence (run m1-0930a: abort refused a hung game's clean bridge).
+        entries = [entry for entry in directory.iterdir() if not _is_empty_control_subdirectory(stage, entry)]
         if entries:
             raise WorkflowError("any validation-control evidence disables pre-session abort")
         control_stage_counts[stage] = 0

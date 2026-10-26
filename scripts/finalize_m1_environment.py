@@ -93,7 +93,7 @@ PRECONDITION_QUARANTINE_PREFIX = "Current-state precondition failed"
 # The Mod's ValidationCheckpointController keeps this empty subdirectory inside
 # the validation-control quarantine stage (live run m1-0930a); anything inside
 # it is reload-recovery evidence and refuses the finalization.
-CONTROL_QUARANTINE_SUBDIRECTORIES = ("reload-recovery",)
+CONTROL_QUARANTINE_SUBDIRECTORIES = wf.CONTROL_QUARANTINE_SUBDIRECTORIES
 
 
 def _json_files(

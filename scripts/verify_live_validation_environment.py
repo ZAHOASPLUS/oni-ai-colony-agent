@@ -8542,6 +8542,11 @@ def test_abort_success_partial_and_replay(base: pathlib.Path) -> dict[str, Any]:
     exact_baseline = file_inventory(pathlib.Path(exact["oni"]))
     prepare_fixture(exact)
     prepare_configured_runtime(exact, add_diagnostics=True)
+    # The Mod creates this folder at every validation start; empty, it is
+    # layout rather than validation-control evidence (run m1-0930a).
+    (
+        pathlib.Path(exact["oni"]) / "ai-bridge" / "validation-controls" / "quarantine" / "reload-recovery"
+    ).mkdir()
     case_before_plan = file_inventory(pathlib.Path(exact["case"]))
     exact_plan = json.loads(core(exact, "abort", what_if=True).stdout)
     assert_true(
@@ -8622,6 +8627,7 @@ def test_abort_success_partial_and_replay(base: pathlib.Path) -> dict[str, Any]:
     return {
         "whatif": "zero_write",
         "configured_exact": "restored",
+        "empty_reload_recovery_directory": "tolerated",
         "loader_failure_diagnostics": "archived",
         "partial_or_startup_loader_drift": "classified_and_restored",
         "original_archive_root_absent": "created_root_archived_then_removed",
@@ -8659,6 +8665,18 @@ def test_abort_session_action_refusals(base: pathlib.Path) -> dict[str, Any]:
             lambda fixture: write_json(
                 pathlib.Path(fixture["oni"]) / "ai-bridge" / "validation-controls" / "done" / "ctl-x.json",
                 {"id": "ctl-x", "status": "done"},
+            ),
+        ),
+        (
+            "reload_recovery_evidence",
+            lambda fixture: write_json(
+                pathlib.Path(fixture["oni"])
+                / "ai-bridge"
+                / "validation-controls"
+                / "quarantine"
+                / "reload-recovery"
+                / "reload-recovery-x.json",
+                {"schema": "oni.validation-reload-recovery.v1"},
             ),
         ),
         (
