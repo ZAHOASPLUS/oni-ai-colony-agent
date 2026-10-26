@@ -49,7 +49,9 @@ MOD_ID = "oni-ai-colony-agent"
 MOD_VERSION_PATTERN = re.compile(r'ModVersion\s*=\s*"([^"]+)"')
 BUILD_PATTERN = re.compile(r"\bBuild:\s*(\S+)(?:\s+\(([^)]+)\))?", re.IGNORECASE)
 PROBE_MARKER_PATTERN = re.compile(r"\[ONI AI Probe\]|ONI AI Probe:oni-ai-colony-agent", re.IGNORECASE)
-KEY_NAMES = {"OPENAI_API_KEY", "ONI_AI_API_KEY", "API_KEY", "KEY"}
+KEY_NAMES = {"OPENAI_API_KEY", "ONI_AI_API_KEY", "API_KEY", "KEY", "CLINE_API_KEY", "NEWAPI_API_KEY", "DEEPSEEK_API_KEY"}
+# Environment variables the model configuration accepts, in precedence order.
+KEY_ENVIRONMENT_NAMES = ("OPENAI_API_KEY", "ONI_AI_API_KEY", "CLINE_API_KEY", "NEWAPI_API_KEY", "DEEPSEEK_API_KEY")
 KEY_LINE_PATTERN = re.compile(r"^\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?\s*[:=]\s*(.*?)\s*$")
 MAX_SECRET_FILE_BYTES = 2 * 1024 * 1024
 MAX_LOG_TAIL_BYTES = 2 * 1024 * 1024
@@ -468,7 +470,7 @@ def secret_file_has_key(path: pathlib.Path) -> bool:
 
 
 def detect_llm_key(secrets_dir: Optional[pathlib.Path]) -> Dict[str, Any]:
-    env_sources = [name for name in ("OPENAI_API_KEY", "ONI_AI_API_KEY") if os.environ.get(name, "").strip()]
+    env_sources = [name for name in KEY_ENVIRONMENT_NAMES if os.environ.get(name, "").strip()]
     secret_dir_configured = secrets_dir is not None
     secret_dir_exists = bool(secrets_dir and secrets_dir.is_dir())
     secret_files_scanned = 0
