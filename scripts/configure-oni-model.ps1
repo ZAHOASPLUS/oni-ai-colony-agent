@@ -4,6 +4,8 @@
 #   cline-pass  https://api.cline.bot/api/v1   cline-pass/deepseek-v4.1-flash
 #   openai      https://api.openai.com/v1      gpt-4.1-mini        (Responses API)
 #   deepseek    https://api.deepseek.com/v1    deepseek-chat
+#   cockpit     http://127.0.0.1:14861/v1      (no default: pass -Model with the id the
+#               Cockpit Tools local proxy lists for the 6.1 terra/sol model; ChatGPT test runs)
 #
 # The key is read from the user environment when it is already present (for
 # cline-pass that is CLINE_API_KEY, the same admitted credential the interactive
@@ -11,7 +13,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("cline-pass", "openai", "deepseek")]
+    [ValidateSet("cline-pass", "openai", "deepseek", "cockpit")]
     [string]$Provider = "cline-pass",
     [string]$Model,
     [string]$BaseUrl,
@@ -44,12 +46,21 @@ $presets = @{
         WireApi = "chat_completions"
         KeyEnv  = @("DEEPSEEK_API_KEY", "ONI_AI_API_KEY", "OPENAI_API_KEY")
     }
+    "cockpit"    = @{
+        BaseUrl = "http://127.0.0.1:14861/v1"
+        Model   = $null
+        WireApi = "chat_completions"
+        KeyEnv  = @("COCKPIT_API_KEY", "ONI_AI_API_KEY", "OPENAI_API_KEY")
+    }
 }
 
 $preset = $presets[$Provider]
 $resolvedBaseUrl = if ($BaseUrl) { $BaseUrl.TrimEnd('/') } else { $preset.BaseUrl }
 $resolvedModel = if ($Model) { $Model } else { $preset.Model }
 $resolvedWire = if ($WireApi -eq "auto") { $preset.WireApi } else { $WireApi }
+if (-not $Clear -and -not $Show -and -not $resolvedModel) {
+    throw "Provider $Provider has no default model; pass -Model with the exact id its endpoint lists."
+}
 
 if ($Show) {
     $keyPresent = $false

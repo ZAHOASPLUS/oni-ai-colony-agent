@@ -49,9 +49,14 @@ MOD_ID = "oni-ai-colony-agent"
 MOD_VERSION_PATTERN = re.compile(r'ModVersion\s*=\s*"([^"]+)"')
 BUILD_PATTERN = re.compile(r"\bBuild:\s*(\S+)(?:\s+\(([^)]+)\))?", re.IGNORECASE)
 PROBE_MARKER_PATTERN = re.compile(r"\[ONI AI Probe\]|ONI AI Probe:oni-ai-colony-agent", re.IGNORECASE)
-KEY_NAMES = {"OPENAI_API_KEY", "ONI_AI_API_KEY", "API_KEY", "KEY", "CLINE_API_KEY", "NEWAPI_API_KEY", "DEEPSEEK_API_KEY"}
+KEY_NAMES = {
+    "OPENAI_API_KEY", "ONI_AI_API_KEY", "API_KEY", "KEY", "CLINE_API_KEY", "NEWAPI_API_KEY", "DEEPSEEK_API_KEY",
+    "COCKPIT_API_KEY",
+}
 # Environment variables the model configuration accepts, in precedence order.
-KEY_ENVIRONMENT_NAMES = ("OPENAI_API_KEY", "ONI_AI_API_KEY", "CLINE_API_KEY", "NEWAPI_API_KEY", "DEEPSEEK_API_KEY")
+KEY_ENVIRONMENT_NAMES = (
+    "OPENAI_API_KEY", "ONI_AI_API_KEY", "CLINE_API_KEY", "NEWAPI_API_KEY", "DEEPSEEK_API_KEY", "COCKPIT_API_KEY",
+)
 KEY_LINE_PATTERN = re.compile(r"^\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?\s*[:=]\s*(.*?)\s*$")
 MAX_SECRET_FILE_BYTES = 2 * 1024 * 1024
 MAX_LOG_TAIL_BYTES = 2 * 1024 * 1024

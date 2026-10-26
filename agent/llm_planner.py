@@ -13,7 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from agent.rules import AVAILABLE_ACTIONS
 from agent.state_quality import canonical_state_hash, field_quality, safe_get
@@ -57,6 +57,8 @@ PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
             "cline-pass/deepseek-v4.1-flash",
             "cline-pass/deepseek-v4-pro",
         ),
+        "hosts": ("api.cline.bot",),
+        "structured_output": ("json_schema", "plain"),
         "input_cost_per_million": None,
         "output_cost_per_million": None,
     },
@@ -66,6 +68,8 @@ PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
         "wire_api": WIRE_API_RESPONSES,
         "key_env": ("OPENAI_API_KEY", "ONI_AI_API_KEY"),
         "models": ("gpt-4.1-mini",),
+        "hosts": ("api.openai.com",),
+        "structured_output": ("json_schema", "plain"),
         "input_cost_per_million": None,
         "output_cost_per_million": None,
     },
@@ -75,10 +79,43 @@ PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
         "wire_api": WIRE_API_CHAT_COMPLETIONS,
         "key_env": ("DEEPSEEK_API_KEY", "ONI_AI_API_KEY", "OPENAI_API_KEY"),
         "models": ("deepseek-chat", "deepseek-reasoner"),
+        "hosts": ("api.deepseek.com",),
+        # DeepSeek's own API offers JSON mode (response_format json_object) but
+        # not json_schema, so the schema request would only ever cost a 400.
+        "structured_output": ("json_object", "plain"),
+        "input_cost_per_million": None,
+        "output_cost_per_million": None,
+    },
+    # ChatGPT test runs (user decision 2026-10-27): Cockpit Tools' local
+    # OpenAI-compatible reverse proxy (one account's proxy service).  The model
+    # id must be stated explicitly (the 6.1 terra/sol models are served under
+    # the ids the proxy lists), and only this machine may receive the key.
+    "cockpit": {
+        "base_url": "http://127.0.0.1:14861/v1",
+        "model": None,
+        "wire_api": WIRE_API_CHAT_COMPLETIONS,
+        "key_env": ("COCKPIT_API_KEY", "ONI_AI_API_KEY", "OPENAI_API_KEY"),
+        "models": (),
+        "hosts": ("127.0.0.1", "localhost", "::1"),
+        "structured_output": ("json_schema", "plain"),
+        "input_cost_per_million": None,
+        "output_cost_per_million": None,
+    },
+    # Any other OpenAI-compatible endpoint: base_url and model must be stated
+    # explicitly, and no host check applies.
+    "compatible": {
+        "base_url": None,
+        "model": None,
+        "wire_api": WIRE_API_CHAT_COMPLETIONS,
+        "key_env": ("ONI_AI_API_KEY", "OPENAI_API_KEY"),
+        "models": (),
+        "hosts": (),
+        "structured_output": ("json_schema", "plain"),
         "input_cost_per_million": None,
         "output_cost_per_million": None,
     },
 }
+STRUCTURED_OUTPUT_MODES = ("json_schema", "json_object", "plain")
 
 # Gateways that wrap the OpenAI body in ``{"data": {...}, "success": true}``.
 # Cline-pass is one; the unwrapping below is provider-agnostic by shape.
@@ -536,7 +573,9 @@ _SECRET_FIELD_NAMES = {
 # Environment variables that may carry the key, in precedence order.  The
 # Cline-pass gateway key is accepted directly so the ONI controller can use the
 # same admitted credential as the interactive session.
-_KEY_ENVIRONMENT_NAMES = ("OPENAI_API_KEY", "ONI_AI_API_KEY", "CLINE_API_KEY", "NEWAPI_API_KEY", "DEEPSEEK_API_KEY")
+_KEY_ENVIRONMENT_NAMES = (
+    "OPENAI_API_KEY", "ONI_AI_API_KEY", "CLINE_API_KEY", "NEWAPI_API_KEY", "DEEPSEEK_API_KEY", "COCKPIT_API_KEY",
+)
 _BASE_URL_ENVIRONMENT_NAMES = ("OPENAI_BASE_URL", "ONI_AI_BASE_URL")
 _MODEL_ENVIRONMENT_NAMES = ("OPENAI_MODEL", "ONI_AI_MODEL")
 _WIRE_API_ENVIRONMENT_NAMES = ("OPENAI_WIRE_API", "ONI_AI_WIRE_API")
@@ -617,6 +656,13 @@ def load_llm_config(secrets_dir: Optional[pathlib.Path]) -> Dict[str, Any]:
     }
     environment_provider = first_environment(_PROVIDER_ENVIRONMENT_NAMES)
     environment_key = first_environment(_KEY_ENVIRONMENT_NAMES)
+    explicit_name = str(environment_provider or "").strip().lower()
+    if explicit_name in PROVIDER_PRESETS:
+        # A named provider reads its own key variable first.  Several keys can
+        # coexist on one machine (CLINE_API_KEY next to an OpenAI key for
+        # ChatGPT test runs); the generic order would hand OPENAI_API_KEY to
+        # whichever endpoint is configured.
+        environment_key = first_environment(PROVIDER_PRESETS[explicit_name]["key_env"])
     if environment_key:
         config.update(
             {
@@ -644,7 +690,14 @@ def load_llm_config(secrets_dir: Optional[pathlib.Path]) -> Dict[str, Any]:
             config["config_source"] = "secrets_dir"
     if environment_provider and not config.get("provider"):
         config["provider"] = environment_provider
+    config["provider_explicit"] = bool(config.get("provider"))
     apply_provider_preset(config)
+    if not config.get("config_error") and (not config.get("base_url") or not config.get("model")):
+        if config["provider"] in PROVIDER_PRESETS:
+            # A provider whose preset has no endpoint (``compatible``) or no
+            # model (``cockpit``) must never fall back to the default gateway's
+            # values with this key.
+            config["config_error"] = "endpoint_unset"
     config["base_url"] = str(config.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
     config["model"] = config.get("model") or DEFAULT_MODEL
     if config.get("config_error"):
@@ -686,9 +739,45 @@ def resolve_llm_config(
     config.setdefault("model", DEFAULT_MODEL)
     if not config.get("config_error"):
         config["config_error"] = base_url_error(str(config["base_url"]))
+    if not config.get("config_error"):
+        config["config_error"] = provider_endpoint_error(config)
     if config.get("config_error"):
         config["api_key"] = None  # never send a key under an unsafe config
     return config
+
+
+def provider_endpoint_error(config: Mapping[str, Any]) -> Optional[str]:
+    """Refuse an explicitly named provider whose endpoint is not its own.
+
+    ``OPENAI_BASE_URL`` is shared by every provider, so a stale value left by
+    an earlier configuration would send, say, an OpenAI key for a ChatGPT test
+    run to the Cline-pass gateway.  Only an explicit provider is checked; the
+    implicit default keeps accepting a self-hosted endpoint.
+    """
+
+    if not config.get("provider_explicit"):
+        return None
+    name = str(config.get("provider") or "").strip().lower()
+    preset = PROVIDER_PRESETS.get(name)
+    if preset is None:
+        return "provider_unknown"
+    if not config.get("base_url") or not config.get("model"):
+        return "endpoint_unset"
+    hosts = preset.get("hosts") or ()
+    host = (urllib.parse.urlsplit(str(config.get("base_url"))).hostname or "").lower()
+    if hosts and host not in hosts:
+        return "provider_endpoint_mismatch"
+    return None
+
+
+def structured_output_modes(config: Mapping[str, Any]) -> Tuple[str, ...]:
+    """The structured-output ladder to try for one configuration, best first."""
+
+    modes = tuple(provider_preset(config.get("provider")).get("structured_output") or ())
+    modes = tuple(mode for mode in modes if mode in STRUCTURED_OUTPUT_MODES)
+    if not modes or modes[-1] != "plain":
+        modes = tuple(mode for mode in modes if mode != "plain") + ("plain",)
+    return modes
 
 
 def read_secret_file(path: pathlib.Path) -> Dict[str, Optional[str]]:
@@ -781,6 +870,9 @@ def config_health(config: Dict[str, Any]) -> Dict[str, Any]:
         "minimum_call_interval_seconds": MIN_CALL_INTERVAL_SECONDS,
         "pricing_configured": parse_rate(config.get("input_cost_per_million")) is not None
         and parse_rate(config.get("output_cost_per_million")) is not None,
+        # Why no request is sent (provider_endpoint_mismatch, endpoint_unset, ...).
+        "config_error": config.get("config_error"),
+        "structured_output_modes": list(structured_output_modes(config)),
     }
 
 
@@ -1013,7 +1105,20 @@ def response_usage(response: Dict[str, Any]) -> Dict[str, Any]:
     return {}
 
 
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+_FENCED_BLOCK = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.IGNORECASE | re.DOTALL)
+
+
 def parse_json_content(content: str) -> Optional[Any]:
+    """Parse the answer's JSON across provider habits.
+
+    Tried in order: the whole text; the text without a leading ``<think>``
+    block (some DeepSeek/Qwen deployments inline their reasoning); the first
+    fenced code block; the span from the first ``{`` to the last ``}``.  Only
+    a JSON object counts for the last two, and the caller still validates the
+    object against the exact candidate schema.
+    """
+
     text = content.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
@@ -1021,7 +1126,86 @@ def parse_json_content(content: str) -> Optional[Any]:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
+        pass
+    stripped = _THINK_BLOCK.sub("", content).strip()
+    candidates = [stripped]
+    candidates.extend(match.group(1) for match in _FENCED_BLOCK.finditer(stripped))
+    start, end = stripped.find("{"), stripped.rfind("}")
+    if 0 <= start < end:
+        candidates.append(stripped[start:end + 1])
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if candidate is stripped or isinstance(value, dict):
+            return value
+    return None
+
+
+def response_failure_reason(response: Dict[str, Any]) -> Optional[str]:
+    """Name why a response carries no usable answer, across wire formats.
+
+    ``model_refused``: an OpenAI refusal (Responses ``refusal`` block or chat
+    ``message.refusal``).  ``response_incomplete``: the Responses API's
+    ``status: incomplete`` or a chat ``finish_reason`` of ``length``.
+    ``content_filtered``: a chat ``finish_reason`` of ``content_filter``.
+    """
+
+    output = response.get("output")
+    if isinstance(output, list):
+        for item in output:
+            content = item.get("content") if isinstance(item, dict) else None
+            if isinstance(content, list) and any(
+                isinstance(block, dict) and (block.get("type") == "refusal" or block.get("refusal"))
+                for block in content
+            ):
+                return "model_refused"
+    if response.get("status") == "incomplete":
+        return "response_incomplete"
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        message = choices[0].get("message")
+        if isinstance(message, dict) and isinstance(message.get("refusal"), str) and message["refusal"].strip():
+            return "model_refused"
+        finish = choices[0].get("finish_reason")
+        if finish == "length":
+            return "response_incomplete"
+        if finish == "content_filter":
+            return "content_filtered"
+    return None
+
+
+def usage_details(value: Any) -> Dict[str, Optional[int]]:
+    """Reasoning and cached-input tokens, where the provider reports them.
+
+    OpenAI Responses: ``output_tokens_details.reasoning_tokens`` and
+    ``input_tokens_details.cached_tokens``; chat completions:
+    ``completion_tokens_details.reasoning_tokens`` and
+    ``prompt_tokens_details.cached_tokens``; DeepSeek: ``prompt_cache_hit_tokens``.
+    Kept apart from ``normalize_usage`` so that shape stays fixed.
+    """
+
+    usage = value if isinstance(value, dict) else {}
+
+    def nested(*paths: Tuple[str, str]) -> Optional[int]:
+        for outer, inner in paths:
+            section = usage.get(outer)
+            if isinstance(section, dict):
+                found = first_integer(section, inner)
+                if found is not None:
+                    return found
         return None
+
+    cached = nested(("input_tokens_details", "cached_tokens"), ("prompt_tokens_details", "cached_tokens"))
+    if cached is None:
+        cached = first_integer(usage, "prompt_cache_hit_tokens")
+    return {
+        "reasoning_tokens": nested(
+            ("output_tokens_details", "reasoning_tokens"), ("completion_tokens_details", "reasoning_tokens")
+        ),
+        "cached_input_tokens": cached,
+    }
 
 
 def normalize_usage(value: Any) -> Dict[str, Optional[int]]:

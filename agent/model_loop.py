@@ -32,6 +32,7 @@ import pathlib
 import re
 import tempfile
 import threading
+import types
 import time
 import urllib.request
 from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -98,6 +99,9 @@ from agent.llm_planner import (
     normalize_usage,
     parse_json_content,
     resolve_llm_config,
+    response_failure_reason,
+    structured_output_modes,
+    usage_details,
 )
 from agent.state_quality import canonical_state_hash, field_status, parse_snapshot_timestamp, safe_get
 
@@ -582,6 +586,12 @@ def build_choice_prompt_text(payload: Mapping[str, Any]) -> str:
     )
 
 
+# Passed as ``response_schema`` to request JSON mode (``json_object``) instead
+# of a schema: DeepSeek's own API offers only that mode.  Identity, not
+# equality, selects it, so no real schema can be mistaken for it.
+JSON_OBJECT_FORMAT: Mapping[str, Any] = types.MappingProxyType({"type": "json_object"})
+
+
 def call_choice_model(
     config: Mapping[str, Any],
     prompt_text: str,
@@ -589,7 +599,11 @@ def call_choice_model(
     *,
     timeout: float,
 ) -> Dict[str, Any]:
-    """POST one choice request; ``response_schema`` None omits structured output."""
+    """POST one choice request.
+
+    ``response_schema`` None omits structured output; ``JSON_OBJECT_FORMAT``
+    asks for JSON mode; any other mapping is sent as a strict json_schema.
+    """
 
     base_url = str(config.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
     model = config.get("model") or DEFAULT_MODEL
@@ -601,14 +615,18 @@ def call_choice_model(
     if effective_wire_api(config) == WIRE_API_RESPONSES:
         url = base_url + "/responses"
         body: Dict[str, Any] = {"model": model, "input": messages}
-        if response_schema is not None:
+        if response_schema is JSON_OBJECT_FORMAT:
+            body["text"] = {"format": {"type": "json_object"}}
+        elif response_schema is not None:
             body["text"] = {
                 "format": {"type": "json_schema", "name": "oni_choice", "strict": True, "schema": response_schema}
             }
     else:
         url = base_url + "/chat/completions"
         body = {"model": model, "messages": messages}
-        if response_schema is not None:
+        if response_schema is JSON_OBJECT_FORMAT:
+            body["response_format"] = {"type": "json_object"}
+        elif response_schema is not None:
             body["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {"name": "oni_choice", "strict": True, "schema": response_schema},
@@ -1100,6 +1118,7 @@ class ModelLoop:
             "cost_estimate_usd": result.get("cost_estimate_usd"),
             "response_hash": result.get("response_hash"),
             "structured_output": result.get("structured_output"),
+            "usage_details": result.get("usage_details"),
             "elapsed_seconds": round(current - request.started, 3),
         }
         if status != "ok" or choice is None:
@@ -1203,11 +1222,15 @@ class ModelLoop:
             response, structured = self._call(request, config, prompt_text, ids)
             content = extract_message_content(response)
             choice, error = validate_choice_output(parse_json_content(content), ids)
+            if error is not None:
+                # A refusal, truncation or filter says more than "invalid JSON".
+                error = response_failure_reason(response) or error
             usage = normalize_usage(response_usage(response))
             request.result = {
                 "status": "ok" if error is None else error,
                 "choice": choice,
                 "usage": usage,
+                "usage_details": usage_details(response_usage(response)),
                 "cost_estimate_usd": estimate_cost_usd(usage, config),
                 # Only a hash of the provider response is kept, as in the planner.
                 "response_hash": _sha256_text(content),
@@ -1222,8 +1245,9 @@ class ModelLoop:
         self, request: _Request, config: Dict[str, Any], prompt_text: str, ids: List[str]
     ) -> Tuple[Dict[str, Any], str]:
         caller = self._model_caller or call_choice_model
-        schema = choice_response_schema(ids)
-        for structured, response_schema in (("json_schema", schema), ("plain", None)):
+        formats = {"json_schema": choice_response_schema(ids), "json_object": JSON_OBJECT_FORMAT, "plain": None}
+        ladder = [(mode, formats[mode]) for mode in structured_output_modes(config)]
+        for structured, response_schema in ladder:
             remaining = request.deadline - self._monotonic()
             if remaining <= 1.0:
                 raise ModelRequestError("deadline_exceeded")
@@ -1239,7 +1263,7 @@ class ModelLoop:
                 # without it (the local validation stays authoritative).  A
                 # gateway that reports the rejection inside a 200 body produces
                 # a ``gateway_*`` code instead.
-                if structured == "json_schema" and structured_output_unsupported(exc.code):
+                if structured != "plain" and structured_output_unsupported(exc.code):
                     continue
                 raise
             if not isinstance(response, dict):

@@ -1,4 +1,8 @@
-"""Live smoke test: the real ONI model loop driven by the cline-pass DeepSeek model.
+"""Live smoke test: the real ONI model loop driven by the configured model provider.
+
+Works for every provider preset (cline-pass DeepSeek for final validation, the
+Cockpit local proxy for ChatGPT test runs, ...); the report names the provider,
+model and wire API it actually used.
 
 This is an acceptance check for the model integration, not a live-game action:
 it builds the same bridge fixture the regression suite uses (no game process, no
