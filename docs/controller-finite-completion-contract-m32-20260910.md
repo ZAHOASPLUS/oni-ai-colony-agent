@@ -99,3 +99,12 @@ Initiatives 和挑战成就另列有限资格表：已完成、仍可达、历�
 - [S8 社区 Colony 101: Space Exploration](https://steamcommunity.com/sharedfiles/filedetails/?id=2438442383)：Temporal Tear 行为线索，攻略自述截至 2022 年，实施前需绑定当前构建。
 
 wiki.gg 与 Fandom 本次直接读取返回 403，未用模型记忆补写缺失的当前数值条件。官方命名/规则来源与本项目工程验收设计已分别标明。
+
+## 状态更新（2026-10-27，追加；上文契约不变）
+
+以下只更正上文中已经过时的事实陈述，终局定义、六阶段、验收窗口和学习闭环的要求都不变。执行规划见 `docs/roadmap-20261027.md`。
+
+- **第 2 节的输入是 2026-09-09 旧主机 `oldhost` 上的绑定**，只作历史证据。之后的实盘运行在新主机上重新做了准入：Phase 2 使用克隆 `oni-dsh-20261025`（run `dsh-20261025-r01`），游戏版本仍为 `cl-744825`，Probe 仍为 `0.7.0`，但 DLL 已是重新构建的版本（`452916a5…`，见 `reports/phase2/PHASE2-SUMMARY.md`），不再是上文记录的 `4623259d…`。下一个实盘场景需要重新绑定输入和适用目标集合 `I`。
+- **第 4 节引用的 `strategy.py:2607` 行号已失效。**当前对应代码是 `agent/strategy.py` 的 `_sustainability_readiness_blockers()`，以及在状态中读取 `colony.sustainable` / `sustainability.complete` / `game.sustainable` 的 `_read_bool(...)` 调用。Probe 侧仍然输出 unsupported，所以“该路径必须修复”的结论依然成立。
+- **最后一段的 M29 recovery latch 与 M28 作者路由是旧主机和旧路由下的状态。**迁移后的新主机上没有对应的运行目录；是否还有需要调和的遗留，应以新主机上的实际 bridge 目录为准，不能沿用这段描述。
+- 当前进度：只有第 6 节第 5 条（正常退出与还原）有实盘证据；其余四条都还没有整体完成证据。

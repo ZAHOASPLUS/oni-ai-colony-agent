@@ -1,6 +1,7 @@
 # ONI fully autonomous controller — active user goal
 
-Updated: 2026-10-11 Asia/Shanghai. Owner: current ONI main controller.
+Updated: 2026-10-27 Asia/Tokyo (goal text unchanged since 2026-10-11). Owner: current ONI main controller.
+Execution roadmap, open problems and milestones: `docs/roadmap-20261027.md`.
 
 ## Outcome
 
@@ -14,13 +15,14 @@ Cover survival, a stable colony, expansion, industry, space, every official main
   DeepSeek through the Cline-pass subscription gateway** —
   `cline-pass/deepseek-v4.1-flash` at `https://api.cline.bot/api/v1`, wire API
   `chat_completions`, credential `CLINE_API_KEY`. Escalation model:
-  `cline-pass/deepseek-v4-pro`. This supersedes the `gpt-6-astra` / `gpt-6.1-sol`
-  routing below for the controller's own model calls. See
-  `docs/model-routing-20261025.md` for the contract, the adapter changes, and the
-  verification evidence.
-- Main controller: `gpt-6-astra / max`.
-- Delegated implementation/review/runtime tasks: `gpt-6.1-sol / max`.
-- These settings supersede the former `ultra` main setting and Astra worker setting. Verify actual execution metadata; do not substitute another combination silently.
+  `cline-pass/deepseek-v4-pro`. See `docs/model-routing-20261025.md` for the
+  contract, the adapter changes, and the verification evidence.
+- Codex task routing (2026-10-11; applies only to Codex tasks working on this
+  repository, never to the ONI controller's model calls): main controller
+  `gpt-6-astra / max`, delegated implementation/review/runtime tasks
+  `gpt-6.1-sol / max`. These supersede the former `ultra` main setting and Astra
+  worker setting. Verify actual execution metadata; do not substitute another
+  combination silently.
 - Fully autonomous game decisions and execution; routine commands do not wait for individual human approval.
 - Each round: one minimal useful increment, required compilation/syntax checks only, at most one minimal real-game test attempt, a short factual report, then automatic continuation.
 - No routine unit/Mock/replay/A-B/full-regression/long-stress/fixed-count testing gates. Failure is retained; do not repeat the test in the same round or rename an unchanged retry as a new round.
@@ -55,7 +57,26 @@ Each round reports only the increment, sole real test, observed result (`passed`
 
 The whole goal is complete only with actual evidence for autonomous observe/plan/execute/confirm/recover, applicable official main objectives, required real survival/industry/space effects, at least one useful feedback-driven improvement, and safe final restoration. Preserve the full goal across rounds. Short tests establish only their observed scope and do not certify indefinite survival.
 
-## Current handoff
+## Current handoff (2026-10-27)
+
+- Phase 2 is finished: run `dsh-20261025-r01` on clone `oni-dsh-20261025`,
+  53 rounds on 2026-10-25/26 with `cline-pass/deepseek-v4.1-flash`. 32 commands
+  reached `done` through the autonomous V2/V4/V2 route, two Oxygen Diffusers
+  were built, and the final restore passed (normal exit, clone and `mods.json`
+  unchanged, Mod artifacts byte-equal to the frozen build, queues empty, no
+  leftover processes). Summary: `reports/phase2/PHASE2-SUMMARY.md`; acceptance:
+  `reports/phase2/final-acceptance.json`.
+- Phase 2 is not whole-goal progress beyond early survival: oxygen and food never
+  stabilized (no algae in that world; 2x2/2x3 buildings never started), and
+  there is no temperature action.
+- Source: all Phase 2 work is committed locally as `b08a031..00e1c8f` on
+  `review-fixes-20260926` (not pushed).
+- No game, Bridge or controller process is expected to be running, and no run is
+  admitted. Any next real test needs a fresh admission on this host.
+- Next: milestone M0 (offline hardening) in `docs/roadmap-20261027.md`; the
+  user decisions D1-D3 listed there gate milestone M1.
+
+## Historical handoff (2026-10-11, superseded)
 
 - Main thread: `01a129e8-20a1-71d0-849c-eeef582fb3f6`.
 - Existing source changes were backed up under `reports/auto/pre-dispatch-20261011` before delegation.
@@ -94,8 +115,9 @@ The whole goal is complete only with actual evidence for autonomous observe/plan
   `reports/model-integration/live-integration-smoke.json`.
 - Not executed: no real-game acceptance and no colony progression this round;
   the live-game prerequisites from the migration pause still apply.
-- Next round: keep the Goal paused for game actions; when the user resumes,
-  rebuild the game/Bridge identity on this host, then continue the existing
-  controller objective with the DeepSeek endpoint in place.
-- The app Goal's stored text still contains older model routing; the latest direct user override and this document govern: main `gpt-6-astra/max`, workers `gpt-6.1-sol/max`. Do not reintroduce the resolved model blocker or mark the unfinished goal complete to replace its record.
+- Next round (superseded: the user resumed and Phase 2 ran on 2026-10-25/26):
+  keep the Goal paused for game actions; when the user resumes, rebuild the
+  game/Bridge identity on this host, then continue the existing controller
+  objective with the DeepSeek endpoint in place.
+- The app Goal's stored text still contains older Codex task routing; the latest direct user override and this document govern Codex tasks: main `gpt-6-astra/max`, workers `gpt-6.1-sol/max`. Do not reintroduce the resolved model blocker or mark the unfinished goal complete to replace its record.
 - Old execution host: `oldhost`, user `user`. The new host must freshly establish installation/build compatibility, local user-data paths, protected-save baselines, clone lineage, process identity and startup anchors. Old machine paths, PIDs, volume/file identities, startup receipts and authority records are historical evidence only.

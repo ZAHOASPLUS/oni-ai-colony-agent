@@ -5,6 +5,16 @@ separate layers: telemetry is always local, rule advice is quality-gated, and
 the game reads an action only after a local policy and explicit approval both
 allow it.
 
+Since 2026-10-11 there are two approval routes. The human route described in
+this document (`oni.action-policy.v1`, `oni.command.v3`,
+`oni.approval-receipt.v1`) is unchanged. The autonomous route
+(`oni.action-policy.v2` with `execution_mode=autonomous`, `oni.command.v4`,
+`oni.approval-receipt.v2` with `approved_by=autonomous_controller`) is defined
+in `docs/autonomous-protocol-v1.md` and implemented by
+`agent/autonomous_authorization.py`; it adds run/controller binding and never
+relaxes the quality, custody, action-contract or later-effect checks below.
+Mixing the two routes is rejected.
+
 ## Runtime Layout
 
 The default root is
@@ -1816,3 +1826,10 @@ only. No current Probe JSONL captured from ONI has yet demonstrated these new
 fields or their timing/coverage semantics, and no in-game result may be inferred
 from an `observed` example in this document. Probe load and live game proof stay
 pending until an explicit notification opens the game-validation window.
+
+Status update (2026-10-27): the paragraph above describes the state when this
+section was written. Live Probe JSONL has since been captured in the validation
+runs of 2026-09-27/30 (M1) and in Phase 2 (run `dsh-20261025-r01`, 2026-10-25/26,
+evidence under `reports/phase2/`). That evidence covers the fields and commands
+those runs actually exercised; it does not certify every field documented here,
+and an `observed` example in this document is still not evidence on its own.
