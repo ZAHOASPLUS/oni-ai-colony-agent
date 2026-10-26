@@ -26,6 +26,7 @@ import dataclasses
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import pathlib
 import re
@@ -745,6 +746,12 @@ class ModelLoop:
         self._construction_run_started: Optional[float] = None
         # Start of the current "game is paused with work queued" streak.
         self._resume_hold_started: Optional[float] = None
+        # Game time (cycles) at which each blueprint was first seen in this
+        # Probe session, so a fresh placement is not judged stuck (roadmap B3).
+        # Held in memory only: a restarted controller restarts every clock,
+        # which can only delay a cancel, never hasten one.
+        self._blueprint_session: Optional[str] = None
+        self._blueprint_first_seen: Dict[str, Optional[float]] = {}
         self.autonomous = bool(autonomous)
         self._autonomous_identity = dict(autonomous_identity or {})
         if round_command_limit is not None and (not self.autonomous or type(round_command_limit) is not int or round_command_limit <= 0):
@@ -796,7 +803,12 @@ class ModelLoop:
         candidate_set: Dict[str, Any] = {"items": [], "candidate_set_hash": None, "blockers": []}
         if not blockers:
             try:
-                candidate_set = generate_candidates(latest, allowed_actions=policy.get("allowed_actions") or [], autonomous=self.autonomous)
+                candidate_set = generate_candidates(
+                    latest,
+                    allowed_actions=policy.get("allowed_actions") or [],
+                    autonomous=self.autonomous,
+                    blueprint_ages=self._blueprint_ages(latest),
+                )
             except Exception:  # noqa: BLE001 - candidate generation fails closed
                 blockers.append("candidate_generation_error")
             else:
@@ -817,6 +829,42 @@ class ModelLoop:
         status = self._status(root, latest, frame, candidate_set, blockers, outcomes, published, current)
         atomic_write_json(root / "model-loop.json", status)
         return status
+
+    def _blueprint_ages(self, latest: Optional[Mapping[str, Any]]) -> Dict[str, float]:
+        """Game cycles since each current blueprint was first seen.
+
+        Only an observed ``game_time_cycles`` advances the clocks, and game time
+        stands still while paused, so a placement ages only while duplicants
+        could have worked on it.  Without an observed game time every age is
+        zero, which withholds the stuck-placement cancel rather than guessing.
+        """
+
+        state = latest if isinstance(latest, Mapping) else {}
+        session = state.get("session_id")
+        if session != self._blueprint_session:
+            self._blueprint_session = session if isinstance(session, str) else None
+            self._blueprint_first_seen = {}
+        now: Optional[float] = None
+        value = state.get("game_time_cycles")
+        if (
+            field_status(state, "game_time_cycles") == "observed"
+            and isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+        ):
+            now = float(value)
+        instances = safe_get(state, "blueprints.by_instance_id")
+        keys = [str(key) for key in instances] if isinstance(instances, Mapping) else []
+        self._blueprint_first_seen = {
+            key: self._blueprint_first_seen.get(key) for key in keys
+        }
+        ages: Dict[str, float] = {}
+        for key in keys:
+            if self._blueprint_first_seen[key] is None:
+                self._blueprint_first_seen[key] = now
+            first = self._blueprint_first_seen[key]
+            ages[key] = max(0.0, now - first) if now is not None and first is not None else 0.0
+        return ages
 
     # -- eligibility --------------------------------------------------------
 

@@ -335,7 +335,37 @@ def _pause_candidate(snapshot: Optional[Mapping[str, Any]] = None) -> Dict[str, 
     return _candidate("pause_game", summary, hint)
 
 
-def _stuck_blueprint_count(snapshot: Mapping[str, Any]) -> int:
+# How long (in game cycles, which do not advance while paused) a placement must
+# exist before it may count as stuck and be offered for cancelling.  Phase 2
+# cancelled an Electrolyzer 66 s after placing it, while the six others took
+# 1.5-4.5 minutes to be built once duplicants reached them
+# (docs/b2-blueprint-lifecycle-20261027.md, roadmap B3).
+STUCK_BLUEPRINT_MIN_AGE_CYCLES = 1.0
+
+
+def _old_enough(key: Any, blueprint_ages: Optional[Mapping[str, float]]) -> bool:
+    """True when the placement has existed long enough to be judged stuck.
+
+    ``blueprint_ages`` maps a ``blueprints.by_instance_id`` key to the game
+    cycles since the caller first saw it.  ``None`` means the caller does not
+    track ages (offline tools), which keeps the old ungated behaviour; a
+    tracked placement without an age is treated as new.
+    """
+
+    if blueprint_ages is None:
+        return True
+    age = blueprint_ages.get(str(key))
+    return (
+        isinstance(age, (int, float))
+        and not isinstance(age, bool)
+        and math.isfinite(age)
+        and age >= STUCK_BLUEPRINT_MIN_AGE_CYCLES
+    )
+
+
+def _stuck_blueprint_count(
+    snapshot: Mapping[str, Any], blueprint_ages: Optional[Mapping[str, float]] = None
+) -> int:
     """Placements no duplicant has ever started and nothing has been delivered to.
 
     One such placement suppresses every building candidate (see
@@ -350,10 +380,12 @@ def _stuck_blueprint_count(snapshot: Mapping[str, Any]) -> int:
     if not isinstance(instances, Mapping):
         return 0
     stuck = 0
-    for entry in instances.values():
+    for key, entry in instances.items():
         if not isinstance(entry, Mapping):
             continue
         if entry.get("in_progress") is True:
+            continue
+        if not _old_enough(key, blueprint_ages):
             continue
         prefab_id = entry.get("prefab_id")
         if not isinstance(prefab_id, str) or prefab_id not in BUILDING_BLUEPRINT_ALLOWLIST:
@@ -755,7 +787,9 @@ def _building_candidate(
     return None
 
 
-def _cancel_blueprint_candidate(snapshot: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+def _cancel_blueprint_candidate(
+    snapshot: Mapping[str, Any], blueprint_ages: Optional[Mapping[str, float]] = None
+) -> Optional[Dict[str, Any]]:
     """Offer cancelling one placed blueprint no duplicant has started.
 
     A placement whose material delivery never starts is dead weight: it blocks
@@ -773,10 +807,12 @@ def _cancel_blueprint_candidate(snapshot: Mapping[str, Any]) -> Optional[Dict[st
     if not isinstance(instances, Mapping):
         return None
     targets: List[tuple] = []
-    for entry in instances.values():
+    for key, entry in instances.items():
         if not isinstance(entry, Mapping):
             continue
         if entry.get("in_progress") is True:
+            continue
+        if not _old_enough(key, blueprint_ages):
             continue
         prefab_id = entry.get("prefab_id")
         cell = entry.get("cell")
@@ -930,8 +966,13 @@ def generate_candidates(
     *,
     allowed_actions: Iterable[str] = (),
     autonomous: bool = False,
+    blueprint_ages: Optional[Mapping[str, float]] = None,
 ) -> Dict[str, Any]:
-    """Return a bounded candidate set; autonomous mode includes priority inverses."""
+    """Return a bounded candidate set; autonomous mode includes priority inverses.
+
+    ``blueprint_ages`` (game cycles since each placement was first seen) gates
+    the stuck-placement logic; see ``STUCK_BLUEPRINT_MIN_AGE_CYCLES``.
+    """
 
     if type(autonomous) is not bool:
         raise ValueError("autonomous must be a boolean")
@@ -986,7 +1027,7 @@ def generate_candidates(
         # blocked the colony's only food and oxygen buildings for many cycles
         # (2026-10-26 round 44).  The cancel stays offered so the model can still
         # clear it.
-        stuck = _stuck_blueprint_count(snapshot)
+        stuck = _stuck_blueprint_count(snapshot, blueprint_ages)
         if stuck:
             notes.append(f"stuck_placement_ignored:{stuck}")
         if pending_builds == 0 or stuck == pending_builds:
@@ -994,7 +1035,7 @@ def generate_candidates(
             # placement's cancel was crowded out of the candidate budget and the
             # model lost the only way to clear it (2026-10-26 round 44).
             if stuck:
-                cancel = _cancel_blueprint_candidate(snapshot)
+                cancel = _cancel_blueprint_candidate(snapshot, blueprint_ages)
                 if cancel is not None:
                     items.append(cancel)
             # A building that exists but of which none works is not offered again:
@@ -1021,7 +1062,7 @@ def generate_candidates(
         else:
             # Unbuilt placements are queued, so no new placement is offered; the
             # cancel is what lets the model clear one that will never be built.
-            cancel = _cancel_blueprint_candidate(snapshot)
+            cancel = _cancel_blueprint_candidate(snapshot, blueprint_ages)
             if cancel is not None:
                 items.append(cancel)
         resume = _resume_candidate(snapshot)
