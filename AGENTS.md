@@ -41,6 +41,7 @@ These rules apply to every Codex task working in this workspace.
 - Existing workers must finish or reach a verified safe checkpoint for their current atomic step before switching; do not start a duplicate writer or replay an uncertain action. Subsequent worker work must use `gpt-6.1-sol` / `max`; the main controller remains `gpt-6-astra` / `max`.
 - If the requested model/reasoning combination is unavailable, report the blocker immediately. Do not silently substitute another model or reasoning effort, or wait silently for capacity.
 - Do not change model, reasoning effort, or service tier in the middle of a live action. End the atomic step first.
+- Test routing (2026-10-27): every test during development is executed by the ChatGPT client, and the controller then calls Cockpit Tools' local API (bitibit account proxy service, model 6.1 terra or 6.1 sol; provider `cockpit`, `scripts/configure-oni-model.ps1 -Provider cockpit -Model <id>`). The final validation uses the cline-pass endpoint below. See `docs/test-handoff-chatgpt-20261027.md`.
 - ONI's own controller model endpoint (2026-10-25): DeepSeek through the Cline-pass gateway, `cline-pass/deepseek-v4.1-flash` at `https://api.cline.bot/api/v1`, wire API `chat_completions`, credential `CLINE_API_KEY`. This is a separate concern from the Codex task routing above; see `docs/model-routing-20261025.md` and use `scripts/configure-oni-model.ps1`.
 
 ## Current autonomous-controller goal

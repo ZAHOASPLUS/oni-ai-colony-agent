@@ -17,6 +17,11 @@ Cover survival, a stable colony, expansion, industry, space, every official main
   `chat_completions`, credential `CLINE_API_KEY`. Escalation model:
   `cline-pass/deepseek-v4-pro`. See `docs/model-routing-20261025.md` for the
   contract, the adapter changes, and the verification evidence.
+- Test routing (2026-10-27, current): every test during development is run by
+  the ChatGPT client against Cockpit Tools' local API (bitibit account proxy,
+  model 6.1 terra or 6.1 sol; provider preset `cockpit`); the final validation
+  of the complete version uses `cline-pass/deepseek-v4.1-flash`. Handoff:
+  `docs/test-handoff-chatgpt-20261027.md`.
 - Codex task routing (2026-10-11; applies only to Codex tasks working on this
   repository, never to the ONI controller's model calls): main controller
   `gpt-6-astra / max`, delegated implementation/review/runtime tasks

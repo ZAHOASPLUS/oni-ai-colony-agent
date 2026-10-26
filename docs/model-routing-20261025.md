@@ -110,3 +110,25 @@ Live evidence: `reports/model-integration/live-integration-smoke.json`.
   loop currently uses one model per run; switching is a configuration change.
 - The gateway's own quota/rate limits are outside ONI's control; the loop's
   existing backoff (60/120/300 s) covers `http_429`.
+
+## Update 2026-10-27: test runs on ChatGPT, final validation on DeepSeek
+
+User decision: every test during development is executed by the ChatGPT client,
+and the controller then calls Cockpit Tools' local OpenAI-compatible API (one
+proxy service of the bitibit account; model 6.1 terra or 6.1 sol, under the
+exact id the proxy lists).  The final validation after the complete version is
+imported uses `cline-pass/deepseek-v4.1-flash`, as above.
+
+- New preset `cockpit`: `http://127.0.0.1:14861/v1`, `chat_completions`, key
+  `COCKPIT_API_KEY`, no default model, endpoint restricted to this machine.
+- A named provider now reads its own key variable first, and an explicit
+  provider whose endpoint host is not its own (`provider_endpoint_mismatch`),
+  an unknown provider (`provider_unknown`) or a missing endpoint/model
+  (`endpoint_unset`) never receives a key.
+- Structured output follows a per-provider ladder: `json_schema -> plain`, or
+  `json_object -> plain` for DeepSeek's own API.
+- Responses from the OpenAI Responses API, OpenAI chat completions, DeepSeek
+  and the cline-pass envelope are covered by
+  `scripts/test_model_format_compat.py`.
+- How the ChatGPT client configures and runs the tests:
+  `docs/test-handoff-chatgpt-20261027.md`.
