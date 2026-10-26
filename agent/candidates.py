@@ -233,13 +233,19 @@ def electrolyzer_supply_offered() -> bool:
     return all(utility in UTILITY_BLUEPRINT_ALLOWLIST for utility in ELECTROLYZER_SUPPLY_UTILITIES)
 
 
-def building_status(state: Optional[Mapping[str, Any]]) -> Dict[str, Dict[str, Optional[int]]]:
+MAX_IDLE_STATUS_ITEMS = 8
+
+
+def building_status(state: Optional[Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
     """Per placeable building: how many are built and how many are working.
 
     ``built`` is the observed completed-prefab count.  ``operational`` counts the
     life-support instances the game reports as operational, and is only given for
-    buildings that reader tracks while its quality is observed.  ``None`` means
-    not observed, which is deliberately distinct from a measured zero.
+    buildings that reader tracks while its quality is observed.  ``idle_status``
+    is the sorted union of the game's status item ids on the instances that do
+    not operate (for example a missing power or pipe input), at most
+    ``MAX_IDLE_STATUS_ITEMS``.  ``None`` means not observed, which is
+    deliberately distinct from a measured zero.
     """
 
     snapshot = dict(state) if isinstance(state, Mapping) else {}
@@ -251,7 +257,7 @@ def building_status(state: Optional[Mapping[str, Any]]) -> Dict[str, Dict[str, O
         built = None
         if not count.blockers and isinstance(count.value, int) and not isinstance(count.value, bool):
             built = count.value
-        result[building_def_id] = {"built": built, "operational": None}
+        result[building_def_id] = {"built": built, "operational": None, "idle_status": None}
     if field_status(snapshot, "life_support_buildings") != "observed":
         return result
     tracked = safe_get(snapshot, "life_support_buildings.tracked_prefab_ids")
@@ -264,15 +270,21 @@ def building_status(state: Optional[Mapping[str, Any]]) -> Dict[str, Dict[str, O
         if building_def_id not in tracked:
             continue
         working = 0
+        reasons: set = set()
         for entry in instances:
             if isinstance(entry, Mapping) and entry.get("prefab_id") == building_def_id:
                 if entry.get("operational") is True:
                     working += 1
+                    continue
+                ids = entry.get("status_item_ids")
+                if isinstance(ids, Sequence) and not isinstance(ids, (str, bytes)):
+                    reasons.update(display_text(item, 48) for item in ids if isinstance(item, str) and item)
         result[building_def_id]["operational"] = working
+        result[building_def_id]["idle_status"] = sorted(reasons)[:MAX_IDLE_STATUS_ITEMS]
     return result
 
 
-def _idle_built_buildings(status: Mapping[str, Mapping[str, Optional[int]]]) -> Dict[str, int]:
+def _idle_built_buildings(status: Mapping[str, Mapping[str, Any]]) -> Dict[str, int]:
     """Buildings that exist but of which not a single one is working.
 
     Placing another of these adds a second idle building rather than output; the

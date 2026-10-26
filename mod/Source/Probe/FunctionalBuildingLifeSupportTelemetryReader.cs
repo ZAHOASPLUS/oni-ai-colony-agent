@@ -29,7 +29,8 @@ namespace OniAiProbeMod.Probe
             "Components.BuildingCompletes.GetWorldItems(activeWorldId)+Operational.IsOperational/IsActive/IsFunctional"
             + "+Storage.GetItems/PrimaryElement.ElementID/Mass"
             + "+ManualDeliveryKG.RequestedItemTag/Capacity/IsPaused"
-            + "+ElementConsumer.IsElementAvailable/AverageConsumeRate";
+            + "+ElementConsumer.IsElementAvailable/AverageConsumeRate"
+            + "+KSelectable.GetStatusItemGroup";
 
         /// <summary>Prefabs whose working state the controller depends on.</summary>
         internal static readonly string[] TrackedPrefabIds =
@@ -127,6 +128,45 @@ namespace OniAiProbeMod.Probe
             }
         }
 
+        private const int StatusItemLimit = 16;
+
+        /// <summary>
+        /// The ids of the status items the game shows on the building, sorted.
+        ///
+        /// They name why a building does not run (no power, no pipe input,
+        /// missing material, ...).  Phase 2 built six Electrolyzers that never
+        /// operated and nothing in the telemetry said why (roadmap B14/B15).
+        /// Diagnostic only; null when the building has no status item group.
+        /// </summary>
+        private static List<object> ReadStatusItemIds(BuildingComplete item)
+        {
+            KSelectable selectable = item.GetComponent<KSelectable>();
+            StatusItemGroup group = selectable == null ? null : selectable.GetStatusItemGroup();
+            if (group == null)
+            {
+                return null;
+            }
+
+            List<string> ids = new List<string>();
+            foreach (StatusItemGroup.Entry entry in group)
+            {
+                string id = entry.item == null ? null : entry.item.Id;
+                if (!string.IsNullOrEmpty(id) && !ids.Contains(id))
+                {
+                    ids.Add(id);
+                }
+            }
+
+            ids.Sort(StringComparer.Ordinal);
+            List<object> result = new List<object>();
+            for (int index = 0; index < ids.Count && index < StatusItemLimit; index++)
+            {
+                result.Add(ids[index]);
+            }
+
+            return result;
+        }
+
         private static Dictionary<string, object> Describe(
             BuildingComplete item, int instanceId, int worldId, string prefabId, WorldContainer world)
         {
@@ -144,6 +184,7 @@ namespace OniAiProbeMod.Probe
 
             BuildingEnabledButton enabled = item.GetComponent<BuildingEnabledButton>();
             value["enabled"] = enabled == null ? (object)null : enabled.IsEnabled;
+            value["status_item_ids"] = ReadStatusItemIds(item);
 
             Storage storage = item.GetComponent<Storage>();
             if (storage == null)

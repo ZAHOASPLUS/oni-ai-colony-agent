@@ -46,8 +46,15 @@ def life_support(*instances, status="observed"):
     }, {"status": status, "completeness": "complete", "scope": "active_world", "source": "test"}
 
 
-def instance(prefab_id, operational):
-    return {"prefab_id": prefab_id, "operational": operational, "functional": True, "inventory_valid": True}
+def instance(prefab_id, operational, status_item_ids=()):
+    return {
+        "prefab_id": prefab_id, "operational": operational, "functional": True, "inventory_valid": True,
+        "status_item_ids": list(status_item_ids),
+    }
+
+
+# Placeholder ids: the real status item ids are only known from a live run.
+ELECTROLYZER_STATUS = ("FixtureNoLiquidInput", "FixtureNoPower")
 
 
 def phase2_state(*, paused=True, life_status="observed", diffuser_working=False):
@@ -56,7 +63,7 @@ def phase2_state(*, paused=True, life_status="observed", diffuser_working=False)
     support, support_quality = life_support(
         instance("MineralDeoxidizer", diffuser_working),
         instance("MineralDeoxidizer", False),
-        *[instance("Electrolyzer", False) for _ in range(6)],
+        *[instance("Electrolyzer", False, ELECTROLYZER_STATUS) for _ in range(6)],
         status=life_status,
     )
     quality = {f"buildings.{key}": contract_quality_fixture(BUILDING_COMPLETED_COUNT_CONTRACT_ID) for key in COUNT_KEYS}
@@ -75,15 +82,18 @@ def phase2_state(*, paused=True, life_status="observed", diffuser_working=False)
 class BuildingStatusTests(unittest.TestCase):
     def test_counts_and_working_instances(self):
         status = C.building_status(phase2_state())
-        self.assertEqual(status["Electrolyzer"], {"built": 6, "operational": 0})
-        self.assertEqual(status["MineralDeoxidizer"], {"built": 2, "operational": 0})
-        self.assertEqual(status["AlgaeHabitat"], {"built": 0, "operational": 0})
+        self.assertEqual(
+            status["Electrolyzer"],
+            {"built": 6, "operational": 0, "idle_status": ["FixtureNoLiquidInput", "FixtureNoPower"]},
+        )
+        self.assertEqual(status["MineralDeoxidizer"], {"built": 2, "operational": 0, "idle_status": []})
+        self.assertEqual(status["AlgaeHabitat"], {"built": 0, "operational": 0, "idle_status": []})
         # Not tracked by the life-support reader: working state unobserved.
-        self.assertEqual(status["MicrobeMusher"], {"built": 0, "operational": None})
+        self.assertEqual(status["MicrobeMusher"], {"built": 0, "operational": None, "idle_status": None})
 
     def test_unobserved_life_support_reports_null_not_zero(self):
         status = C.building_status(phase2_state(life_status="estimated"))
-        self.assertEqual(status["Electrolyzer"], {"built": 6, "operational": None})
+        self.assertEqual(status["Electrolyzer"], {"built": 6, "operational": None, "idle_status": None})
 
     def test_a_count_without_quality_is_not_used(self):
         state = phase2_state()
@@ -100,7 +110,16 @@ class BuildingStatusTests(unittest.TestCase):
         self.assertNotIn("MineralDeoxidizer", C._idle_built_buildings(working))
 
     def test_the_colony_summary_carries_the_building_status(self):
-        self.assertEqual(colony_summary(phase2_state())["buildings"]["Electrolyzer"], {"built": 6, "operational": 0})
+        self.assertEqual(colony_summary(phase2_state())["buildings"]["Electrolyzer"]["operational"], 0)
+        self.assertEqual(
+            colony_summary(phase2_state())["buildings"]["Electrolyzer"]["idle_status"],
+            ["FixtureNoLiquidInput", "FixtureNoPower"],
+        )
+
+    def test_working_instances_do_not_contribute_idle_reasons(self):
+        state = phase2_state(diffuser_working=True)
+        state["life_support_buildings"]["instances"][0]["status_item_ids"] = ["FixtureWorking"]
+        self.assertEqual(C.building_status(state)["MineralDeoxidizer"]["idle_status"], [])
 
 
 class PlacementCandidateTests(unittest.TestCase):
