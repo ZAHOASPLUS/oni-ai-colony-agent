@@ -77,8 +77,10 @@ The whole goal is complete only with actual evidence for autonomous observe/plan
   `review-fixes-20260926` (not pushed).
 - No game, Bridge or controller process is expected to be running, and no run is
   admitted. Any next real test needs a fresh admission on this host.
-- Next: milestone M0 (offline hardening) in `docs/roadmap-20261027.md`; the
-  user decisions D1-D4 listed there gate milestone M1.
+- M0 offline work is done (local commits up to `6020a0c`). User decisions
+  (2026-10-27): D1 - M1 runs on a new standard-start (Terra) colony admitted as
+  a named test clone; D4 - a checkpoint's identity is its manifest chain, with
+  no copied placeholder preview. D2 (push) and D3 (learning metric) are open.
 
 ## Historical handoff (2026-10-11, superseded)
 
