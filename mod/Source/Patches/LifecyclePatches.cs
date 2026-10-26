@@ -36,6 +36,99 @@ namespace OniAiProbeMod.Patches
             PatchSaveLifecycle(harmony);
             PatchAutosaveSuppression(harmony);
             PatchPauseLedger(harmony);
+            PatchModDialogSuppression(harmony);
+        }
+
+        // A validation process loads a clone that was saved under a different
+        // mod footprint, so Game.OnSpawn raises the "save game mods differ"
+        // dialog on every run.  Dismissing it needed a GUI click, which cost run
+        // m1-0930a (a scripted window resize hung the game).  For an accepted
+        // startup binding the footprint events are recorded as evidence and
+        // that one dialog is skipped; every other mod event keeps its dialog,
+        // and normal play is not patched at all.
+        private static void PatchModDialogSuppression(Harmony harmony)
+        {
+            if (!StartupBinding.WasAccepted)
+            {
+                return;
+            }
+            try
+            {
+                MethodInfo target = AccessTools.Method(
+                    typeof(KMod.Manager),
+                    "NotifyDialog",
+                    new[] { typeof(string), typeof(string), typeof(GameObject) });
+                if (target == null)
+                {
+                    ProbeWriter.WriteError("patch_mod_dialog_suppression", "KMod.Manager.NotifyDialog was not found.");
+                    Debug.LogWarning(Mod.LogPrefix + " KMod.Manager.NotifyDialog was not found");
+                    return;
+                }
+
+                harmony.Patch(
+                    target,
+                    prefix: new HarmonyMethod(AccessTools.Method(typeof(LifecyclePatches), nameof(OnModNotifyDialog))));
+                ProbeWriter.WriteEvent("probe_patch_registered", new Dictionary<string, object>
+                {
+                    { "target", "KMod.Manager.NotifyDialog" },
+                    { "patch", "mod_dialog_suppression" }
+                });
+            }
+            catch (Exception ex)
+            {
+                ProbeWriter.WriteError("patch_mod_dialog_suppression", ex);
+            }
+        }
+
+        private static bool OnModNotifyDialog(KMod.Manager __instance, string title)
+        {
+            try
+            {
+                List<KMod.Event> events = __instance == null ? null : __instance.events;
+                if (events == null || events.Count == 0)
+                {
+                    return true;
+                }
+                string differTitle = STRINGS.UI.FRONTEND.MOD_DIALOGS.SAVE_GAME_MODS_DIFFER.TITLE;
+                if (!string.Equals(title, differTitle, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+
+                List<object> recorded = new List<object>();
+                foreach (KMod.Event item in events)
+                {
+                    if (item.event_type != KMod.EventType.ExpectedActive &&
+                        item.event_type != KMod.EventType.ExpectedInactive)
+                    {
+                        // Anything beyond a footprint difference is shown as usual.
+                        return true;
+                    }
+                    string modTitle = item.mod.title ?? string.Empty;
+                    recorded.Add(new Dictionary<string, object>
+                    {
+                        { "event_type", item.event_type.ToString() },
+                        { "mod_id", item.mod.id ?? string.Empty },
+                        { "mod_title", modTitle.Length > 64 ? modTitle.Substring(0, 64) : modTitle },
+                        { "mod_version", item.mod.version },
+                        { "distribution_platform", item.mod.distribution_platform.ToString() }
+                    });
+                }
+
+                events.Clear();
+                ProbeWriter.WriteEvent("mod_dialog_suppressed", new Dictionary<string, object>
+                {
+                    { "dialog", "save_game_mods_differ" },
+                    { "events", recorded }
+                });
+                Debug.Log(Mod.LogPrefix + " Save-game mod footprint dialog recorded and skipped (" + recorded.Count + " events)");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                ProbeWriter.WriteError("mod_dialog_suppression", ex);
+                return true;
+            }
         }
 
         // The executor only runs for an accepted startup binding; it needs the

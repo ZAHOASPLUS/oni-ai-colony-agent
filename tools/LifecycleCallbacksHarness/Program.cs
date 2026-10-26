@@ -23,6 +23,7 @@ namespace LifecycleCallbacksHarness
         {
             "OnGameStarted",
             "OnGameStopped",
+            "OnModNotifyDialog",
             "OnSaveLoadStarting",
             "OnSaveLoadFinished",
             "OnSaveStarted",
