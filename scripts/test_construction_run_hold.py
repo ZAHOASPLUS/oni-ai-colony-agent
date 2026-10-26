@@ -14,7 +14,6 @@ is itself a paused-only action, so an unbounded hold would deadlock the colony.
 from __future__ import annotations
 
 import copy
-import json
 import pathlib
 import sys
 import unittest
@@ -25,9 +24,8 @@ if str(ROOT) not in sys.path:
 
 from agent.candidates import generate_candidates  # noqa: E402
 from agent.model_loop import CONSTRUCTION_RUN_HOLD_SECONDS, ModelLoop  # noqa: E402
+from scripts.recorded_state import load_recorded_state  # noqa: E402
 
-KLEI = pathlib.Path.home() / "Documents" / "Klei" / "OxygenNotIncluded"
-LIVE_STATE = KLEI / "ai-bridge" / "latest_state.json"
 
 ALLOWED = ["set_paused", "set_research", "place_building_blueprint", "cancel_building_blueprint"]
 PLACED = {"id_1": {"prefab_id": "MineralDeoxidizer", "cell": 139386, "in_progress": False}}
@@ -41,14 +39,7 @@ RUNNING_BUILDING = [{"instance_id": 1, "prefab_id": "MineralDeoxidizer", "operat
 def load_base_state() -> dict:
     """A recorded state, so the ``game.paused`` contract is really observed."""
 
-    if LIVE_STATE.is_file():
-        try:
-            document = json.loads(LIVE_STATE.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError):
-            document = None
-        if isinstance(document, dict) and isinstance(document.get("quality"), dict):
-            return document
-    return {}
+    return load_recorded_state()
 
 
 def state(base: dict, *, paused: bool, blueprints: dict, buildings: list) -> dict:

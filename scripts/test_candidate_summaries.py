@@ -15,7 +15,6 @@ satisfied, then override only the fields under test.
 from __future__ import annotations
 
 import copy
-import json
 import pathlib
 import sys
 import unittest
@@ -31,15 +30,15 @@ from agent.candidates import (  # noqa: E402
     _queued_work_phrases,
     _resume_candidate,
 )
+from scripts.recorded_state import load_recorded_state  # noqa: E402
 
-BRIDGE = pathlib.Path.home() / "Documents" / "Klei" / "OxygenNotIncluded" / "ai-bridge"
 
 
 def live_state() -> dict:
-    path = BRIDGE / "latest_state.json"
-    if not path.is_file():
-        raise unittest.SkipTest("no recorded live state")
-    return json.loads(path.read_text(encoding="utf-8-sig"))
+    state = load_recorded_state()
+    if not state:
+        raise unittest.SkipTest("no recorded state")
+    return state
 
 
 def with_digs(state: dict, marked: bool) -> dict:

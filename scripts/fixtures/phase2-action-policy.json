@@ -1,0 +1,29 @@
+{
+  "actions_enabled": false,
+  "allowed_actions": [
+    "noop",
+    "focus_note",
+    "set_paused",
+    "set_research",
+    "set_duplicant_chore_priority",
+    "mark_dig_cells",
+    "cancel_dig_cells",
+    "place_building_blueprint",
+    "cancel_building_blueprint",
+    "place_utility_blueprint_path",
+    "cancel_utility_blueprint_path"
+  ],
+  "allowed_save_hashes": [
+    "sha256:504869c1fca4733169ee479a0df71efa32f9959a26040d59909d5f220e85ccee"
+  ],
+  "command_ttl_seconds": 300,
+  "controller_id": "dsh-deepseek-controller",
+  "execution_mode": "autonomous",
+  "generated_at": "2026-10-26T11:30:38+09:00",
+  "max_pending_commands": 1,
+  "run_id": "dsh-20261025-r01",
+  "schema": "oni.action-policy.v2",
+  "session_id": "session-20261026-113017-22be51f4",
+  "suggestions_enabled": true,
+  "world_id": 0
+}

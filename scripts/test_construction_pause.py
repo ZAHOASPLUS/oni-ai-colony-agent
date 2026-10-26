@@ -17,7 +17,6 @@ so the model cannot paper the colony with plans instead of letting it work.
 from __future__ import annotations
 
 import copy
-import json
 import pathlib
 import sys
 import unittest
@@ -27,23 +26,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agent import candidates as C  # noqa: E402
+from scripts.recorded_state import load_recorded_policy, load_recorded_state  # noqa: E402
 
-KLEI = pathlib.Path.home() / "Documents" / "Klei" / "OxygenNotIncluded"
-LIVE_STATE = KLEI / "ai-bridge" / "latest_state.json"
 
 PLACED = {"id_1": {"prefab_id": "MineralDeoxidizer", "in_progress": False, "progress_percent": 0}}
 UNDERWAY = {"id_1": {"prefab_id": "MineralDeoxidizer", "in_progress": True, "progress_percent": 40}}
 
 
 def load_base_state() -> dict:
-    if LIVE_STATE.is_file():
-        try:
-            document = json.loads(LIVE_STATE.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError):
-            document = None
-        if isinstance(document, dict) and isinstance(document.get("quality"), dict):
-            return document
-    return {}
+    return load_recorded_state()
 
 
 def with_state(base: dict, *, paused: bool, blueprints: dict) -> dict:
@@ -65,11 +56,7 @@ class ConstructionPauseTests(unittest.TestCase):
         self.base = load_base_state()
         if not self.base:
             self.skipTest("no recorded live state available to derive the fixture from")
-        policy = KLEI / "ai-bridge" / "action-policy.json"
-        try:
-            self.allowed = json.loads(policy.read_text(encoding="utf-8-sig")).get("allowed_actions") or []
-        except (OSError, json.JSONDecodeError):
-            self.allowed = []
+        self.allowed = load_recorded_policy().get("allowed_actions") or []
         if not self.allowed:
             self.skipTest("no recorded action policy available")
 

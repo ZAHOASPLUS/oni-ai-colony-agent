@@ -17,7 +17,6 @@ contract the gate validates stays intact; only the alert payload is varied.
 from __future__ import annotations
 
 import copy
-import json
 import pathlib
 import sys
 import unittest
@@ -28,24 +27,17 @@ if str(ROOT) not in sys.path:
 
 from agent import candidates as C  # noqa: E402
 from agent.field_contracts import CANONICAL_ALERT_IDS, ONSET_ALERT_IDS  # noqa: E402
+from scripts.recorded_state import load_recorded_state  # noqa: E402
 
-KLEI = pathlib.Path.home() / "Documents" / "Klei" / "OxygenNotIncluded"
-LIVE_STATE = KLEI / "ai-bridge" / "latest_state.json"
 
 
 def load_base_state() -> dict:
     """A real paused state, or a minimal one when no run is available."""
 
-    if LIVE_STATE.is_file():
-        try:
-            document = json.loads(LIVE_STATE.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError):
-            document = None
-        if isinstance(document, dict) and isinstance(document.get("quality"), dict):
-            base = document
-            base.setdefault("game", {})["paused"] = True
-            return base
-    return {}
+    base = load_recorded_state()
+    if base:
+        base.setdefault("game", {})["paused"] = True
+    return base
 
 
 def state_with_alerts(base: dict, alerts: list[str]) -> dict:
