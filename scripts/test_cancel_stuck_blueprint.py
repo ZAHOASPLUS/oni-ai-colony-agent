@@ -157,5 +157,52 @@ class StuckBlueprintTests(unittest.TestCase):
         self.assertTrue([cid for cid in ids if cid != "wait"], ids)
 
 
+class CancelSummaryDescribesTheTarget(unittest.TestCase):
+    """The summary names the cancelled placement, not the last entry scanned.
+
+    The builder once passed the scan loop's leftover ``entry`` to the summary, so
+    with two placements the model could read one placement's progress and
+    delivery next to another placement's cell.
+    """
+
+    def test_summary_uses_the_chosen_placement(self):
+        snapshot = {
+            "blueprints": {
+                "by_instance_id": {
+                    # Lowest cell: the one the builder picks.
+                    "id_1": {
+                        "prefab_id": "Electrolyzer", "cell": 100, "in_progress": False,
+                        "progress_percent": 0,
+                        "material_lineage": [
+                            {"tag": "Cinnabar", "delivered_mass_kg": 0, "required_mass_kg": 200},
+                        ],
+                    },
+                    # Scanned last; its delivery must not leak into the summary.
+                    "id_2": {
+                        "prefab_id": "MineralDeoxidizer", "cell": 900, "in_progress": False,
+                        "progress_percent": 0,
+                        "material_lineage": [
+                            {"tag": "Dirt", "delivered_mass_kg": 37, "required_mass_kg": 100},
+                        ],
+                    },
+                }
+            }
+        }
+        original = C.build_cancel_building_blueprint_hint
+        C.build_cancel_building_blueprint_hint = lambda state, cells: {
+            "action": "cancel_building_blueprint", "args": {"cells": list(cells)},
+        }
+        try:
+            candidate = C._cancel_blueprint_candidate(snapshot)
+        finally:
+            C.build_cancel_building_blueprint_hint = original
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["candidate_id"], "cancel_blueprint_100")
+        summary = candidate["summary"]
+        self.assertIn("Electrolyzer", summary)
+        self.assertIn("0 of 200 kg Cinnabar", summary)
+        self.assertNotIn("Dirt", summary)
+
+
 if __name__ == "__main__":
     unittest.main()

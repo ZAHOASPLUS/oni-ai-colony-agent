@@ -705,15 +705,17 @@ def _cancel_blueprint_candidate(snapshot: Mapping[str, Any]) -> Optional[Dict[st
             continue
         if isinstance(cell, bool) or not isinstance(cell, int) or cell <= 0:
             continue
-        targets.append((cell, prefab_id))
-    for cell, prefab_id in sorted(targets):
+        targets.append((cell, prefab_id, entry))
+    # The summary must describe the placement being cancelled, not whichever
+    # entry the scan above happened to visit last.
+    for cell, prefab_id, target_entry in sorted(targets, key=lambda target: target[0]):
         try:
             hint = build_cancel_building_blueprint_hint(snapshot, cells=[cell])
         except ValueError:
             continue
         return _candidate(
             f"cancel_blueprint_{cell}",
-            _cancel_blueprint_summary(entry, prefab_id, cell),
+            _cancel_blueprint_summary(target_entry, prefab_id, cell),
             hint,
             risk="medium",
         )
