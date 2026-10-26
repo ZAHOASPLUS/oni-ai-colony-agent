@@ -67,8 +67,12 @@ The whole goal is complete only with actual evidence for autonomous observe/plan
   leftover processes). Summary: `reports/phase2/PHASE2-SUMMARY.md`; acceptance:
   `reports/phase2/final-acceptance.json`.
 - Phase 2 is not whole-goal progress beyond early survival: oxygen and food never
-  stabilized (no algae in that world; 2x2/2x3 buildings never started), and
-  there is no temperature action.
+  stabilized, and there is no temperature action. The final session built two
+  Oxygen Diffusers (no algae in that world) and six Electrolyzers (no power and
+  no liquid pipe, which the action catalog cannot provide); none operated. The
+  earlier "2x2/2x3 buildings never start" conclusion was a misreading:
+  `docs/b2-blueprint-lifecycle-20261027.md`. Each game launch reloaded the
+  clone save, so progress did not carry across processes.
 - Source: all Phase 2 work is committed locally as `b08a031..00e1c8f` on
   `review-fixes-20260926` (not pushed).
 - No game, Bridge or controller process is expected to be running, and no run is

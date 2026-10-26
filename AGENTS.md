@@ -46,7 +46,7 @@ These rules apply to every Codex task working in this workspace.
 ## Current autonomous-controller goal
 
 - User-approved goal and current execution contract: `docs/active-goal.md`.
-- Execution roadmap (milestones, open problem list B1-B13, pending user decisions): `docs/roadmap-20261027.md`.
+- Execution roadmap (milestones, open problem list B1-B16, pending user decisions): `docs/roadmap-20261027.md`.
 - User override (2026-10-11): implement fully autonomous decisions and execution on verified test clones; routine commands do not require per-command human approval once the versioned autonomous authorization path is implemented and admitted.
 - Each implementation round has one minimal increment and at most one minimal real-game test attempt, followed by a brief result and automatic continuation. Do not add routine full regression, Mock/replay, A/B, long stress, or fixed test-count gates. Necessary compilation/syntax checks remain allowed.
 - A failed real-game attempt is not repeated in the same round. Diagnose from its evidence and make a material correction before another round; unsafe preconditions mean no test is launched. Preserve all live-game safety and restoration requirements above.
