@@ -40,6 +40,7 @@ WAIT_CANDIDATE_ID = "wait"
 # Including the always-present "wait"; the full paused set (two research, two
 # priority, one dig, three buildings, resume) never truncates.
 MAX_CANDIDATES = 10
+MAX_AUTONOMOUS_CANDIDATES = 12
 # Early-game chore groups offered for a one-step raise, in preference order.
 PRIORITY_GROUPS = ("Dig", "Build")
 MAX_PRIORITY_CANDIDATES = 2
@@ -237,6 +238,52 @@ def _priority_candidates(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     return result
 
 
+def _autonomous_priority_candidates(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Offer genuine one-step changes in both directions for a stable target.
+
+    The target order is independent of its current priority, so a later fresh
+    snapshot can offer the inverse of a confirmed change. Every candidate is
+    still built from current typed telemetry; history alone grants no action.
+    """
+    duplicants = safe_get(state, "duplicants.by_instance_id")
+    if not isinstance(duplicants, dict):
+        return []
+    result: List[Dict[str, Any]] = []
+    for group in PRIORITY_GROUPS:
+        options = []
+        for entry in duplicants.values():
+            if not isinstance(entry, dict):
+                continue
+            instance_id = entry.get("instance_id")
+            priorities = entry.get("chore_priorities")
+            current = priorities.get(group) if isinstance(priorities, dict) else None
+            if (
+                type(instance_id) is int and instance_id > 0
+                and type(current) is int and 0 <= current <= 5
+            ):
+                options.append((instance_id, current, entry))
+        for instance_id, current, entry in sorted(options, key=lambda item: item[0]):
+            pair = []
+            for target, verb in ((current + 1, "Raise"), (current - 1, "Lower")):
+                if not 0 <= target <= 5:
+                    continue
+                try:
+                    hint = build_duplicant_priority_hint(
+                        state, instance_id=instance_id, chore_group=group, priority=target
+                    )
+                except ValueError:
+                    continue
+                pair.append(_candidate(
+                    f"priority_{instance_id}_{group}_{target}",
+                    f"{verb} {display_text(entry.get('name'))}'s {group} priority from {current} to {target}",
+                    hint,
+                ))
+            if pair:
+                result.extend(pair)
+                break
+    return result
+
+
 def _dig_runs(state: Dict[str, Any]) -> List[List[int]]:
     cells = safe_get(state, "designations.dig.candidate_cells")
     by_cell = safe_get(state, "designations.dig.by_cell")
@@ -334,9 +381,12 @@ def generate_candidates(
     state: Optional[Mapping[str, Any]],
     *,
     allowed_actions: Iterable[str] = (),
+    autonomous: bool = False,
 ) -> Dict[str, Any]:
-    """Return up to MAX_CANDIDATES candidates (the last one is always "wait")."""
+    """Return a bounded candidate set; autonomous mode includes priority inverses."""
 
+    if type(autonomous) is not bool:
+        raise ValueError("autonomous must be a boolean")
     allowed = set(allowed_actions)
     items: List[Dict[str, Any]] = []
     blockers: List[str] = []
@@ -352,7 +402,9 @@ def generate_candidates(
         # Advanced actions require a paused game; resume is offered last so a
         # model that wants duplicants to act can still return to play.
         items.extend(_research_candidates(snapshot))
-        items.extend(_priority_candidates(snapshot))
+        items.extend(
+            _autonomous_priority_candidates(snapshot) if autonomous else _priority_candidates(snapshot)
+        )
         dig = _dig_candidate(snapshot)
         if dig is not None:
             items.append(dig)
@@ -365,7 +417,8 @@ def generate_candidates(
         resume = _resume_candidate(snapshot)
         if resume is not None:
             items.append(resume)
-    items = [item for item in items if item["action"] in allowed][: MAX_CANDIDATES - 1]
+    maximum = MAX_AUTONOMOUS_CANDIDATES if autonomous else MAX_CANDIDATES
+    items = [item for item in items if item["action"] in allowed][: maximum - 1]
     items.append(
         {
             "candidate_id": WAIT_CANDIDATE_ID,

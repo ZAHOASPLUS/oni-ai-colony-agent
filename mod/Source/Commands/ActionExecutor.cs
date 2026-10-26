@@ -40,6 +40,33 @@ namespace OniAiProbeMod.Commands
         private const int CancelEventHash = 2127324410;
         private const double FloatEqualityRelativeTolerance = 0.000001;
         private const string ApprovalReceiptSchema = "oni.approval-receipt.v1";
+        private const string AutonomousApprovalReceiptSchema = "oni.approval-receipt.v2";
+        private const string AutonomousCommandSchema = "oni.command.v4";
+        private const string AutonomousPolicySchema = "oni.action-policy.v2";
+        private const int MaxAuthorityIdentifierLength = 80;
+
+        private static readonly string[] ApprovalReceiptFields =
+        {
+            "schema", "command_id", "command_intent_hash", "source_frame_id", "source",
+            "policy_hash", "approved_by", "approved_at", "receipt_hash"
+        };
+
+        private static readonly string[] AutonomousPolicyRequiredFields =
+        {
+            "schema", "actions_enabled", "suggestions_enabled", "allowed_actions",
+            "allowed_save_hashes", "command_ttl_seconds", "max_pending_commands",
+            "execution_mode", "run_id", "controller_id", "session_id", "world_id"
+        };
+
+        private static readonly HashSet<string> PolicyActionCatalog = new HashSet<string>(
+            new[]
+            {
+                "focus_note", "set_paused", "set_research", "set_duplicant_chore_priority",
+                "mark_dig_cells", "cancel_dig_cells", "place_building_blueprint",
+                "cancel_building_blueprint", "place_utility_blueprint_path",
+                "cancel_utility_blueprint_path", "noop"
+            },
+            StringComparer.Ordinal);
 
         private static readonly string[] CommandIntentFields =
         {
@@ -636,6 +663,43 @@ namespace OniAiProbeMod.Commands
                             latchMutation: false);
                         return;
                     }
+                }
+
+                // Only the V4 route adds this final authorization read. A policy
+                // or identity change while the durable claim/ACK was written
+                // still has a known no-dispatch outcome, so it must not be
+                // reported as an uncertain game mutation or retried.
+                if (IsAutonomousCommand(command))
+                {
+                    string dispatchRefusal = ValidateAutonomousDispatch(
+                        command, validation, dirs, path, commandIntentHash);
+                    if (dispatchRefusal != null)
+                    {
+                        if (mutating)
+                        {
+                            FinalizeClaimedFailure(
+                                path,
+                                dirs,
+                                command,
+                                id,
+                                action,
+                                attemptId,
+                                commandIntentHash,
+                                "runtime_fail",
+                                "Autonomous authorization was revoked before dispatch: " + dispatchRefusal,
+                                validation.BeforeState,
+                                null,
+                                latchMutation: false);
+                        }
+                        else
+                        {
+                            QuarantineCommand(path, dirs, command, "rejected", dispatchRefusal, "runtime_fail");
+                        }
+                        return;
+                    }
+                }
+                if (mutating)
+                {
                     dispatchMayHaveStarted = true;
                 }
 
@@ -871,12 +935,13 @@ namespace OniAiProbeMod.Commands
             string action = ReadString(command, "action");
             string schema = ReadString(command, "schema");
             bool stateChanging = IsStateChangingAction(action);
-            if (!string.Equals(schema, "oni.command.v3", StringComparison.Ordinal) &&
+            bool autonomous = IsAutonomousCommand(command);
+            if (!autonomous && !string.Equals(schema, "oni.command.v3", StringComparison.Ordinal) &&
                 !(string.Equals(schema, "oni.command.v2", StringComparison.Ordinal) && !stateChanging))
             {
                 return ValidationResult.Reject(
                     stateChanging
-                        ? "State-changing actions require oni.command.v3 trusted field contracts."
+                        ? "State-changing actions require oni.command.v3 or oni.command.v4 trusted field contracts."
                         : "Unsupported command schema.");
             }
 
@@ -938,9 +1003,10 @@ namespace OniAiProbeMod.Commands
                 return ValidationResult.Reject(policyError);
             }
 
-            if (!string.Equals(ReadString(policy, "schema"), "oni.action-policy.v1", StringComparison.Ordinal))
+            string authorityError = ValidateCommandAuthority(command, policy);
+            if (authorityError != null)
             {
-                return ValidationResult.Reject("Unsupported action policy schema.");
+                return ValidationResult.Reject(authorityError);
             }
 
             if (policy["actions_enabled"]?.Type != JTokenType.Boolean || !policy["actions_enabled"].Value<bool>())
@@ -953,11 +1019,7 @@ namespace OniAiProbeMod.Commands
                 return ValidationResult.Reject("Action is not allowed by local policy: " + action);
             }
 
-            if (!string.Equals(ReadString(command, "approved_by"), "local_human", StringComparison.Ordinal))
-            {
-                return ValidationResult.Reject("approved_by must identify the local human approval path.");
-            }
-            string approvalReceiptError = stateChanging ? ValidateApprovalReceipt(command, policy) : null;
+            string approvalReceiptError = stateChanging || autonomous ? ValidateApprovalReceipt(command, policy) : null;
             if (approvalReceiptError != null)
             {
                 return ValidationResult.Reject(approvalReceiptError);
@@ -1050,35 +1112,239 @@ namespace OniAiProbeMod.Commands
                 ProbeSession.SaveWriteGeneration);
         }
 
-        private static string ValidateApprovalReceipt(JObject command, JObject policy)
+        private static bool IsAutonomousCommand(JObject command)
         {
-            if (!string.Equals(ReadString(command, "approved_by"), "local_human", StringComparison.Ordinal))
+            return string.Equals(ReadString(command, "schema"), AutonomousCommandSchema, StringComparison.Ordinal);
+        }
+
+        private static string ValidateCommandAuthority(JObject command, JObject policy)
+        {
+            bool autonomous = IsAutonomousCommand(command);
+            string expectedPolicySchema = autonomous ? AutonomousPolicySchema : "oni.action-policy.v1";
+            string expectedApprover = autonomous ? "autonomous_controller" : "local_human";
+            if (!string.Equals(ReadString(policy, "schema"), expectedPolicySchema, StringComparison.Ordinal))
             {
-                return "approved_by must identify the local human approval path.";
+                return "Command and action policy authority versions do not match.";
+            }
+            if (command["approved_by"]?.Type != JTokenType.String ||
+                !string.Equals(ReadString(command, "approved_by"), expectedApprover, StringComparison.Ordinal))
+            {
+                return "approved_by does not identify the command's versioned authority path.";
             }
 
+            if (!autonomous)
+            {
+                if (command["run_id"] != null || command["controller_id"] != null ||
+                    policy["execution_mode"] != null || policy["run_id"] != null ||
+                    policy["controller_id"] != null || policy["session_id"] != null || policy["world_id"] != null)
+                {
+                    return "Legacy human authority may not carry autonomous authority fields.";
+                }
+                // Non-mutating legacy commands do not require receipts, but a
+                // supplied autonomous receipt must never select a mixed route.
+                JToken receiptToken = command["approval_receipt"];
+                if (receiptToken != null && receiptToken.Type != JTokenType.Null)
+                {
+                    JObject legacyReceipt = receiptToken as JObject;
+                    if (legacyReceipt == null ||
+                        !string.Equals(ReadString(legacyReceipt, "schema"), ApprovalReceiptSchema, StringComparison.Ordinal) ||
+                        !string.Equals(ReadString(legacyReceipt, "approved_by"), "local_human", StringComparison.Ordinal) ||
+                        legacyReceipt["run_id"] != null || legacyReceipt["controller_id"] != null)
+                    {
+                        return "Legacy commands require the V1 human receipt authority route.";
+                    }
+                }
+                return null;
+            }
+
+            string policyError = ValidateAutonomousPolicy(policy);
+            if (policyError != null)
+            {
+                return policyError;
+            }
+            string mode = ReadString(command, "mode");
+            if (!string.Equals(mode, "model_selected", StringComparison.Ordinal) &&
+                !string.Equals(mode, "suggested", StringComparison.Ordinal))
+            {
+                return "Autonomous V4 commands require mode=model_selected or mode=suggested.";
+            }
+            if (!IsAuthorityIdentifier(command["run_id"]) || !IsAuthorityIdentifier(command["controller_id"]) ||
+                !JToken.DeepEquals(command["run_id"], policy["run_id"]) ||
+                !JToken.DeepEquals(command["controller_id"], policy["controller_id"]))
+            {
+                return "Autonomous command run/controller authority does not exactly match the policy.";
+            }
+            if (!StartupBinding.IsSessionVerified || !ProbeSession.IsSaveSessionActive ||
+                !string.Equals(ReadString(policy, "run_id"), StartupBinding.ValidationRunId, StringComparison.Ordinal))
+            {
+                return "Autonomous authority is not bound to the verified active startup run.";
+            }
+            if (command["session_id"]?.Type != JTokenType.String ||
+                !JToken.DeepEquals(command["session_id"], policy["session_id"]) ||
+                !string.Equals(ReadString(policy, "session_id"), ProbeSession.CurrentSessionId, StringComparison.Ordinal))
+            {
+                return "Autonomous authority does not match the active Probe session.";
+            }
+            if (!TryReadInt(command, "world_id", out int commandWorld) || commandWorld < 0 ||
+                !JToken.DeepEquals(command["world_id"], policy["world_id"]) ||
+                commandWorld != ProbeSession.CurrentWorldId)
+            {
+                return "Autonomous authority does not match the active world.";
+            }
+            JArray allowedSaves = policy["allowed_save_hashes"] as JArray;
+            if (allowedSaves == null || allowedSaves.Count != 1 ||
+                command["save_id_hash"]?.Type != JTokenType.String ||
+                !JToken.DeepEquals(command["save_id_hash"], allowedSaves[0]) ||
+                !string.Equals(ReadString(command, "save_id_hash"), ProbeSession.CurrentSaveIdHash, StringComparison.Ordinal))
+            {
+                return "Autonomous authority is not bound to the single active allowed save.";
+            }
+            return null;
+        }
+
+        private static string ValidateAutonomousPolicy(JObject policy)
+        {
+            if (AutonomousPolicyRequiredFields.Any(field => policy[field] == null) ||
+                !HasOnlyKeys(policy, AutonomousPolicyRequiredFields.Concat(new[] { "generated_at" }).ToArray()))
+            {
+                return "Autonomous action policy has missing or unsupported fields.";
+            }
+            if (policy["execution_mode"]?.Type != JTokenType.String ||
+                !string.Equals(ReadString(policy, "execution_mode"), "autonomous", StringComparison.Ordinal) ||
+                !IsAuthorityIdentifier(policy["run_id"]) || !IsAuthorityIdentifier(policy["controller_id"]) ||
+                !IsPolicySessionIdentifier(policy["session_id"]) ||
+                !TryReadInt(policy, "world_id", out int worldId) || worldId < 0)
+            {
+                return "Autonomous action policy execution identity is invalid.";
+            }
+            if (policy["actions_enabled"]?.Type != JTokenType.Boolean ||
+                policy["suggestions_enabled"]?.Type != JTokenType.Boolean ||
+                !TryReadInt(policy, "command_ttl_seconds", out int ttl) || ttl < 1 || ttl > 300 ||
+                !TryReadInt(policy, "max_pending_commands", out int maximumPending) || maximumPending < 1 || maximumPending > 100)
+            {
+                return "Autonomous action policy flags or command bounds are invalid.";
+            }
+
+            JArray allowedActions = policy["allowed_actions"] as JArray;
+            HashSet<string> seenActions = new HashSet<string>(StringComparer.Ordinal);
+            if (allowedActions == null || allowedActions.Count == 0)
+            {
+                return "Autonomous action policy allowed_actions is invalid.";
+            }
+            foreach (JToken action in allowedActions)
+            {
+                if (action.Type != JTokenType.String || !PolicyActionCatalog.Contains(action.ToString()) ||
+                    !seenActions.Add(action.ToString()))
+                {
+                    return "Autonomous action policy allowed_actions is invalid.";
+                }
+            }
+
+            JArray allowedSaves = policy["allowed_save_hashes"] as JArray;
+            HashSet<string> seenSaves = new HashSet<string>(StringComparer.Ordinal);
+            if (allowedSaves == null || allowedSaves.Count > 256)
+            {
+                return "Autonomous action policy allowed_save_hashes is invalid.";
+            }
+            foreach (JToken save in allowedSaves)
+            {
+                if (save.Type != JTokenType.String || !IsSha256Hash(save.ToString()) || !seenSaves.Add(save.ToString()))
+                {
+                    return "Autonomous action policy allowed_save_hashes is invalid.";
+                }
+            }
+            if (policy["actions_enabled"].Value<bool>() && (allowedSaves.Count != 1 || maximumPending != 1))
+            {
+                return "Enabled autonomous actions require exactly one allowed save and max_pending_commands=1.";
+            }
+            if (policy["generated_at"] != null &&
+                (policy["generated_at"].Type != JTokenType.String ||
+                 !TryReadTimestamp(policy, "generated_at", out DateTimeOffset generatedAt) ||
+                 !System.DateTime.TryParse(ReadString(policy, "generated_at"), CultureInfo.InvariantCulture,
+                     DateTimeStyles.RoundtripKind, out System.DateTime generatedDate) || generatedDate.Kind == System.DateTimeKind.Unspecified))
+            {
+                return "Autonomous action policy generated_at requires a valid timestamp with an explicit offset.";
+            }
+            return null;
+        }
+
+        private static bool IsAuthorityIdentifier(JToken token)
+        {
+            if (token?.Type != JTokenType.String)
+            {
+                return false;
+            }
+            string value = token.ToString();
+            if (value.Length == 0 || value.Length > MaxAuthorityIdentifierLength)
+            {
+                return false;
+            }
+            for (int index = 0; index < value.Length; index++)
+            {
+                char ch = value[index];
+                bool asciiLetterOrDigit = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9');
+                if (!asciiLetterOrDigit && (index == 0 || (ch != '.' && ch != '_' && ch != '-')))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static bool IsPolicySessionIdentifier(JToken token)
+        {
+            if (token?.Type != JTokenType.String)
+            {
+                return false;
+            }
+            string value = token.ToString();
+            if (value.Length == 0 || value.Length > 160)
+            {
+                return false;
+            }
+            foreach (char ch in value)
+            {
+                bool asciiLetterOrDigit = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9');
+                if (!asciiLetterOrDigit && ch != '.' && ch != '_' && ch != ':' && ch != '@' && ch != '+' && ch != '-')
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static string ValidateApprovalReceipt(JObject command, JObject policy)
+        {
+            bool autonomous = IsAutonomousCommand(command);
+            string authorityError = ValidateCommandAuthority(command, policy);
+            if (authorityError != null)
+            {
+                return authorityError;
+            }
+
+            string[] receiptFields = autonomous
+                ? ApprovalReceiptFields.Concat(new[] { "run_id", "controller_id" }).ToArray()
+                : ApprovalReceiptFields;
             JObject receipt = command["approval_receipt"] as JObject;
-            if (receipt == null || !HasOnlyKeys(
-                    receipt,
-                    "schema",
-                    "command_id",
-                    "command_intent_hash",
-                    "source_frame_id",
-                    "source",
-                    "policy_hash",
-                    "approved_by",
-                    "approved_at",
-                    "receipt_hash"))
+            if (receipt == null || receiptFields.Any(field => receipt[field] == null) || !HasOnlyKeys(receipt, receiptFields))
             {
                 return "approval_receipt is missing or contains unsupported fields.";
             }
 
-            if (!string.Equals(ReadString(receipt, "schema"), ApprovalReceiptSchema, StringComparison.Ordinal) ||
+            string expectedReceiptSchema = autonomous ? AutonomousApprovalReceiptSchema : ApprovalReceiptSchema;
+            string expectedApprover = autonomous ? "autonomous_controller" : "local_human";
+            if (!string.Equals(ReadString(receipt, "schema"), expectedReceiptSchema, StringComparison.Ordinal) ||
                 !string.Equals(ReadString(receipt, "command_id"), ReadString(command, "id"), StringComparison.Ordinal) ||
-                !string.Equals(ReadString(receipt, "approved_by"), "local_human", StringComparison.Ordinal) ||
+                !string.Equals(ReadString(receipt, "approved_by"), expectedApprover, StringComparison.Ordinal) ||
                 !string.Equals(ReadString(receipt, "approved_at"), ReadString(command, "approved_at"), StringComparison.Ordinal))
             {
                 return "approval_receipt identity or approval fields do not match the command.";
+            }
+            if (autonomous &&
+                (!JToken.DeepEquals(receipt["run_id"], command["run_id"]) ||
+                 !JToken.DeepEquals(receipt["controller_id"], command["controller_id"])))
+            {
+                return "approval_receipt autonomous authority does not match the command.";
             }
 
             string sourceFrameId = ReadString(command, "source_frame_id");
@@ -1120,7 +1386,7 @@ namespace OniAiProbeMod.Commands
             string expectedPolicyHash = CanonicalSha256(policy);
             if (!string.Equals(ReadString(receipt, "policy_hash"), expectedPolicyHash, StringComparison.Ordinal))
             {
-                return "The action policy changed after human approval.";
+                return "The action policy changed after command authorization.";
             }
             JObject commandSource = command["source"] as JObject;
             if (commandSource == null ||
@@ -1150,6 +1416,13 @@ namespace OniAiProbeMod.Commands
             {
                 JToken value = command[field];
                 intent[field] = value == null ? JValue.CreateNull() : value.DeepClone();
+            }
+            // Keep historical V3 hashes byte-for-byte compatible. Only V4 adds
+            // these authority identifiers to the existing typed hash payload.
+            if (IsAutonomousCommand(command))
+            {
+                intent["run_id"] = command["run_id"]?.DeepClone() ?? JValue.CreateNull();
+                intent["controller_id"] = command["controller_id"]?.DeepClone() ?? JValue.CreateNull();
             }
             return intent;
         }
@@ -2330,6 +2603,86 @@ namespace OniAiProbeMod.Commands
                 !string.Equals(action, "focus_note", StringComparison.Ordinal);
         }
 
+        private static string ValidateAutonomousDispatch(
+            JObject command,
+            ValidationResult accepted,
+            CommandDirectories dirs,
+            string claimedPath,
+            string commandIntentHash)
+        {
+            if (accepted == null || accepted.AcceptedPolicy == null ||
+                !string.Equals(CanonicalSha256(BuildCommandIntent(command)), commandIntentHash, StringComparison.Ordinal))
+            {
+                return "The accepted autonomous intent is unavailable or changed.";
+            }
+            JObject policy = LoadPolicy(out string policyError);
+            if (policy == null)
+            {
+                return "The autonomous action policy is unavailable: " + policyError;
+            }
+            if (!JToken.DeepEquals(accepted.AcceptedPolicy, policy))
+            {
+                return "The autonomous action policy changed after the execution claim.";
+            }
+            string authorityError = ValidateApprovalReceipt(command, policy);
+            if (authorityError != null)
+            {
+                return authorityError;
+            }
+            if (policy["actions_enabled"]?.Type != JTokenType.Boolean || !policy["actions_enabled"].Value<bool>())
+            {
+                return "Autonomous actions are disabled by local policy.";
+            }
+            if (ProbeSession.IsSaveDirty || ProbeSession.SaveWriteGeneration != accepted.AcceptedSaveWriteGeneration)
+            {
+                return "The active save or save-write generation changed before dispatch.";
+            }
+            if (!TryReadTimestamp(command, "expires_at", out DateTimeOffset expiresAt) || expiresAt <= DateTimeOffset.Now)
+            {
+                return "Autonomous command authorization expired before dispatch.";
+            }
+
+            if (IsMutatingAction(ReadString(command, "action")))
+            {
+                if (mutationSafetyLatch || !string.IsNullOrEmpty(pendingWitnessId) ||
+                    HasMutatingVerificationInFlight() || OutcomeLatch.FindUnresolvedFailure(dirs.Failed) != null ||
+                    Directory.GetFiles(dirs.Confirming, "*.json").Length != 0)
+                {
+                    return "An unresolved outcome or another mutation blocks autonomous dispatch.";
+                }
+                string[] executingPaths = Directory.GetFiles(dirs.Executing, "*.json");
+                if (executingPaths.Length != 1 ||
+                    !string.Equals(Path.GetFullPath(executingPaths[0]), Path.GetFullPath(claimedPath), StringComparison.OrdinalIgnoreCase))
+                {
+                    return "The autonomous command is not the sole durable executing claim.";
+                }
+                JObject durableClaim = ParseObject(File.ReadAllText(claimedPath, Encoding.UTF8));
+                string claimError = ExecutionClaimStore.ValidateClaim(
+                    durableClaim, ReadString(command, "attempt_id"), commandIntentHash);
+                if (claimError != null || !JToken.DeepEquals(durableClaim, command))
+                {
+                    return "The durable autonomous execution claim changed before dispatch: " + (claimError ?? "payload mismatch");
+                }
+            }
+
+            JObject currentState = CaptureCurrentState();
+            if (!EvaluateConditions(currentState, command["preconditions"] as JArray, out string preconditionError))
+            {
+                return "Current-state autonomous precondition failed before dispatch: " + preconditionError;
+            }
+            string unpauseRefusal = ReadString(command, "action") == "set_paused" && !command["args"]["paused"].Value<bool>()
+                ? DescribeUnpauseRefusal()
+                : null;
+            if (unpauseRefusal != null)
+            {
+                return "Unpause refused before autonomous dispatch: " + unpauseRefusal + ".";
+            }
+            // Bind the before-state evidence to this final read, rather than to
+            // the earlier read preceding durable claim persistence.
+            accepted.BeforeState = currentState;
+            return null;
+        }
+
         private static bool PersistExecutionClaim(
             string path,
             JObject command,
@@ -2512,8 +2865,20 @@ namespace OniAiProbeMod.Commands
                 return false;
             }
 
-            if (!string.Equals(ReadString(policy, "schema"), "oni.action-policy.v1", StringComparison.Ordinal) ||
-                policy["actions_enabled"]?.Type != JTokenType.Boolean ||
+            string authorityError = ValidateCommandAuthority(command, policy);
+            if (authorityError != null)
+            {
+                error = "The accepted authority no longer matches this verification context: " + authorityError;
+                return false;
+            }
+            if (IsAutonomousCommand(command) &&
+                (!string.Equals(CanonicalSha256(BuildCommandIntent(command)), pending.CommandIntentHash, StringComparison.Ordinal) ||
+                 ValidateApprovalReceipt(command, policy) != null))
+            {
+                error = "The autonomous intent or approval receipt changed during post-action verification.";
+                return false;
+            }
+            if (policy["actions_enabled"]?.Type != JTokenType.Boolean ||
                 !policy["actions_enabled"].Value<bool>() ||
                 !PolicyContains(policy, "allowed_actions", pending.Action) ||
                 !PolicyContains(policy, "allowed_save_hashes", ProbeSession.CurrentSaveIdHash))

@@ -13,6 +13,7 @@ param(
     [switch]$Once,
     [switch]$EnableLlm,
     [switch]$ModelLoop,
+    [string]$AutonomousConfig = "",
     [string]$SecretsDir = "",
     [string]$Goal = "Keep the colony alive with conservative, reversible actions.",
     [string]$ExpectedValidationRunId = "",
@@ -52,6 +53,20 @@ $StartupExpectationValues = @(
 $StartupExpectationCount = @($StartupExpectationValues | Where-Object { -not [string]::IsNullOrEmpty($_) }).Count
 if ($StartupExpectationCount -ne 0 -and $StartupExpectationCount -ne $StartupExpectationValues.Count) {
     throw "Startup expectation parameters must be supplied as one exact set."
+}
+if ($AutonomousConfig) {
+    if ($Once -or $EnableLlm -or $ModelLoop -or $SecretsDir -or $StartupExpectationCount -ne 0 -or
+        $PSBoundParameters.ContainsKey("BridgeDir") -or $PSBoundParameters.ContainsKey("Goal")) {
+        throw "AutonomousConfig supplies the sole clone/run configuration and cannot be combined with execution or identity overrides."
+    }
+    $BridgeScript = Join-Path $ProjectRoot "scripts\oni_autonomous.py"
+    $ControllerArgs = @($BridgeScript, "start", "--config", $AutonomousConfig)
+    if (Get-Command py -ErrorAction SilentlyContinue) {
+        & py -3 @ControllerArgs
+    } else {
+        & python @ControllerArgs
+    }
+    exit $LASTEXITCODE
 }
 
 $Python = Get-Command py -ErrorAction SilentlyContinue

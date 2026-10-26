@@ -51,7 +51,9 @@ LIFECYCLE_LOCK_NAME = ".mutation-lifecycle.lock"
 LIFECYCLE_RECOVERY_DIR_NAME = "lifecycle-recovery"
 LIFECYCLE_JOURNAL_SCHEMA = "oni.command-lifecycle-recovery.v2"
 COMMAND_SCHEMA = "oni.command.v3"
+AUTONOMOUS_COMMAND_SCHEMA = "oni.command.v4"
 PENDING_STATUS = "pending_human_approval"
+AUTONOMOUS_PENDING_STATUS = "pending_autonomous_authorization"
 DISPOSITION_STATUSES = {"rejected": "rejected", "quarantine": "quarantined"}
 _LOCK_HEADER = b"ONI command lifecycle custody v1\n"
 _REPARSE_POINT = 0x0400
@@ -943,12 +945,24 @@ def _validate_command_envelope(
 ) -> Dict[str, Any]:
     if not isinstance(value, dict):
         raise CommandCustodyConflict(f"{label} is not a JSON object")
-    if value.get("schema") != COMMAND_SCHEMA:
+    if value.get("schema") not in (COMMAND_SCHEMA, AUTONOMOUS_COMMAND_SCHEMA):
         raise CommandCustodyConflict(f"{label} schema is not canonical")
     command_id = _validate_command_id(value.get("id"), label=f"{label} id")
     if expected_id is not None and command_id != expected_id:
         raise CommandCustodyConflict(f"{label} id does not match its claimed role")
-    if expected_stage == "pending" and value.get("status") != PENDING_STATUS:
+    if value.get("schema") == AUTONOMOUS_COMMAND_SCHEMA:
+        from agent.action_policy import autonomous_identifier_is_valid
+
+        if any(not autonomous_identifier_is_valid(value.get(key)) for key in ("run_id", "controller_id")):
+            raise CommandCustodyConflict(f"{label} autonomous authority identity is invalid")
+        if value.get("mode") not in ("model_selected", "suggested") or value.get("requires_approval") is not True:
+            raise CommandCustodyConflict(f"{label} autonomous authorization contract is invalid")
+    pending_status = (
+        AUTONOMOUS_PENDING_STATUS
+        if value.get("schema") == AUTONOMOUS_COMMAND_SCHEMA
+        else PENDING_STATUS
+    )
+    if expected_stage == "pending" and value.get("status") != pending_status:
         raise CommandCustodyConflict(f"{label} status is not pending approval")
     if expected_status is not None and value.get("status") != expected_status:
         raise CommandCustodyConflict(f"{label} status is not canonical")
@@ -1054,7 +1068,11 @@ def _scan_command_locations_once(bridge_dir: pathlib.Path) -> List[_CommandLocat
                     f"protected command filename is not canonical: {path}"
                 )
             expected_statuses = {
-                "pending": {PENDING_STATUS},
+                "pending": {
+                    AUTONOMOUS_PENDING_STATUS
+                    if parsed.get("schema") == AUTONOMOUS_COMMAND_SCHEMA
+                    else PENDING_STATUS
+                },
                 "approved": {"approved"},
                 "done": {_done_status_for(parsed)},
                 "failed": {"failed"},
@@ -1410,7 +1428,7 @@ def _transition_pending_envelope_locked(
         _validate_pending_observation(expected_observation, expected_path=expected_source_path)
     command_id = _validate_command_id(source.stem, label="pending disposition command id")
     final_bytes = _json_bytes(dict(final_payload))
-    _validate_command_envelope(
+    final_command = _validate_command_envelope(
         _strict_json_loads(final_bytes, label="pending disposition payload"),
         expected_id=command_id,
         expected_status=DISPOSITION_STATUSES[operation],
@@ -1449,6 +1467,8 @@ def _transition_pending_envelope_locked(
         expected_stage="pending",
         label="pending source",
     )
+    if final_command.get("schema") != original_command.get("schema"):
+        raise CommandCustodyConflict("pending disposition must preserve the authorization version")
     if expected_observation is not None:
         if expected_observation.payload != original_bytes:
             raise CommandCustodyConflict("pending source bytes changed after observation")
@@ -1666,7 +1686,7 @@ def _validate_journal_record(
         raise CommandCustodyConflict("lifecycle journal operation is invalid")
     if journal.get("source_stage") != "pending" or journal.get("target_stage") != operation:
         raise CommandCustodyConflict("lifecycle journal stage role mapping is invalid")
-    if journal.get("source_status") != PENDING_STATUS:
+    if journal.get("source_status") not in (PENDING_STATUS, AUTONOMOUS_PENDING_STATUS):
         raise CommandCustodyConflict("lifecycle journal source status is invalid")
     if journal.get("target_status") != DISPOSITION_STATUSES[operation]:
         raise CommandCustodyConflict("lifecycle journal target status is invalid")
@@ -1884,12 +1904,15 @@ def _recover_one_journal_locked(bridge_dir: pathlib.Path, record: _JournalRecord
         if original_command.get("status") != journal["source_status"]:
             raise CommandCustodyUnknown("lifecycle original payload status is not journal-bound")
     if final_bytes is not None:
-        _validate_command_envelope(
+        final_command = _validate_command_envelope(
             _strict_json_loads(final_bytes, label="lifecycle final payload"),
             expected_id=command_id,
             expected_status=str(journal["target_status"]),
             label="lifecycle final payload",
         )
+        expected_schema = AUTONOMOUS_COMMAND_SCHEMA if journal["source_status"] == AUTONOMOUS_PENDING_STATUS else COMMAND_SCHEMA
+        if final_command.get("schema") != expected_schema:
+            raise CommandCustodyUnknown("lifecycle final payload authorization version is not journal-bound")
 
     locations = _scan_command_locations(bridge_dir)
     owned_locations = [item for item in locations if item.command.get("id") == command_id]
@@ -1917,6 +1940,9 @@ def _recover_one_journal_locked(bridge_dir: pathlib.Path, record: _JournalRecord
         ):
             raise CommandCustodyUnknown("pending source is not the recorded original owner")
     if target_location is not None:
+        expected_schema = AUTONOMOUS_COMMAND_SCHEMA if journal["source_status"] == AUTONOMOUS_PENDING_STATUS else COMMAND_SCHEMA
+        if target_location.command.get("schema") != expected_schema:
+            raise CommandCustodyUnknown("terminal destination authorization version is not journal-bound")
         if (
             target_location.identity != final_payload_identity
             or sha256_bytes(target_location.payload) != final_hash
@@ -2053,6 +2079,45 @@ def lifecycle_recovery_blockers(bridge_dir: pathlib.Path) -> List[str]:
     ]
 
 
+def approval_recovery_blockers(bridge_dir: pathlib.Path) -> List[str]:
+    """Retain approval ambiguity and private claims as no-replay latches."""
+
+    bridge = _absolute(pathlib.Path(bridge_dir))
+    commands = bridge / "commands"
+    if _lstat_safe(commands, label="commands directory", allow_missing=True) is None:
+        return []
+    blockers = [
+        path.name
+        for path, _metadata in _directory_entries(commands, label="commands directory")
+        if path.name.startswith(".approval-") and path.name.endswith(".lock")
+    ]
+    recovery = commands / "approval-recovery"
+    if _lstat_safe(recovery, label="approval recovery directory", allow_missing=True) is not None:
+        blockers.extend(
+            f"approval-recovery/{path.name}"
+            for path, _metadata in _directory_entries(recovery, label="approval recovery directory")
+        )
+    return sorted(blockers)
+
+
+def validation_control_blockers(bridge_dir: pathlib.Path) -> List[str]:
+    """Treat nonterminal validation controls as competing game ownership."""
+
+    root = _absolute(pathlib.Path(bridge_dir)) / "validation-controls"
+    if _lstat_safe(root, label="validation controls directory", allow_missing=True) is None:
+        return []
+    blockers: List[str] = []
+    for stage in ("approved", "inflight"):
+        directory = root / stage
+        if _lstat_safe(directory, label=f"validation controls {stage}", allow_missing=True) is None:
+            continue
+        blockers.extend(
+            f"validation-controls/{stage}/{path.name}"
+            for path, _metadata in _directory_entries(directory, label=f"validation controls {stage}")
+        )
+    return sorted(blockers)
+
+
 __all__ = [
     "COMMAND_STAGES",
     "CommandCustodyConflict",
@@ -2062,6 +2127,7 @@ __all__ = [
     "DISPOSITION_STAGES",
     "PendingEnvelopeObservation",
     "commands_root_for",
+    "approval_recovery_blockers",
     "lifecycle_custody",
     "lifecycle_lock_path",
     "lifecycle_recovery_blockers",
@@ -2073,4 +2139,5 @@ __all__ = [
     "recover_lifecycle_transactions",
     "sha256_bytes",
     "transition_pending_envelope",
+    "validation_control_blockers",
 ]

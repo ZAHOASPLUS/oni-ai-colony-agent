@@ -20,6 +20,12 @@ from agent.command_custody import (
     read_stable_bytes,
 )
 from agent.command_queue import COMMAND_SCHEMA, ensure_command_dirs, write_json_atomic
+from agent.action_policy import (
+    ACTION_POLICY_SCHEMA,
+    AUTONOMOUS_ACTION_POLICY_SCHEMA,
+    action_policy_is_valid,
+    autonomous_identifier_is_valid,
+)
 from agent.canonical_hash import canonical_hash as _contract_canonical_hash, loads_strict
 from agent.decision import DecisionFrameError, validate_decision_frame
 from agent.decision_frame_archive import (
@@ -42,6 +48,8 @@ ACTION_OUTCOME_SCHEMA = "oni.action-outcome.v1"
 ACTION_OUTCOMES_COMMIT_SCHEMA = "oni.action-outcomes-commit.v1"
 CONFIRMED_COMMAND_APPROVAL_BUNDLE_SCHEMA = "oni.confirmed-command-approval-bundle.v1"
 APPROVAL_RECEIPT_SCHEMA = "oni.approval-receipt.v1"
+AUTONOMOUS_APPROVAL_RECEIPT_SCHEMA = "oni.approval-receipt.v2"
+AUTONOMOUS_COMMAND_SCHEMA = "oni.command.v4"
 CONFIRMATION_EXECUTED = "executed_verified"
 CONFIRMATION_WAITING = "awaiting_trusted_snapshot"
 CONFIRMATION_CONFIRMED = "snapshot_confirmed"
@@ -107,10 +115,21 @@ def _canonical_hash(value: Any) -> str:
     return _contract_canonical_hash(value)
 
 
+def command_intent_projection(command: Mapping[str, Any]) -> Dict[str, Any]:
+    """Keep the legacy intent byte-for-byte stable; cover V4 authority too."""
+
+    fields = _COMMAND_INTENT_FIELDS + (
+        ("run_id", "controller_id")
+        if command.get("schema") == AUTONOMOUS_COMMAND_SCHEMA
+        else ()
+    )
+    return {field: copy.deepcopy(command.get(field)) for field in fields}
+
+
 def command_intent_hash(command: Mapping[str, Any]) -> str:
     """Hash the immutable command intent independently of executor result fields."""
 
-    return _canonical_hash({field: copy.deepcopy(command.get(field)) for field in _COMMAND_INTENT_FIELDS})
+    return _canonical_hash(command_intent_projection(command))
 
 
 def confirmed_command_approval_bundle_path(
@@ -177,9 +196,10 @@ def _approval_bundle_blockers(bundle: Mapping[str, Any]) -> List[str]:
     else:
         policy_document = frozen_policy.get("document")
         policy_file_hash = frozen_policy.get("file_sha256")
+        autonomous = command.get("schema") == AUTONOMOUS_COMMAND_SCHEMA
         if (
             not isinstance(policy_document, Mapping)
-            or policy_document.get("schema") != "oni.action-policy.v1"
+            or policy_document.get("schema") != (AUTONOMOUS_ACTION_POLICY_SCHEMA if autonomous else ACTION_POLICY_SCHEMA)
             or policy_document.get("actions_enabled") is not True
             or not isinstance(policy_document.get("allowed_actions"), list)
             or command.get("action") not in policy_document.get("allowed_actions", [])
@@ -189,6 +209,13 @@ def _approval_bundle_blockers(bundle: Mapping[str, Any]) -> List[str]:
             or frozen_policy.get("policy_hash") != policy_hash
         ):
             blockers.append("approval_bundle_source_policy_document_mismatch")
+        if autonomous and isinstance(policy_document, Mapping):
+            if (
+                not action_policy_is_valid(policy_document)
+                or any(command.get(key) != policy_document.get(key) for key in ("run_id", "controller_id", "session_id", "world_id"))
+                or policy_document.get("allowed_save_hashes") != [command.get("save_id_hash")]
+            ):
+                blockers.append("approval_bundle_autonomous_policy_identity_mismatch")
         if not isinstance(policy_file_hash, str) or _HASH_RE.fullmatch(policy_file_hash) is None:
             blockers.append("approval_bundle_source_policy_file_hash_invalid")
     if bundle.get("approval_receipt_hash") != receipt.get("receipt_hash"):
@@ -603,6 +630,11 @@ def _identity_blockers(
     for field in ("session_id", "save_id_hash", "world_id"):
         if state.get(field) != command.get(field):
             blockers.append(f"{prefix}_{field}_mismatch")
+    if command.get("schema") == AUTONOMOUS_COMMAND_SCHEMA and (prefix in {"source", "witness"} or prefix.endswith("_ack")):
+        if state.get("validation_run_id") != command.get("run_id"):
+            blockers.append(f"{prefix}_validation_run_id_mismatch")
+        if state.get("startup_binding_status") != "verified":
+            blockers.append(f"{prefix}_startup_binding_unverified")
     return blockers
 
 
@@ -621,11 +653,24 @@ def _approval_receipt_blockers(command: Mapping[str, Any]) -> List[str]:
         "approved_at",
         "receipt_hash",
     }
+    autonomous = command.get("schema") == AUTONOMOUS_COMMAND_SCHEMA
+    if autonomous:
+        required |= {"run_id", "controller_id"}
     blockers: List[str] = []
     if set(receipt) != required:
         blockers.append("approval_receipt_shape_invalid")
-    if receipt.get("schema") != APPROVAL_RECEIPT_SCHEMA:
+    if receipt.get("schema") != (AUTONOMOUS_APPROVAL_RECEIPT_SCHEMA if autonomous else APPROVAL_RECEIPT_SCHEMA):
         blockers.append("approval_receipt_schema_invalid")
+    if command.get("schema") not in (COMMAND_SCHEMA, AUTONOMOUS_COMMAND_SCHEMA):
+        blockers.append("approval_receipt_command_schema_invalid")
+    if autonomous:
+        for key in ("run_id", "controller_id"):
+            if not autonomous_identifier_is_valid(command.get(key)) or receipt.get(key) != command.get(key):
+                blockers.append(f"approval_receipt_{key}_mismatch")
+        if command.get("mode") not in ("suggested", "model_selected"):
+            blockers.append("approval_receipt_autonomous_mode_invalid")
+        if type(command.get("world_id")) is not int or not 0 <= command["world_id"] <= 2147483647:
+            blockers.append("approval_receipt_autonomous_world_invalid")
     if receipt.get("command_id") != command.get("id"):
         blockers.append("approval_receipt_command_id_mismatch")
     expected_intent_hash = command_intent_hash(command)
@@ -648,7 +693,8 @@ def _approval_receipt_blockers(command: Mapping[str, Any]) -> List[str]:
     }
     if not isinstance(source, Mapping) or not _strict_json_equal(dict(source), expected_source):
         blockers.append("approval_receipt_source_mismatch")
-    if receipt.get("approved_by") != "local_human" or command.get("approved_by") != "local_human":
+    authority = "autonomous_controller" if autonomous else "local_human"
+    if receipt.get("approved_by") != authority or command.get("approved_by") != authority:
         blockers.append("approval_receipt_approver_mismatch")
     if receipt.get("approved_at") != command.get("approved_at"):
         blockers.append("approval_receipt_timestamp_mismatch")
@@ -783,7 +829,8 @@ def _attest_done_command(
         permanent.append("command_location_ambiguous")
     if directory_name not in {"confirming", "done"}:
         permanent.append("command_not_in_confirmation_pipeline")
-    if command.get("schema") != COMMAND_SCHEMA:
+    autonomous = command.get("schema") == AUTONOMOUS_COMMAND_SCHEMA
+    if command.get("schema") not in (COMMAND_SCHEMA, AUTONOMOUS_COMMAND_SCHEMA):
         permanent.append("command_schema_invalid")
     expected_executor_status = (
         "executed_pending_snapshot" if directory_name == "confirming" else "confirmed"
@@ -792,8 +839,8 @@ def _attest_done_command(
         permanent.append("executor_status_invalid")
     if command.get("requires_approval") is not True:
         permanent.append("approval_requirement_missing")
-    if command.get("approved_by") != "local_human":
-        permanent.append("local_human_approval_missing")
+    if command.get("approved_by") != ("autonomous_controller" if autonomous else "local_human"):
+        permanent.append("autonomous_controller_approval_missing" if autonomous else "local_human_approval_missing")
     if not isinstance(command.get("id"), str) or not command.get("id"):
         permanent.append("command_id_invalid")
     action = command.get("action")
@@ -850,6 +897,8 @@ def _attest_done_command(
             waiting.append(f"{stage}_ack_not_archived")
         elif len(matches) != 1:
             permanent.append(f"{stage}_ack_ambiguous")
+        elif autonomous:
+            permanent.extend(_identity_blockers(matches[0], command, f"{stage}_ack"))
     unexpected_terminal_acks = [
         record
         for record in matching_attempt_acks

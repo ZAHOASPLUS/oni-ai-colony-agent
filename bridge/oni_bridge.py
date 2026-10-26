@@ -37,7 +37,7 @@ from agent.decision_frame_archive import (
 )
 from agent.incidents import IncidentTracker
 from agent.llm_planner import colony_plan_definition_from_plan, generate_plan
-from agent.model_loop import ModelLoop
+from agent.model_loop import AUTONOMOUS_POLICY_SCHEMA, ModelLoop, load_autonomous_control
 from agent.colony_plan import (
     abort_colony_plan,
     advance_colony_plan,
@@ -3065,15 +3065,37 @@ def write_outputs(
             )
             raise
     elif not replay_mode or allow_replay_suggestions:
-        sync_pending_commands(
+        autonomous_owner = model_loop is not None and model_loop.autonomous
+        max_new_commands = 0 if policy.get("schema") == AUTONOMOUS_POLICY_SCHEMA else 5
+        before_publish = None
+        if autonomous_owner:
+            # Read revocation before rule derivation. Expiry/reconciliation
+            # continues while paused so already-dispatched effects can drain.
+            try:
+                control = load_autonomous_control(bridge_dir, policy=policy, latest_state=latest)
+                issuance_ready = control["desired_state"] == "running" and policy.get("actions_enabled") is True and not model_loop.autonomous_publication_blockers(bridge_dir)
+            except Exception:  # noqa: BLE001 - missing/mismatched authority issues nothing
+                issuance_ready = False
+            max_new_commands = 1 if issuance_ready else 0
+            before_publish = lambda command: model_loop.reserve_autonomous_command(bridge_dir, command)
+        synchronized = sync_pending_commands(
             bridge_dir,
             latest,
             advice,
             proposal_frame=decision_frame,
             allow_non_actionable_replay=replay_mode and allow_replay_suggestions,
             policy_override=policy,
+            max_new_commands=max_new_commands,
+            before_publish=before_publish,
         )
         if model_loop is not None and not replay_mode:
+            if autonomous_owner and synchronized:
+                # Preserve original rule/incident/survival-certificate
+                # provenance. A deterministic emergency gets authority before
+                # any ordinary model request, against this committed frame.
+                model_loop.authorize_published_commands(
+                    bridge_dir, synchronized, latest=latest or {}, frame=decision_frame, policy=policy,
+                )
             # The explicit model loop publishes at most one model_selected
             # command bound to this committed frame, after rule suggestions
             # had their turn and before the post-sync control packet.
@@ -3457,6 +3479,7 @@ def watch(
         Callable[[pathlib.Path, Mapping[str, Any], List[Mapping[str, Any]], Mapping[str, Any]], Mapping[str, Any]]
     ] = None,
     model_loop: Optional[ModelLoop] = None,
+    stop_requested: Optional[Callable[[], bool]] = None,
 ) -> None:
     state_log = bridge_dir / "state.jsonl"
     # Any failure leaves an explicit untrusted health before the Bridge
@@ -3481,6 +3504,8 @@ def watch(
             planned_queue_owner=planned_queue_owner,
             model_loop=model_loop,
         )
+        if stop_requested is not None and stop_requested():
+            return
 
         while True:
             records, position, invalid, partial = read_new_records(state_log, position)
@@ -3498,6 +3523,8 @@ def watch(
                 planned_queue_owner=planned_queue_owner,
                 model_loop=model_loop,
             )
+            if stop_requested is not None and stop_requested():
+                return
             if rotate_log(state_log):
                 runtime.rotation_count += 1
                 runtime.warnings.append("state_log_rotated")
@@ -3535,9 +3562,10 @@ def watch(
                         goal=goal,
                         coordinator_observer=coordinator_observer,
                         planned_queue_owner=planned_queue_owner,
+                        model_loop=model_loop,
                     )
                 position = 0
-            time.sleep(max(0.1, poll_seconds))
+            time.sleep(min(30.0, max(0.1, poll_seconds)) if stop_requested is not None else max(0.1, poll_seconds))
     except Exception as exc:
         publish_bridge_fault(bridge_dir, exc)
         raise
@@ -3560,6 +3588,10 @@ def parse_args() -> argparse.Namespace:
         help="explicit clone-gated planned queue owner config; never enabled by default",
     )
     parser.add_argument("--goal", default=STRATEGY_GOAL)
+    parser.add_argument(
+        "--autonomous-config", type=pathlib.Path,
+        help="start the foreground autonomous controller using an explicit clone/run config and all nine startup anchors",
+    )
     parser.add_argument(
         "--model-loop", action="store_true",
         help="let the configured model choose one catalogued candidate per decision; "
@@ -3607,6 +3639,13 @@ def main() -> None:
         startup_expectations = startup_expectations_from_args(args)
     except ValueError as exc:
         raise SystemExit(f"invalid startup expectations: {exc}") from exc
+    if args.autonomous_config is not None:
+        override_flags = {"--bridge-dir", "--goal", "--poll-seconds", "--model-deadline-seconds"}
+        explicit_override = any(item.split("=", 1)[0] in override_flags for item in sys.argv[1:])
+        if explicit_override or args.once or args.input is not None or args.enable_llm or args.model_loop or args.coordinator_config is not None or args.planned_owner_config is not None or startup_expectations is not None or args.allow_replay_suggestions or args.secrets_dir is not None:
+            raise SystemExit("--autonomous-config supplies the sole controller configuration and cannot be combined with other execution modes or identity overrides")
+        from scripts.oni_autonomous import main as autonomous_main
+        raise SystemExit(autonomous_main(["start", "--config", str(args.autonomous_config)]))
     try:
         coordinator_observer = (
             build_read_only_coordinator_observer(args.bridge_dir, args.coordinator_config)

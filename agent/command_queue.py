@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import copy
 import errno
 import hashlib
 import json
@@ -9,11 +10,12 @@ import os
 import pathlib
 import tempfile
 import time
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from agent.command_custody import (
     CommandCustodyConflict,
     CommandCustodyError,
+    approval_recovery_blockers,
     lifecycle_custody,
     lifecycle_recovery_blockers,
     publish_pending_command,
@@ -23,8 +25,12 @@ from agent.command_custody import (
 )
 from agent.action_policy import (
     ALLOWED_ACTIONS as ACTION_POLICY_ALLOWED_ACTIONS,
+    ACTION_POLICY_SCHEMA,
+    AUTONOMOUS_ACTION_POLICY_SCHEMA,
     action_policy_hash,
     action_policy_is_valid,
+    autonomous_identifier_is_valid,
+    autonomous_policy_state_blockers,
 )
 from agent.canonical_hash import CanonicalHashError, canonical_hash as canonical_document_hash
 from agent.decision import DecisionFrameError, validate_decision_frame
@@ -37,6 +43,8 @@ from agent.state_quality import canonical_state_hash, parse_timestamp, safe_get
 
 
 COMMAND_SCHEMA = "oni.command.v3"
+AUTONOMOUS_COMMAND_SCHEMA = "oni.command.v4"
+AUTONOMOUS_PENDING_STATUS = "pending_autonomous_authorization"
 COMMAND_DIRS = (
     "pending",
     "approving",
@@ -367,6 +375,14 @@ def command_pipeline_readiness(
             }
         )
 
+    for recovery_name in approval_recovery_blockers(bridge_dir):
+        blocker = f"approval_recovery_unresolved:{recovery_name}"
+        proposal_blockers.append(blocker)
+        confirmation_blockers.append(blocker)
+        ambiguous_outcomes.append(
+            {"command_id": recovery_name, "classification": "approval_recovery_unknown", "stages": ["approval-recovery"], "mutating": True}
+        )
+
     for command_id, locations in sorted(identity_grouped.items()):
         if len(locations) <= 1:
             continue
@@ -647,10 +663,19 @@ def _operator_pending_mutation_latches(command: Mapping[str, Any]) -> bool:
     current = now()
     if expires_at is not None and expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=current.tzinfo)
-    return (
+    autonomous = command.get("schema") == AUTONOMOUS_COMMAND_SCHEMA
+    route_valid = (
         command.get("schema") == COMMAND_SCHEMA
-        and command.get("mode") in ARCHIVED_FRAME_PENDING_MODES
         and command.get("status") == "pending_human_approval"
+    ) or (
+        autonomous
+        and command.get("status") == AUTONOMOUS_PENDING_STATUS
+        and command.get("mode") == MODEL_SELECTED_MODE
+        and all(autonomous_identifier_is_valid(command.get(key)) for key in ("run_id", "controller_id"))
+    )
+    return (
+        route_valid
+        and command.get("mode") in ARCHIVED_FRAME_PENDING_MODES
         and command.get("requires_approval") is True
         and isinstance(action, str)
         and action in ALLOWED_ACTIONS
@@ -720,7 +745,8 @@ def _is_unresolved_outcome_unknown(command: Mapping[str, Any]) -> bool:
 
 
 def _command_intent_hash(command: Mapping[str, Any]) -> str:
-    projection = {field: command.get(field) for field in _COMMAND_INTENT_FIELDS}
+    fields = _COMMAND_INTENT_FIELDS + (("run_id", "controller_id") if command.get("schema") == AUTONOMOUS_COMMAND_SCHEMA else ())
+    projection = {field: command.get(field) for field in fields}
     try:
         return canonical_document_hash(projection)
     except (CanonicalHashError, TypeError, ValueError, OverflowError):
@@ -773,6 +799,15 @@ def _pending_mutation_context_matches(
     )
     frame_policy_hash = safe_get(proposal_frame, "projections.policy.policy_hash")
     source = command.get("source") if isinstance(command.get("source"), Mapping) else {}
+    if command.get("schema") == AUTONOMOUS_COMMAND_SCHEMA:
+        if (
+            autonomous_policy_state_blockers(policy, latest_state)
+            or command.get("run_id") != policy.get("run_id")
+            or command.get("controller_id") != policy.get("controller_id")
+        ):
+            return False
+    elif policy.get("schema") != ACTION_POLICY_SCHEMA:
+        return False
     if (
         policy_hash is None
         or source.get("policy_hash") != policy_hash
@@ -999,11 +1034,13 @@ def _pending_mutation_candidate_summary(
         and not isinstance(policy_ttl_seconds, bool)
         and expires_at - created_at == dt.timedelta(seconds=policy_ttl_seconds)
     )
+    autonomous = command.get("schema") == AUTONOMOUS_COMMAND_SCHEMA
+    intent_fields = set(_COMMAND_INTENT_FIELDS) | ({"run_id", "controller_id"} if autonomous else set())
     if not (
-        set(command) == set(_COMMAND_INTENT_FIELDS) | {"status"}
-        and command.get("schema") == COMMAND_SCHEMA
+        set(command) == intent_fields | {"status"}
+        and command.get("schema") in (COMMAND_SCHEMA, AUTONOMOUS_COMMAND_SCHEMA)
         and command.get("mode") == "suggested"
-        and command.get("status") == "pending_human_approval"
+        and command.get("status") == (AUTONOMOUS_PENDING_STATUS if autonomous else "pending_human_approval")
         and command.get("requires_approval") is True
         and isinstance(command_id, str)
         and bool(command_id)
@@ -1095,6 +1132,7 @@ def sync_pending_commands(
     allow_non_actionable_replay: bool = False,
     *,
     policy_override: Optional[Mapping[str, Any]] = None,
+    before_publish: Optional[Callable[[Mapping[str, Any]], None]] = None,
 ) -> List[Dict[str, Any]]:
     bridge_dir = bridge_dir.expanduser().resolve()
     with lifecycle_custody(bridge_dir):
@@ -1111,6 +1149,7 @@ def sync_pending_commands(
             proposal_frame=proposal_frame,
             allow_non_actionable_replay=allow_non_actionable_replay,
             policy_override=policy_override,
+            before_publish=before_publish,
         )
 
 
@@ -1123,6 +1162,7 @@ def _sync_pending_commands_locked(
     allow_non_actionable_replay: bool = False,
     *,
     policy_override: Optional[Mapping[str, Any]] = None,
+    before_publish: Optional[Callable[[Mapping[str, Any]], None]] = None,
 ) -> List[Dict[str, Any]]:
     dirs = ensure_command_dirs(bridge_dir)
     advice_list = list(advice)
@@ -1139,6 +1179,12 @@ def _sync_pending_commands_locked(
         policy = dict(policy_override)
     else:
         policy = current_policy
+    autonomous = policy.get("schema") == AUTONOMOUS_ACTION_POLICY_SCHEMA
+    if autonomous and (
+        policy.get("actions_enabled") is not True
+        or autonomous_policy_state_blockers(policy, state)
+    ):
+        return []
     frame_authorized = _proposal_frame_authorizes(
         state,
         proposal_frame,
@@ -1243,6 +1289,12 @@ def _sync_pending_commands_locked(
         if action not in ALLOWED_ACTIONS:
             continue
         mutating = action not in NON_MUTATING_ACTIONS
+        if autonomous and not mutating:
+            # Informational advice remains visible without occupying the sole
+            # autonomous mutation slot or inventing a receipt-free V4 route.
+            continue
+        if autonomous and action not in policy.get("allowed_actions", []):
+            continue
         if mutating:
             if (
                 allow_non_actionable_replay
@@ -1267,9 +1319,12 @@ def _sync_pending_commands_locked(
             ttl_seconds=ttl_seconds,
             source_frame_id=str(proposal_frame.get("frame_id")),
             source_policy_hash=_policy_hash(policy),
+            policy=policy if autonomous else None,
         )
         if command["id"] in existing:
             continue
+        if autonomous and before_publish is not None:
+            before_publish(copy.deepcopy(command))
         publish_pending_command(bridge_dir, command)
         existing.add(command["id"])
         created.append(command)
@@ -1511,6 +1566,7 @@ def build_command(
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
     source_frame_id: Optional[str] = None,
     source_policy_hash: Optional[str] = None,
+    policy: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     snapshot = state if isinstance(state, dict) else {}
     action = str(command_hint["action"])
@@ -1546,11 +1602,22 @@ def build_command(
     if isinstance(source_policy_hash, str) and source_policy_hash:
         source["policy_hash"] = source_policy_hash
 
-    return {
-        "schema": COMMAND_SCHEMA,
+    autonomous = isinstance(policy, Mapping) and policy.get("schema") == AUTONOMOUS_ACTION_POLICY_SCHEMA
+    if autonomous:
+        if (
+            autonomous_policy_state_blockers(policy, snapshot)
+            or policy.get("actions_enabled") is not True
+            or policy.get("suggestions_enabled") is not True
+            or action not in policy.get("allowed_actions", [])
+            or source_policy_hash != action_policy_hash(policy)
+            or ttl_seconds != policy.get("command_ttl_seconds")
+        ):
+            raise CommandCustodyConflict("autonomous suggested command policy/state binding is invalid")
+    command = {
+        "schema": AUTONOMOUS_COMMAND_SCHEMA if autonomous else COMMAND_SCHEMA,
         "id": command_id,
         "mode": "suggested",
-        "status": "pending_human_approval",
+        "status": AUTONOMOUS_PENDING_STATUS if autonomous else "pending_human_approval",
         "action": action,
         "args": args,
         "session_id": session_id,
@@ -1570,6 +1637,10 @@ def build_command(
         "requires_approval": True,
         "source": source,
     }
+    if autonomous:
+        command["run_id"] = policy.get("run_id")
+        command["controller_id"] = policy.get("controller_id")
+    return command
 
 
 def stable_command_id(

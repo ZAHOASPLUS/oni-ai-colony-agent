@@ -32,7 +32,11 @@ from agent.decision_frame_archive import (  # noqa: E402
     validate_command_policy_binding,
 )
 from agent.action_outcomes import command_intent_hash  # noqa: E402
-from agent.action_policy import action_policy_is_valid  # noqa: E402
+from agent.action_policy import (  # noqa: E402
+    ACTION_POLICY_SCHEMA,
+    AUTONOMOUS_ACTION_POLICY_SCHEMA,
+    action_policy_is_valid,
+)
 from agent import command_custody  # noqa: E402
 
 
@@ -163,6 +167,8 @@ def _validate_payloads(
     approved: Dict[str, Any],
     policy_path: pathlib.Path,
     frame_path: pathlib.Path | None,
+    *,
+    autonomous_context: Any = None,
 ) -> Dict[str, Any]:
     command_id = pending.get("id")
     action = pending.get("action")
@@ -170,22 +176,29 @@ def _validate_payloads(
         raise ApprovalCommitError("pending command id is invalid")
     if approved.get("id") != command_id or approved.get("action") != action:
         raise ApprovalCommitError("approved payload identity differs from pending command")
-    if pending.get("status") != "pending_human_approval" or approved.get("status") != "approved":
+    autonomous = pending.get("schema") == "oni.command.v4"
+    if autonomous and set(approved) != set(pending) | {"approved_at", "approved_by", "approval_receipt"}:
+        raise ApprovalCommitError("autonomous approved payload contains an unexpected envelope field")
+    authority = "autonomous_controller" if autonomous else "local_human"
+    pending_status = "pending_autonomous_authorization" if autonomous else "pending_human_approval"
+    if pending.get("status") != pending_status or approved.get("status") != "approved":
         raise ApprovalCommitError("approval state transition is invalid")
-    if approved.get("approved_by") != "local_human" or not isinstance(approved.get("approved_at"), str):
-        raise ApprovalCommitError("approved payload lacks local human approval metadata")
+    if approved.get("approved_by") != authority or not isinstance(approved.get("approved_at"), str):
+        raise ApprovalCommitError("approved payload lacks the required approval authority")
     _require_unexpired(approved)
 
     policy = _load_object(policy_path)
     if not action_policy_is_valid(policy) or policy.get("actions_enabled") is not True:
         raise ApprovalCommitError("action policy is invalid or disabled")
+    if policy.get("schema") != (AUTONOMOUS_ACTION_POLICY_SCHEMA if autonomous else ACTION_POLICY_SCHEMA):
+        raise ApprovalCommitError("command and policy authorization versions are mismatched")
     if action not in list(policy.get("allowed_actions") or []):
         raise ApprovalCommitError("command action is not allowed by policy")
     if pending.get("save_id_hash") not in list(policy.get("allowed_save_hashes") or []):
         raise ApprovalCommitError("command save is not allowed by policy")
 
-    mutating_v3 = pending.get("schema") == "oni.command.v3" and action not in {"noop", "focus_note"}
-    if mutating_v3:
+    mutating_bound = pending.get("schema") in ("oni.command.v3", "oni.command.v4") and action not in {"noop", "focus_note"}
+    if mutating_bound:
         if frame_path is None:
             raise ApprovalCommitError("mutating approval requires a decision frame")
         from agent.approval_receipt import ApprovalReceiptError, validate_approval_receipt
@@ -207,7 +220,24 @@ def _validate_payloads(
                 "approval frame path does not match command source_frame_id archive"
             )
         try:
-            validate_approval_receipt(approved, policy, frame)
+            if autonomous:
+                from agent.autonomous_authorization import (
+                    AutonomousAuthorizationContext,
+                    AutonomousAuthorizationError,
+                    assert_autonomous_authorization_context,
+                )
+
+                if not isinstance(autonomous_context, AutonomousAuthorizationContext):
+                    raise ApprovalCommitError("autonomous approval requires pinned current custody inputs")
+                try:
+                    assert_autonomous_authorization_context(autonomous_context)
+                except (AutonomousAuthorizationError, command_custody.CommandCustodyError) as exc:
+                    raise ApprovalCommitError(f"autonomous authorization input changed: {exc}") from exc
+                validate_approval_receipt(
+                    approved, policy, frame, survival_state=autonomous_context.state,
+                )
+            else:
+                validate_approval_receipt(approved, policy, frame)
         except ApprovalReceiptError as exc:
             raise ApprovalCommitError(f"approval receipt is invalid: {exc}") from exc
         return approved
@@ -568,11 +598,11 @@ def _commit_locked(
     approved = _load_object(payload_path)
     if pending.get("id") != command_id:
         raise ApprovalCommitError("pending command id does not match its file name")
-    mutating_v3 = (
-        pending.get("schema") == "oni.command.v3"
+    mutating_bound = (
+        pending.get("schema") in ("oni.command.v3", "oni.command.v4")
         and pending.get("action") not in {"noop", "focus_note"}
     )
-    if mutating_v3:
+    if mutating_bound:
         if args.expected_frame_sha256 is None:
             raise ApprovalCommitError("mutating approval commit requires an archive stability hash")
         try:
@@ -588,7 +618,46 @@ def _commit_locked(
             )
     elif frame_path is not None:
         raise ApprovalCommitError("receipt-free approval must not select a decision frame")
-    approved = _validate_payloads(pending, approved, policy_path, frame_path)
+    autonomous_context = None
+    pending_observation = None
+    if pending.get("schema") == "oni.command.v4":
+        from agent.autonomous_authorization import (
+            AutonomousAuthorizationContext,
+            AutonomousAuthorizationError,
+            assert_autonomous_authorization_context,
+            load_autonomous_authorization_context,
+            validate_autonomous_pending_custody,
+        )
+
+        try:
+            autonomous_context = load_autonomous_authorization_context(bridge_root, pending)
+            supplied_context = getattr(args, "autonomous_authorization_context", None)
+            if supplied_context is not None:
+                if not isinstance(supplied_context, AutonomousAuthorizationContext):
+                    raise ApprovalCommitError("autonomous approval context type is invalid")
+                assert_autonomous_authorization_context(supplied_context)
+                if autonomous_context.files != supplied_context.files:
+                    raise ApprovalCommitError("autonomous approval inputs changed before the transaction")
+            pending_observation = validate_autonomous_pending_custody(
+                bridge_root, pending, autonomous_context,
+            )
+            supplied_observation = getattr(args, "expected_pending_observation", None)
+            if supplied_observation is not None and pending_observation != supplied_observation:
+                raise ApprovalCommitError("autonomous pending identity changed before the transaction")
+        except (AutonomousAuthorizationError, DecisionFrameArchiveError, command_custody.CommandCustodyError) as exc:
+            raise ApprovalCommitError(f"autonomous approval custody refused: {exc}") from exc
+    approved = _validate_payloads(
+        pending, approved, policy_path, frame_path,
+        autonomous_context=autonomous_context,
+    )
+
+    def require_owned_pending(path: pathlib.Path) -> None:
+        if pending_observation is None:
+            return
+        observed = command_custody.read_stable_bytes(path, label="claimed autonomous pending identity")
+        expected = (pending_observation.payload, pending_observation.identity, pending_observation.mtime_ns)
+        if observed != expected:
+            raise ApprovalCommitError("autonomous pending identity changed under custody")
 
     approving_dir = command_custody.queue_stage_path(bridge_root, "approving", source.name).parent
     claim = approving_dir / source.name
@@ -628,6 +697,7 @@ def _commit_locked(
         _require_hash(policy_path, args.expected_policy_sha256, "action policy")
         if frame_path is not None:
             _require_hash(frame_path, args.expected_frame_sha256, "decision frame")
+        require_owned_pending(source)
 
         original_pending_bytes = source.read_bytes()
         with tempfile.NamedTemporaryFile("wb", delete=False, dir=str(approving_dir), suffix=".tmp") as handle:
@@ -654,15 +724,22 @@ def _commit_locked(
 
         # Exactly one JSON queue file is visible after each rename: pending ->
         # approving(old payload) -> approving(approved payload) -> approved.
+        require_owned_pending(source)
+        if autonomous_context is not None:
+            assert_autonomous_authorization_context(autonomous_context)
         os.replace(source, claim)
         claimed = True
+        require_owned_pending(claim)
         _require_hash(claim, args.expected_command_sha256, "claimed pending command")
         _require_hash(policy_path, args.expected_policy_sha256, "action policy")
         if frame_path is not None:
             _require_hash(frame_path, args.expected_frame_sha256, "decision frame")
         claimed_pending = _load_object(claim)
         staged_approved = _load_object(stage)
-        _validate_payloads(claimed_pending, staged_approved, policy_path, frame_path)
+        _validate_payloads(
+            claimed_pending, staged_approved, policy_path, frame_path,
+            autonomous_context=autonomous_context,
+        )
 
         os.replace(stage, claim)
         stage = None
@@ -670,7 +747,10 @@ def _commit_locked(
         if frame_path is not None:
             _require_hash(frame_path, args.expected_frame_sha256, "decision frame")
         committed_approved = _load_object(claim)
-        _validate_payloads(pending, committed_approved, policy_path, frame_path)
+        _validate_payloads(
+            pending, committed_approved, policy_path, frame_path,
+            autonomous_context=autonomous_context,
+        )
 
         os.replace(claim, target)
         claimed = False
@@ -688,7 +768,10 @@ def _commit_locked(
         if frame_path is not None:
             _require_hash(frame_path, args.expected_frame_sha256, "decision frame")
         committed_target = _load_object(target)
-        _validate_payloads(pending, committed_target, policy_path, frame_path)
+        _validate_payloads(
+            pending, committed_target, policy_path, frame_path,
+            autonomous_context=autonomous_context,
+        )
         return target
     except Exception as exc:
         if not lock_owned:
@@ -839,6 +922,12 @@ def commit(args: argparse.Namespace) -> pathlib.Path:
             private_lock = commands_root / f".approval-{source.stem}.lock"
             if _path_present(private_lock):
                 raise ApprovalCommitError("another approval commit already owns this command")
+            command = _load_object(source) if _path_present(source) else {}
+            if command.get("schema") == "oni.command.v4" and (
+                command_custody.lifecycle_recovery_blockers(bridge_root)
+                or command_custody.approval_recovery_blockers(bridge_root)
+            ):
+                raise ApprovalCommitError("unresolved custody prevents autonomous approval; explicit reconciliation is required")
             try:
                 command_custody.recover_lifecycle_transactions(bridge_root)
             except command_custody.CommandCustodyError as exc:

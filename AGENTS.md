@@ -36,11 +36,19 @@ These rules apply to every Codex task working in this workspace.
 
 ## Model routing
 
-- User override (2026-09-10): the ONI main controller uses `gpt-6-astra` with `ultra` reasoning; all delegated workers (code authors, strategy, learning/replay, reviewers, runtime/environment owners) use `gpt-6-astra` with `max` reasoning. This replaces the earlier model routing.
+- User override (2026-10-11): the ONI main controller uses `gpt-6-astra` with `max` reasoning; all delegated workers (code authors, strategy, learning/replay, reviewers, runtime/environment owners) use `gpt-6.1-sol` with `max` reasoning. This replaces all earlier model routing, including the former main-controller `ultra` requirement.
 - Set the model and reasoning effort explicitly when creating or resuming a task; verify the actual model/effort in its execution metadata before reporting the switch as complete. Keep worker context short and use exact file/test boundaries.
-- Existing workers must finish or reach a verified safe checkpoint for their current atomic step before switching; do not start a duplicate writer or replay an uncertain action. Subsequent worker work must use `gpt-6-astra` / `max`; the main controller remains `gpt-6-astra` / `ultra`.
+- Existing workers must finish or reach a verified safe checkpoint for their current atomic step before switching; do not start a duplicate writer or replay an uncertain action. Subsequent worker work must use `gpt-6.1-sol` / `max`; the main controller remains `gpt-6-astra` / `max`.
 - If the requested model/reasoning combination is unavailable, report the blocker immediately. Do not silently substitute another model or reasoning effort, or wait silently for capacity.
 - Do not change model, reasoning effort, or service tier in the middle of a live action. End the atomic step first.
+
+## Current autonomous-controller goal
+
+- User-approved goal and current execution contract: `docs/active-goal.md`.
+- User override (2026-10-11): implement fully autonomous decisions and execution on verified test clones; routine commands do not require per-command human approval once the versioned autonomous authorization path is implemented and admitted.
+- Each implementation round has one minimal increment and at most one minimal real-game test attempt, followed by a brief result and automatic continuation. Do not add routine full regression, Mock/replay, A/B, long stress, or fixed test-count gates. Necessary compilation/syntax checks remain allowed.
+- A failed real-game attempt is not repeated in the same round. Diagnose from its evidence and make a material correction before another round; unsafe preconditions mean no test is launched. Preserve all live-game safety and restoration requirements above.
+- Parallel source work uses explicit, non-overlapping file ownership. Only the main controller owns live runtime, saves, Mods, installation, game launch, and the single real-game test.
 
 ## Completion evidence
 

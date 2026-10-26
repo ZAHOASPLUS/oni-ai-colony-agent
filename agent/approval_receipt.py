@@ -14,7 +14,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent.action_outcomes import command_intent_hash
-from agent.action_policy import action_policy_is_valid
+from agent.action_policy import (
+    ACTION_POLICY_SCHEMA,
+    AUTONOMOUS_ACTION_POLICY_SCHEMA,
+    action_policy_is_valid,
+    autonomous_identifier_is_valid,
+    autonomous_policy_state_blockers,
+)
 from agent.canonical_hash import (
     CanonicalHashError,
     canonical_bytes as _contract_canonical_bytes,
@@ -22,9 +28,12 @@ from agent.canonical_hash import (
     loads_strict,
 )
 from agent.decision import DecisionFrameError, validate_decision_frame
+from agent.state_quality import canonical_state_hash, snapshot_trust_blockers
 
 
 APPROVAL_RECEIPT_SCHEMA = "oni.approval-receipt.v1"
+AUTONOMOUS_APPROVAL_RECEIPT_SCHEMA = "oni.approval-receipt.v2"
+AUTONOMOUS_COMMAND_SCHEMA = "oni.command.v4"
 NON_MUTATING_ACTIONS = frozenset({"noop", "focus_note"})
 OPERATOR_MUTATING_MODES = frozenset({"runtime_validation", "planned"})
 # Bridge-published model choice (agent.model_loop, review 2026-09-26 M1).
@@ -48,6 +57,7 @@ _RECEIPT_KEYS = frozenset(
 _SOURCE_KEYS = frozenset(
     {"session_id", "save_id_hash", "world_id", "snapshot_id", "state_hash"}
 )
+_AUTONOMOUS_RECEIPT_KEYS = _RECEIPT_KEYS | {"run_id", "controller_id"}
 
 
 class ApprovalReceiptError(RuntimeError):
@@ -138,6 +148,13 @@ def _validate_authorizing_policy(
     command: Mapping[str, Any], policy: Mapping[str, Any]
 ) -> None:
     _require(action_policy_is_valid(policy), "action policy contract is invalid")
+    autonomous = command.get("schema") == AUTONOMOUS_COMMAND_SCHEMA
+    _require(
+        policy.get("schema") == (
+            AUTONOMOUS_ACTION_POLICY_SCHEMA if autonomous else ACTION_POLICY_SCHEMA
+        ),
+        "command and action policy authorization versions are mismatched",
+    )
     _require(policy.get("actions_enabled") is True, "actions are disabled by local policy")
     actions = policy.get("allowed_actions")
     saves = policy.get("allowed_save_hashes")
@@ -145,6 +162,50 @@ def _validate_authorizing_policy(
     _require(isinstance(saves, list), "policy allowed_save_hashes is invalid")
     _require(command.get("action") in actions, "command action is not allowed by local policy")
     _require(command.get("save_id_hash") in saves, "command save is not allowed by local policy")
+    if autonomous:
+        _require(command.get("requires_approval") is True, "autonomous command requires authorization")
+        _require(
+            command.get("mode") in ("suggested", MODEL_SELECTED_MODE),
+            "autonomous command mode is unsupported",
+        )
+        for key in ("run_id", "controller_id"):
+            _require(
+                autonomous_identifier_is_valid(command.get(key))
+                and command.get(key) == policy.get(key),
+                f"autonomous command {key} does not match policy",
+            )
+        _require(command.get("session_id") == policy.get("session_id"), "autonomous session does not match policy")
+        _require(
+            type(command.get("world_id")) is int and command.get("world_id") == policy.get("world_id"),
+            "autonomous world does not match policy",
+        )
+        _require(saves == [command.get("save_id_hash")], "autonomous save identity is not exclusive")
+
+
+def _validate_autonomous_snapshot(
+    command: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    frame: Mapping[str, Any],
+    state: Mapping[str, Any],
+) -> None:
+    from agent.command_queue import trusted_proposal_state
+
+    _require(trusted_proposal_state(dict(state)), "autonomous latest state is not trustworthy")
+    blockers = autonomous_policy_state_blockers(policy, state) + snapshot_trust_blockers(dict(state))
+    _require(not blockers, "autonomous startup/state binding refused: " + ",".join(blockers))
+    source = frame.get("source") if isinstance(frame.get("source"), Mapping) else {}
+    expected = {
+        "session_id": state.get("session_id"),
+        "save_id_hash": state.get("save_id_hash"),
+        "world_id": state.get("world_id"),
+        "snapshot_id": state.get("snapshot_id"),
+        "seq": state.get("seq"),
+        "snapshot_seq": state.get("snapshot_seq"),
+        "ts": state.get("ts"),
+        "state_hash": canonical_state_hash(dict(state)),
+    }
+    _require(_strict_json_equal(dict(source), expected), "autonomous latest state does not exactly match committed frame")
+    _require(command.get("state_hash") == expected["state_hash"], "autonomous command state binding is stale")
 
 
 def _validate_frame_proposal_authority(
@@ -158,7 +219,7 @@ def _validate_frame_proposal_authority(
         "decision frame proposal readiness is invalid",
     )
     mode = command.get("mode")
-    _require(mode in SUPPORTED_MUTATING_MODES, "mutating command mode is unsupported")
+    _require(isinstance(mode, str) and mode in SUPPORTED_MUTATING_MODES, "mutating command mode is unsupported")
 
     if ready is True and blockers == []:
         return
@@ -182,7 +243,7 @@ def validate_approval_inputs(
     *,
     survival_state: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Validate the frame and policy that authorize one mutating V3 command.
+    """Validate a V3 human or V4 autonomous mutating authorization context.
 
     ``survival_state`` is the snapshot the frame was built from (the Bridge's
     ``latest_state.json`` while it is still that snapshot).  When given, a
@@ -191,7 +252,7 @@ def validate_approval_inputs(
     frame's snapshot rejects the approval.
     """
 
-    _require(command.get("schema") == "oni.command.v3", "command schema must be oni.command.v3")
+    _require(command.get("schema") in ("oni.command.v3", AUTONOMOUS_COMMAND_SCHEMA), "command authorization schema is unsupported")
     _require(
         isinstance(command.get("action"), str)
         and command.get("action") not in NON_MUTATING_ACTIONS,
@@ -221,6 +282,8 @@ def validate_approval_inputs(
         "decision frame source does not exactly match command source",
     )
     _validate_authorizing_policy(command, policy)
+    if command.get("schema") == AUTONOMOUS_COMMAND_SCHEMA and survival_state is not None:
+        _validate_autonomous_snapshot(command, policy, frame, survival_state)
     policy_hash = canonical_hash(policy)
     command_source = command.get("source")
     _require(isinstance(command_source, Mapping), "mutating command source is missing")
@@ -262,11 +325,15 @@ def issue_approval_receipt(
     approved_at: str,
     survival_state: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    _require(approved_by == "local_human", "approved_by must be local_human")
+    autonomous = command.get("schema") == AUTONOMOUS_COMMAND_SCHEMA
+    expected_authority = "autonomous_controller" if autonomous else "local_human"
+    _require(approved_by == expected_authority, f"approved_by must be {expected_authority}")
+    if autonomous:
+        _require(isinstance(survival_state, Mapping), "autonomous receipt issuance requires the actual latest state")
     _parse_approval_time(approved_at)
     source = validate_approval_inputs(command, policy, frame, survival_state=survival_state)
     receipt: Dict[str, Any] = {
-        "schema": APPROVAL_RECEIPT_SCHEMA,
+        "schema": AUTONOMOUS_APPROVAL_RECEIPT_SCHEMA if autonomous else APPROVAL_RECEIPT_SCHEMA,
         "command_id": command.get("id"),
         "command_intent_hash": _command_intent_hash(command),
         "source_frame_id": command.get("source_frame_id"),
@@ -276,6 +343,9 @@ def issue_approval_receipt(
         "approved_at": approved_at,
         "receipt_hash": "",
     }
+    if autonomous:
+        receipt["run_id"] = command.get("run_id")
+        receipt["controller_id"] = command.get("controller_id")
     receipt["receipt_hash"] = canonical_hash(
         {key: value for key, value in receipt.items() if key != "receipt_hash"}
     )
@@ -322,9 +392,20 @@ def validate_approval_receipt(
     """Fail closed if an approved command, frame, policy, or receipt changed."""
 
     candidate = receipt if receipt is not None else command.get("approval_receipt")
+    autonomous = command.get("schema") == AUTONOMOUS_COMMAND_SCHEMA
     _require(isinstance(candidate, Mapping), "approval_receipt is missing")
-    _require(set(candidate) == _RECEIPT_KEYS, "approval_receipt keys are invalid")
-    _require(candidate.get("schema") == APPROVAL_RECEIPT_SCHEMA, "approval_receipt schema is invalid")
+    _require(set(candidate) == (_AUTONOMOUS_RECEIPT_KEYS if autonomous else _RECEIPT_KEYS), "approval_receipt keys are invalid")
+    _require(
+        candidate.get("schema") == (AUTONOMOUS_APPROVAL_RECEIPT_SCHEMA if autonomous else APPROVAL_RECEIPT_SCHEMA),
+        "approval_receipt schema is invalid",
+    )
+    if autonomous:
+        for key in ("run_id", "controller_id"):
+            _require(
+                autonomous_identifier_is_valid(candidate.get(key))
+                and candidate.get(key) == command.get(key) == policy.get(key),
+                f"approval_receipt {key} mismatch",
+            )
     _require(candidate.get("command_id") == command.get("id"), "approval_receipt command_id mismatch")
     _require(
         candidate.get("command_intent_hash") == _command_intent_hash(command),
@@ -349,7 +430,10 @@ def validate_approval_receipt(
         and _HASH_RE.fullmatch(str(candidate.get("policy_hash"))) is not None,
         "approval_receipt policy_hash is invalid",
     )
-    _require(candidate.get("approved_by") == "local_human", "approval_receipt approved_by is invalid")
+    _require(
+        candidate.get("approved_by") == ("autonomous_controller" if autonomous else "local_human"),
+        "approval_receipt approved_by is invalid",
+    )
     _parse_approval_time(candidate.get("approved_at"))
     if "approved_by" in command:
         _require(command.get("approved_by") == candidate.get("approved_by"), "approved_by audit mismatch")
@@ -437,6 +521,7 @@ if __name__ == "__main__":
 
 __all__ = [
     "APPROVAL_RECEIPT_SCHEMA",
+    "AUTONOMOUS_APPROVAL_RECEIPT_SCHEMA",
     "ApprovalReceiptError",
     "build_approved_command",
     "canonical_hash",
