@@ -17,6 +17,16 @@ _STATE_HASH_EXCLUDED_SAMPLE_FIELDS = frozenset({"duration_ms"})
 MIN_TRUSTED_SAMPLE_INTERVAL_SECONDS = 0.1
 MAX_TRUSTED_SAMPLE_INTERVAL_SECONDS = 60.0
 MAX_FUTURE_CLOCK_SKEW_SECONDS = 5.0
+# Publishing-cadence margin for the live Bridge.  A snapshot's ``ts`` is fixed
+# when the Probe samples it, but the Bridge republishes only the last record it
+# processed, so a reader's observed age also carries the Bridge's own
+# read-and-publish cadence.  Every consumer of the same live Bridge shares this
+# margin, so the Bridge's own health and an independent re-check agree; without
+# it a paused colony self-locked (snapshots published 19-22 s old failed a 15 s
+# limit, every autonomous authorization was refused for ``snapshot_stale``, the
+# game stayed paused, and the snapshots stayed old — 2026-10-25 rounds 1-3).
+# Genuine silence from the Probe still fails: the rule stays Probe-relative.
+BRIDGE_PUBLISH_MARGIN_SECONDS = 30.0
 _SAVE_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$", re.IGNORECASE)
 
 
@@ -281,8 +291,21 @@ def snapshot_freshness(
     state: Optional[Dict[str, Any]],
     *,
     now: Optional[dt.datetime] = None,
+    bridge_margin_seconds: float = 0.0,
 ) -> Tuple[Optional[float], Optional[float], List[str]]:
-    """Return age, trusted stale threshold, and fail-closed freshness blockers."""
+    """Return age, trusted stale threshold, and fail-closed freshness blockers.
+
+    ``bridge_margin_seconds`` is the publishing Bridge's own iteration lag.  A
+    snapshot's ``ts`` is fixed when the Probe samples it, but the Bridge only
+    republishes the last record it processed, so the age a reader observes
+    includes the Bridge's read-and-publish cadence on top of the Probe's sample
+    interval.  With a pure ``interval * 3`` threshold a paused colony deadlocked:
+    the Bridge published snapshots 19-22 s old against a 15 s limit, so every
+    autonomous authorization was refused for ``snapshot_stale``, which kept the
+    game paused and the snapshots old (2026-10-25 rounds 1-3).  Callers that
+    know their own cadence pass it here; the Probe-relative rule is unchanged
+    when the margin is zero.
+    """
 
     blockers: List[str] = []
     observed_at = parse_snapshot_timestamp(state.get("ts") if isinstance(state, dict) else None)
@@ -290,6 +313,12 @@ def snapshot_freshness(
     current = _normalized_now(now)
     age: Optional[float] = None
     threshold: Optional[float] = None
+
+    margin = 0.0
+    if isinstance(bridge_margin_seconds, (int, float)) and not isinstance(bridge_margin_seconds, bool):
+        candidate = float(bridge_margin_seconds)
+        if math.isfinite(candidate) and candidate > 0:
+            margin = candidate
 
     if observed_at is None:
         blockers.append("timestamp_invalid")
@@ -303,7 +332,7 @@ def snapshot_freshness(
     if interval is None:
         blockers.append("sample_interval_invalid")
     else:
-        threshold = interval * 3.0
+        threshold = interval * 3.0 + margin
         if age is not None and age > threshold:
             blockers.append("snapshot_stale")
 
@@ -403,8 +432,14 @@ def snapshot_trust_blockers(
     state: Optional[Dict[str, Any]],
     *,
     now: Optional[dt.datetime] = None,
+    bridge_margin_seconds: float = 0.0,
 ) -> List[str]:
-    """Return stable fail-closed blocker codes for a live Probe snapshot."""
+    """Return stable fail-closed blocker codes for a live Probe snapshot.
+
+    ``bridge_margin_seconds`` is forwarded to the freshness rule so a caller that
+    knows its own publish cadence does not report ``snapshot_stale`` for lag it
+    introduces itself.
+    """
 
     if not isinstance(state, dict):
         return ["snapshot_missing"]
@@ -482,7 +517,9 @@ def snapshot_trust_blockers(
     ):
         blockers.append("game_time_cycles_invalid")
 
-    _, _, freshness_blockers = snapshot_freshness(state, now=now)
+    _, _, freshness_blockers = snapshot_freshness(
+        state, now=now, bridge_margin_seconds=bridge_margin_seconds
+    )
     blockers.extend(freshness_blockers)
 
     writer = state.get("writer")

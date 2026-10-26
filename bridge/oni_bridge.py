@@ -47,6 +47,7 @@ from agent.colony_plan import (
 )
 from agent.strategy import PhaseEvidenceTracker, STRATEGY_GOAL, build_strategy_markdown, evaluate_strategy
 from agent.state_quality import (
+    BRIDGE_PUBLISH_MARGIN_SECONDS,
     canonical_state_hash,
     field_quality,
     is_session_started,
@@ -71,9 +72,36 @@ from agent.plan_coordinator import PlanCoordinatorError, PlanSequenceCoordinator
 
 
 MAX_INITIAL_LINES = 10000
+# Bounded tail window for the startup replay.  Reading the newest records must
+# not require scanning the whole append-only log, which grows for as long as the
+# session runs (see load_recent_raw_lines).  ONI snapshots are large (hundreds of
+# kilobytes each), so the per-line allowance is generous; the window is still
+# capped so a small request stays cheap.
+LOG_TAIL_MIN_BYTES = 512 * 1024
+LOG_TAIL_MAX_BYTES = 256 * 1024 * 1024
+LOG_TAIL_BYTES_PER_LINE = 1024 * 1024
 MAX_EVENT_WINDOW = 30
 MAX_LOG_BYTES = 20 * 1024 * 1024
-LOG_BACKUPS = 3
+# How many rotated logs to keep.  The Probe writes about 11 MB per minute, so
+# three backups held only about six minutes of history; a command whose acks or
+# source snapshot were older than that lost its evidence to the rotation and the
+# pipeline reported evidence_continuity_blocked, which made the controller refuse
+# to start (2026-10-26 round 28).  Twelve backups keep roughly twenty-five
+# minutes, which outlasts any command's TTL by a wide margin.
+# Upper bound on how much of a single evidence source one watch iteration may
+# read.  The log is append-only and grows without bound while the Probe runs, so
+# an unbounded scan eventually makes one iteration longer than the poll interval
+# and wedges the watch loop (2026-10-25 round 17).
+MAX_EVIDENCE_SCAN_BYTES = 64 * 1024 * 1024
+# Total read budget for one evidence recovery pass across all sources.  Without
+# it the per-source cap multiplied by LOG_BACKUPS, so raising the backup count
+# made recovery slow enough to wedge the watch loop (2026-10-26 round 31).  It
+# must still cover the whole rotation window, because a command's acks live in
+# the file that was active when it ran: at 96 MB the oldest backups were skipped
+# and an unresolved command's evidence became unreachable, which blocked the
+# controller from starting (round 34).  LOG_BACKUPS * MAX_LOG_BYTES is the window.
+MAX_EVIDENCE_TOTAL_SCAN_BYTES = 13 * 20 * 1024 * 1024  # (LOG_BACKUPS + 1) * MAX_LOG_BYTES
+LOG_BACKUPS = 12
 MAX_SUMMARY_BYTES = 8 * 1024
 MAX_SUMMARY_LINES = 100
 _ATOMIC_REPLACE_ATTEMPTS = 8
@@ -224,22 +252,62 @@ def parse_json_line(line: str) -> Tuple[Optional[Dict[str, Any]], bool]:
 
 
 def load_recent_raw_lines(path: pathlib.Path, limit: int = MAX_INITIAL_LINES) -> Tuple[Deque[bytes], int, int]:
+    """Read the newest ``limit`` lines without scanning the whole log.
+
+    The Probe appends snapshots for as long as a session runs, so the log grows
+    without bound (118 MB was reached in one session on 2026-10-25).  Reading
+    every line to keep the last N made each Bridge start a full-file scan, and
+    the Bridge then fell behind the writer: it stayed in ``sequence_gap`` and the
+    controller refused to start until the log was reset by hand (round 6).
+
+    Only a bounded window at the tail is read, and the returned
+    ``complete_size`` stays the absolute byte offset of the last complete line,
+    so a later incremental read still starts at the right place.
+    """
+
     if not path.exists():
         return collections.deque(maxlen=limit), 0, 0
+    size = path.stat().st_size
+    if size == 0:
+        return collections.deque(maxlen=limit), 0, 0
+
+    # Records are not small: a full ONI snapshot is hundreds of kilobytes, so a
+    # byte window must be sized generously.  Start from the largest window the
+    # caller could plausibly need and widen only if it still holds too few
+    # complete lines; widening re-reads bytes, so it is kept rare.
+    window = min(size, max(LOG_TAIL_MIN_BYTES, limit * LOG_TAIL_BYTES_PER_LINE))
+    while True:
+        start = size - window
+        with path.open("rb") as handle:
+            handle.seek(start)
+            data = handle.read()
+        if start > 0:
+            first_newline = data.find(b"\n")
+            if first_newline < 0:
+                # The whole window is one partial line; widen it.
+                if window >= size:
+                    return collections.deque(maxlen=limit), 0, len(data)
+                window = size if window * 2 >= size else window * 2
+                continue
+            data = data[first_newline + 1 :]
+            start += first_newline + 1
+        if start == 0 or window >= size or data.count(b"\n") >= limit:
+            break
+        window = size if window * 2 >= size else window * 2
+
+    last_newline = data.rfind(b"\n")
+    if last_newline < 0:
+        # No complete line in the window yet.
+        return collections.deque(maxlen=limit), start, len(data)
+
+    partial_size = len(data) - last_newline - 1
+    complete = data[: last_newline + 1]
+    complete_size = start + len(complete)
+
     lines: Deque[bytes] = collections.deque(maxlen=limit)
-    complete_size = 0
-    partial_size = 0
-    with path.open("rb") as handle:
-        while True:
-            raw = handle.readline()
-            if not raw:
-                break
-            if raw.endswith(b"\n"):
-                complete_size += len(raw)
-                lines.append(raw[:-1].rstrip(b"\r"))
-                partial_size = 0
-            else:
-                partial_size = len(raw)
+    for raw in complete.split(b"\n"):
+        if raw:
+            lines.append(raw.rstrip(b"\r"))
     return lines, complete_size, partial_size
 
 
@@ -330,6 +398,9 @@ class ReplayState:
         self.rotation_count = 0
         self.rotation_tail_records_total = 0
         self.last_rotation_tail: Optional[Dict[str, Any]] = None
+        # Per-iteration phase timings, published in health for diagnosis.
+        self.last_cycle_timing: Optional[Dict[str, Any]] = None
+        self.phase_timing: Optional[Dict[str, Any]] = None
         self.warnings: Deque[str] = collections.deque(maxlen=20)
         self.session_ended = False
         self.session_start_observed = False
@@ -1025,7 +1096,9 @@ class ReplayState:
         if not isinstance(self.latest, dict):
             return None
         result = copy.deepcopy(self.latest)
-        age, _, freshness_blockers = snapshot_freshness(result)
+        age, _, freshness_blockers = snapshot_freshness(
+            result, bridge_margin_seconds=BRIDGE_PUBLISH_MARGIN_SECONDS
+        )
         if not ignore_stale and "snapshot_stale" in freshness_blockers:
             assert age is not None
             result = mark_stale(result, age)
@@ -1053,7 +1126,9 @@ class ReplayState:
         stale = bool(safe_get(latest or {}, "bridge.stale", False))
         trust_blockers: List[str] = []
         if not replay_mode:
-            trust_blockers.extend(snapshot_trust_blockers(latest, now=published_at))
+            trust_blockers.extend(snapshot_trust_blockers(
+                latest, now=published_at, bridge_margin_seconds=BRIDGE_PUBLISH_MARGIN_SECONDS
+            ))
             trust_blockers.extend(self.session_integrity_blockers)
             trust_blockers.extend(self.startup_integrity_blockers)
             if not self.session_start_observed:
@@ -1089,6 +1164,7 @@ class ReplayState:
             "rotation_count": self.rotation_count,
             "rotation_tail_records_total": self.rotation_tail_records_total,
             "last_rotation_tail": self.last_rotation_tail,
+            "last_cycle_timing": self.last_cycle_timing,
             "last_event_seq": self.last_seq,
             "last_snapshot_seq": self.last_snapshot_seq,
             "actions_enabled": bool(policy.get("actions_enabled", False)),
@@ -1517,6 +1593,23 @@ def archive_session_records(
     *,
     rebuild: bool,
 ) -> None:
+    """Append records to their session archive without duplicating history.
+
+    The Bridge replays a bounded window on every start and again around a log
+    rotation, so the same record can be offered more than once.  An
+    unconditional append therefore wrote duplicate sequences into the archive,
+    and ``_validate_archive_for_order`` then rejected the archive as
+    out-of-order, which blocked every later command confirmation with
+    ``evidence_continuity_blocked`` (2026-10-25 round 1).
+
+    The first version of this fix re-read the whole archive on every append to
+    build its seen-set.  The archive reaches tens of megabytes and this runs on
+    every watch iteration, so it turned the Bridge into an O(n^2) reader that
+    eventually wedged against its own archive handle (2026-10-25 round 4).
+    The seen-set is therefore cached per path and only extended by the bytes the
+    archive has gained since the last observation.
+    """
+
     grouped: Dict[str, List[str]] = collections.defaultdict(list)
     for record in records:
         session_name = safe_session_name(str(record.get("session_id") or "legacy"))
@@ -1527,10 +1620,51 @@ def archive_session_records(
         text = "\n".join(lines) + "\n"
         if rebuild:
             atomic_write_text(path, text)
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(text)
+            _archive_seen_cache.pop(str(path), None)
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = _archive_seen_lines(path)
+        fresh = [line for line in lines if line not in existing]
+        if not fresh:
+            return
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write("\n".join(fresh) + "\n")
+        existing.update(fresh)
+
+
+# Canonical archive lines already observed, keyed by archive path, together with
+# the byte length they were observed at.  Only the appended tail is read next
+# time, so a long-lived Bridge does not re-scan a multi-megabyte archive.
+_archive_seen_cache: Dict[str, Tuple[Set[str], int]] = {}
+
+
+def _archive_seen_lines(path: pathlib.Path) -> Set[str]:
+    """Return the canonical lines present in one archive, reading only new bytes."""
+
+    key = str(path)
+    seen, offset = _archive_seen_cache.get(key, (set(), 0))
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return seen
+    if size < offset:
+        # Truncated or replaced underneath us: rebuild from scratch.
+        seen, offset = set(), 0
+    if size == offset:
+        _archive_seen_cache[key] = (seen, offset)
+        return seen
+    try:
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            for raw in handle:
+                canonical = SessionArchiveBuilder._existing_canonical_line(raw.rstrip(b"\r\n"))
+                if canonical is not None:
+                    seen.add(canonical)
+            new_offset = handle.tell()
+    except OSError:
+        return seen
+    _archive_seen_cache[key] = (seen, new_offset)
+    return seen
 
 
 class SessionArchiveBuilder:
@@ -1940,6 +2074,7 @@ def _scan_evidence_source(
     archive_session_id: Optional[str],
     entries: List[Dict[str, Any]],
     match_budget: Dict[str, int],
+    scan_budget: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     summary: Dict[str, Any] = {
         "path": _relative_evidence_path(bridge_dir, path),
@@ -1957,8 +2092,64 @@ def _scan_evidence_source(
             snapshots[str(entry["source_snapshot_id"])].append(entry)
         if isinstance(entry.get("command_id"), str) and isinstance(entry.get("attempt_id"), str):
             acks[(str(entry["command_id"]), str(entry["attempt_id"]))].append(entry)
+    # Cheap byte-level pre-filter.  A record can only matter if it names one of
+    # the unresolved commands, attempts or source snapshots, so a line carrying
+    # none of those identifiers cannot match.  Parsing every line of a
+    # multi-hundred-megabyte log cost ~14 s per iteration, which made one watch
+    # iteration 19 s long and wedged the loop (2026-10-25 round 17); the
+    # identifiers are only a handful of short ASCII strings.
+    wanted_markers = tuple(
+        marker.encode("utf-8")
+        for marker in sorted(
+            {str(entry["command_id"]) for entry in entries if isinstance(entry.get("command_id"), str)}
+            | {str(entry["attempt_id"]) for entry in entries if isinstance(entry.get("attempt_id"), str)}
+            | {
+                str(entry["source_snapshot_id"])
+                for entry in entries
+                if isinstance(entry.get("source_snapshot_id"), str)
+            }
+        )
+    )
+    summary["candidate_markers"] = len(wanted_markers)
+    summary["skipped_lines"] = 0
+    summary["scan_truncated_bytes"] = 0
+    summary["scan_skipped_budget_exhausted"] = False
+    if scan_budget is not None and (
+        MAX_EVIDENCE_TOTAL_SCAN_BYTES - int(scan_budget.get("bytes") or 0)
+    ) <= 0:
+        scan_budget["exhausted"] = True
+        summary["scan_skipped_budget_exhausted"] = True
+        return summary
     try:
         with path.open("rb") as handle:
+            # Bound the read.  Reading every byte of a multi-hundred-megabyte
+            # append-only log on every watch iteration cost seconds even after
+            # the parse pre-filter (2026-10-25 round 17).  The evidence for an
+            # unresolved command is written around the command's own execution,
+            # so the tail is what matters; a truncation is recorded and reported
+            # rather than silently assumed harmless.
+            try:
+                total_bytes = path.stat().st_size
+            except OSError:
+                total_bytes = 0
+            window = MAX_EVIDENCE_SCAN_BYTES
+            if scan_budget is not None:
+                remaining = MAX_EVIDENCE_TOTAL_SCAN_BYTES - int(scan_budget.get("bytes") or 0)
+                if remaining <= 0:
+                    scan_budget["exhausted"] = True
+                    summary["scan_skipped_budget_exhausted"] = True
+                    return summary
+                window = min(window, remaining)
+            if total_bytes > window:
+                handle.seek(total_bytes - window)
+                # Resume at a line boundary so a split record is never parsed.
+                handle.readline()
+                summary["scan_truncated_bytes"] = total_bytes - window
+                if scan_budget is not None:
+                    scan_budget["bytes"] = int(scan_budget.get("bytes") or 0) + window
+            elif scan_budget is not None:
+                # The whole file is read, so it consumes its full size.
+                scan_budget["bytes"] = int(scan_budget.get("bytes") or 0) + total_bytes
             while True:
                 raw = handle.readline(MAX_EVIDENCE_RECORD_BYTES + 1)
                 if not raw:
@@ -1981,6 +2172,9 @@ def _scan_evidence_source(
                     break
                 summary["complete_lines"] += 1
                 payload = raw.rstrip(b"\r\n")
+                if wanted_markers and not any(marker in payload for marker in wanted_markers):
+                    summary["skipped_lines"] += 1
+                    continue
                 try:
                     value = json.loads(
                         payload.decode("utf-8-sig"),
@@ -2207,6 +2401,13 @@ def recover_unresolved_command_evidence(bridge_dir: pathlib.Path) -> Dict[str, A
     entries, global_blockers = _discover_unresolved_evidence_commands(bridge_dir)
     source_summaries: List[Dict[str, Any]] = []
     match_budget = {"bytes": 0}
+    # Total read budget across every source.  ``LOG_BACKUPS`` was raised to twelve
+    # so a long-lived command's acks survive rotation (round 28), but the per
+    # source cap then allowed twelve times as much reading: evidence recovery took
+    # 5.7 s per iteration, the publish phase 11.4 s against a 5 s poll, and the
+    # Bridge fell behind into untrusted_snapshot (round 31).  Sources are scanned
+    # newest first, which is where the evidence for a live command lives.
+    scan_budget = {"bytes": 0, "exhausted": False}
     if entries:
         session_ids = sorted(
             {
@@ -2226,15 +2427,22 @@ def recover_unresolved_command_evidence(bridge_dir: pathlib.Path) -> Dict[str, A
                         session_id,
                         entries,
                         match_budget,
+                        scan_budget,
                     )
                 )
         state_log = bridge_dir / "state.jsonl"
-        root_sources = [pathlib.Path(str(state_log) + f".{index}") for index in range(LOG_BACKUPS, 0, -1)]
-        root_sources.append(state_log)
+        # Newest first: the active log, then .1, .2, ...  A command's evidence is
+        # written around its own execution, so the recent files are the useful
+        # ones and an exhausted budget costs the least relevant history.
+        root_sources = [state_log]
+        root_sources.extend(
+            pathlib.Path(str(state_log) + f".{index}") for index in range(1, LOG_BACKUPS + 1)
+        )
         for source in root_sources:
-            if source.exists():
-                source_summaries.append(
-                    _scan_evidence_source(bridge_dir, source, "root_log", None, entries, match_budget)
+            if not source.exists() or scan_budget["exhausted"]:
+                continue
+            source_summaries.append(
+                _scan_evidence_source(bridge_dir, source, "root_log", None, entries, match_budget, scan_budget)
                 )
 
     for entry in entries:
@@ -2255,7 +2463,18 @@ def recover_unresolved_command_evidence(bridge_dir: pathlib.Path) -> Dict[str, A
 
     recovered_count = 0
     for session_id, records in sorted(recovered_by_session.items()):
-        count, merge_blockers = _merge_recovered_session_records(bridge_dir, session_id, records)
+        try:
+            count, merge_blockers = _merge_recovered_session_records(bridge_dir, session_id, records)
+        except OSError:
+            # The session archive is the Probe's and the Bridge's shared output.
+            # On Windows a long-held handle makes the atomic replace fail with
+            # WinError 5 even after the bounded retries, and an escaping
+            # exception here killed the whole Bridge process, which left the
+            # autonomous controller with no trusted frame and silently stalled
+            # the run (2026-10-25 rounds 1-3).  A blocked merge is reported and
+            # retried on the next iteration instead.
+            merge_blockers = {"session_archive_merge_blocked"}
+            count = 0
         recovered_count += count
         for entry in entries_by_session[session_id]:
             entry["blockers"].update(merge_blockers)
@@ -2891,11 +3110,21 @@ def write_outputs(
     # journal but before the confirming command's atomic rename to done.  This
     # must precede rebuilding action outcomes, because a prepared confirming
     # command intentionally already contains its immutable confirmation.
+    _mark = time.perf_counter()
     recover_staged_confirmed_outcomes(bridge_dir)
     latest = runtime.effective_latest(ignore_stale=replay_mode)
+    _t_staged = time.perf_counter()
     evidence_continuity = recover_unresolved_command_evidence(bridge_dir)
+    _t_evidence = time.perf_counter()
     policy = load_policy(bridge_dir)
     health = runtime.health(latest, policy, replay_mode=replay_mode)
+    _t_health = time.perf_counter()
+    # Publish the previous generation's phase breakdown: this generation's own
+    # write cost is only known after its outputs are committed.
+    if runtime.phase_timing is not None:
+        health["phase_timing_seconds"] = runtime.phase_timing
+    if runtime.last_cycle_timing is not None:
+        health["last_cycle_timing"] = runtime.last_cycle_timing
     pipeline_gate = command_pipeline_readiness(
         bridge_dir,
         latest_state=latest,
@@ -2989,6 +3218,7 @@ def write_outputs(
         for stage, entry in decision_frame["readiness"].items()
     }
     summary = build_summary(latest, runtime.events, incident_payload, health)
+    _t_derive = time.perf_counter()
 
     write_output_set(
         bridge_dir,
@@ -3015,6 +3245,14 @@ def write_outputs(
         action_outcomes,
         decision_frame,
     )
+    _t_write_sets = time.perf_counter()
+    runtime.phase_timing = {
+        "recover_staged": round(_t_staged - _mark, 4),
+        "recover_evidence": round(_t_evidence - _t_staged, 4),
+        "health_and_gate": round(_t_health - _t_evidence, 4),
+        "derive_outputs": round(_t_derive - _t_health, 4),
+        "write_output_sets": round(_t_write_sets - _t_derive, 4),
+    }
     # The moving root commit marker is never used as historical approval
     # authority.  Archive the exact validated frame only after both root and
     # session-local generations are fully committed, and before any command can
@@ -3480,6 +3718,7 @@ def watch(
     ] = None,
     model_loop: Optional[ModelLoop] = None,
     stop_requested: Optional[Callable[[], bool]] = None,
+    allow_log_rotation: bool = True,
 ) -> None:
     state_log = bridge_dir / "state.jsonl"
     # Any failure leaves an explicit untrusted health before the Bridge
@@ -3508,24 +3747,50 @@ def watch(
             return
 
         while True:
+            cycle_started = time.perf_counter()
             records, position, invalid, partial = read_new_records(state_log, position)
+            after_read = time.perf_counter()
             runtime.partial_bytes = partial
             runtime.process_many(records)
+            after_process = time.perf_counter()
             runtime.invalid_json_count += invalid
             archive_session_records(bridge_dir, records, rebuild=False)
-            write_outputs(
-                bridge_dir,
-                runtime,
-                enable_llm=enable_llm,
-                secrets_dir=secrets_dir,
-                goal=goal,
-                coordinator_observer=coordinator_observer,
-                planned_queue_owner=planned_queue_owner,
-                model_loop=model_loop,
-            )
+            after_archive = time.perf_counter()
+            try:
+                write_outputs(
+                    bridge_dir,
+                    runtime,
+                    enable_llm=enable_llm,
+                    secrets_dir=secrets_dir,
+                    goal=goal,
+                    coordinator_observer=coordinator_observer,
+                    planned_queue_owner=planned_queue_owner,
+                    model_loop=model_loop,
+                )
+            except OSError as exc:
+                # A transient sharing violation on a Bridge output must not end
+                # the watch: the controller would lose its trusted frame and the
+                # run would stall with no visible cause.  Record it and publish
+                # again on the next iteration.
+                runtime.warnings.append(
+                    "write_outputs_failed:" + type(exc).__name__ + ":" + str(getattr(exc, "winerror", ""))
+                )
+            after_outputs = time.perf_counter()
+            # Per-iteration cost breakdown.  The Bridge fell behind the writer
+            # while the log was large, and guessing at the cause was wrong twice
+            # (rounds 6-7); these numbers make the dominant phase observable.
+            runtime.last_cycle_timing = {
+                "records": len(records),
+                "read_seconds": round(after_read - cycle_started, 4),
+                "process_seconds": round(after_process - after_read, 4),
+                "archive_seconds": round(after_archive - after_process, 4),
+                "publish_seconds": round(after_outputs - after_archive, 4),
+                "total_seconds": round(after_outputs - cycle_started, 4),
+                "at": local_now().isoformat(timespec="seconds"),
+            }
             if stop_requested is not None and stop_requested():
                 return
-            if rotate_log(state_log):
+            if allow_log_rotation and rotate_log(state_log):
                 runtime.rotation_count += 1
                 runtime.warnings.append("state_log_rotated")
                 event_seq_before = runtime.last_seq
@@ -3598,6 +3863,11 @@ def parse_args() -> argparse.Namespace:
              "every choice still needs local human approval (watch mode only)",
     )
     parser.add_argument("--model-deadline-seconds", type=float, default=90.0)
+    parser.add_argument(
+        "--no-log-rotation", action="store_true",
+        help="never rename state.jsonl while watching; the Probe appends without a shared lock, "
+             "so a rotation can lose the records it writes between the tail read and the rename",
+    )
     parser.add_argument("--expected-validation-run-id")
     parser.add_argument("--expected-validation-process-id", type=int)
     parser.add_argument("--expected-startup-binding-sha256")
@@ -3701,6 +3971,7 @@ def main() -> None:
             coordinator_observer=coordinator_observer,
             planned_queue_owner=planned_queue_owner,
             model_loop=model_loop,
+            allow_log_rotation=not args.no_log_rotation,
         )
 
 

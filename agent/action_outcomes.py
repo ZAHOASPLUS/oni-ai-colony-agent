@@ -1520,6 +1520,50 @@ def _commit_confirmed_outcomes_locked(
         return []
     committed: List[str] = []
     grouped = _command_locations(bridge_dir)
+
+    # A confirmation that is definitively rejected means the mutation was
+    # dispatched but its declared effect never appeared in the witness snapshot.
+    # There was no terminal disposition for that case, so the command stayed in
+    # ``confirming`` forever and latched the pipeline: the frame's propose gate
+    # reported COMMAND_PIPELINE_MUTATION_BLOCKED and the model loop could never
+    # propose again (2026-10-26 round 34).  Rejecting it is the same kind of
+    # queue transition as confirming it, so it runs under the same custody and
+    # under the same prove-the-source-unchanged rule.
+    for raw_outcome in document.get("outcomes") or []:
+        if (
+            not isinstance(raw_outcome, Mapping)
+            or raw_outcome.get("confirmation_status") != CONFIRMATION_REJECTED
+            or raw_outcome.get("command_location") != "confirming"
+        ):
+            continue
+        command_id = str(raw_outcome.get("command_id") or "")
+        locations = grouped.get(command_id, [])
+        confirming = [item for item in locations if item[0] == "confirming"]
+        if len(locations) != 1 or len(confirming) != 1:
+            continue
+        source_path = confirming[0][1]
+        command = confirming[0][2]
+        if command.get("status") not in {"executed_pending_snapshot", "confirmed"}:
+            continue
+        if command_intent_hash(command) != raw_outcome.get("command_intent_hash"):
+            continue
+        target_path = dirs["rejected"] / f"{command_id}.json"
+        if target_path.exists():
+            continue
+        if not _source_unchanged(source_path, command):
+            continue
+        payload = copy.deepcopy(dict(command))
+        payload["status"] = "rejected"
+        payload["rejected_at"] = dt.datetime.now(dt.timezone.utc).astimezone().isoformat(timespec="seconds")
+        payload["rejection_reason"] = "confirmation_rejected"
+        payload["confirmation"] = copy.deepcopy(dict(raw_outcome))
+        write_json_atomic(target_path, payload)
+        try:
+            source_path.unlink()
+        except FileNotFoundError:
+            pass
+        committed.append(command_id)
+
     for raw_outcome in document.get("outcomes") or []:
         if (
             not isinstance(raw_outcome, Mapping)

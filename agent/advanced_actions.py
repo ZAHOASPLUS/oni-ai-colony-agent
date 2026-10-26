@@ -20,7 +20,20 @@ MAX_PATH_ID_LENGTH = 64
 # AlgaeHabitat (Algae Terrarium) are the early oxygen buildings; both are 1x2
 # and the Probe reports a candidate cell only when the whole footprint is empty,
 # the building is researched and the game's own placement rules accept it.
-BUILDING_BLUEPRINT_ALLOWLIST = {"Ladder", "MineralDeoxidizer", "AlgaeHabitat"}
+BUILDING_BLUEPRINT_ALLOWLIST = {
+    "Ladder",
+    "MineralDeoxidizer",
+    "AlgaeHabitat",
+    # Added with the Mod-side allowlists.  The Electrolyser is the colony's only
+    # water-fed oxygen producer and the Microbe Musher its only food producer
+    # once the world's algae ran out, but this Python gate was missed: the hint
+    # builder refused both with "not in the single-building blueprint allowlist",
+    # so they were wired everywhere except here and never offered (2026-10-26
+    # round 44).  FarmTile joins them so the farming path is available too.
+    "Electrolyzer",
+    "FarmTile",
+    "MicrobeMusher",
+}
 UTILITY_BLUEPRINT_ALLOWLIST = {"Wire"}
 BLUEPRINT_PRIORITY_CLASSES = {"idle", "basic", "high", "personalNeeds", "topPriority", "compulsory"}
 

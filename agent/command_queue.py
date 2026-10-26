@@ -1763,12 +1763,50 @@ def _expire_pending_commands_locked(
         if reason:
             move_to_rejected(path, dirs["rejected"], command, reason)
 
+    # An approved command the executor never claimed expires with no disposition:
+    # the autonomous single-in-flight gate counts it as an active intent forever,
+    # so the loop can neither publish a new command nor resume the game that the
+    # command needed (2026-10-26 rounds 4, 34).  A command still in ``approved``
+    # with no dispatch evidence was never executed, so rejecting it dispatches
+    # nothing; any dispatch evidence means the outcome may be uncertain and is
+    # left for explicit reconciliation.
+    for path in sorted(dirs["approved"].glob("*.json")):
+        try:
+            raw, _identity_value, _mtime = read_stable_bytes(
+                path,
+                label=f"commands/approved/{path.name}",
+            )
+            command = json.loads(
+                raw.decode("utf-8-sig"),
+                parse_constant=_reject_json_constant,
+            )
+        except (CommandCustodyError, UnicodeError, json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(command, dict):
+            continue
+        if any(command.get(field) for field in ("attempt_id", "execution_started_at", "executed_ack_seq")):
+            continue
+        expires_at = parse_timestamp(command.get("expires_at"))
+        if expires_at is not None and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=current.tzinfo)
+        if expires_at is None or expires_at > current:
+            continue
+        move_to_rejected(
+            path,
+            dirs["rejected"],
+            command,
+            "expired_before_dispatch",
+            source_stage="approved",
+        )
+
 
 def move_to_rejected(
     source: pathlib.Path,
     rejected_dir: pathlib.Path,
     command: Optional[Dict[str, Any]],
     reason: str,
+    *,
+    source_stage: str = "pending",
 ) -> Optional[pathlib.Path]:
     bridge_dir = source.parent.parent.parent
     with lifecycle_custody(bridge_dir):
@@ -1780,7 +1818,7 @@ def move_to_rejected(
         try:
             raw, _identity_value, _mtime = read_stable_bytes(
                 source,
-                label="pending source",
+                label=f"{source_stage} source",
             )
             actual = json.loads(
                 raw.decode("utf-8-sig"),
@@ -1812,6 +1850,7 @@ def move_to_rejected(
             target,
             payload,
             operation="rejected",
+            source_stage=source_stage,
         )
 
 

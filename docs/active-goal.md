@@ -10,6 +10,14 @@ Cover survival, a stable colony, expansion, industry, space, every official main
 
 ## Latest user decisions
 
+- **Model routing (2026-10-25, current): the ONI controller's model endpoint is
+  DeepSeek through the Cline-pass subscription gateway** —
+  `cline-pass/deepseek-v4.1-flash` at `https://api.cline.bot/api/v1`, wire API
+  `chat_completions`, credential `CLINE_API_KEY`. Escalation model:
+  `cline-pass/deepseek-v4-pro`. This supersedes the `gpt-6-astra` / `gpt-6.1-sol`
+  routing below for the controller's own model calls. See
+  `docs/model-routing-20261025.md` for the contract, the adapter changes, and the
+  verification evidence.
 - Main controller: `gpt-6-astra / max`.
 - Delegated implementation/review/runtime tasks: `gpt-6.1-sol / max`.
 - These settings supersede the former `ultra` main setting and Astra worker setting. Verify actual execution metadata; do not substitute another combination silently.
@@ -58,5 +66,36 @@ The whole goal is complete only with actual evidence for autonomous observe/plan
 - R01 environment was safely aborted/restored: `reports/auto-1011-r01/environment/abort/abort-result.json`. The final comparison `reports/auto-boundaries/auto-1011-r01/post-comparison.json` passed with 208 original save/preview entries unchanged, exact Mod/configuration/Probe/policy restoration, empty queues, and no ONI/Bridge processes. The only additions are the approved clone pair.
 - V4/V2/V2 source implementation, autonomous entry point and candidate inverse support are present. Syntax/import checks and the necessary Release build passed; a focused cross-language source review found no actionable mismatch. These are code/build findings, not live-game acceptance. The current entry operates an already admitted run; preparing/loading the game, saving/rebinding checkpoints and complete colony progression remain unfinished.
 - On 2026-10-11 the user requested migration of the execution environment to another Windows host and explicitly paused the Goal until the device switch is complete. The Goal tool confirmed `paused`. Do not resume game actions automatically during migration.
+
+## Round 2026-10-25 — model endpoint migration to cline-pass DeepSeek
+
+- Increment: replaced the ONI controller's model endpoint with the Cline-pass
+  DeepSeek gateway and implemented the adapter the gateway requires. Changed:
+  `agent/llm_planner.py` (provider presets, wire-protocol inference, key aliases,
+  `data`-envelope unwrapping, usage/reasoning normalization, gateway error
+  classification), `agent/model_loop.py` (shared wire resolution, envelope-aware
+  usage, structured-output retry on `gateway_*`), `scripts/oni_doctor.py` (key
+  aliases), plus `scripts/configure-oni-model.ps1`,
+  `scripts/test_cline_pass_model_contract.py`, and
+  `scripts/verify_oni_model_integration.py`.
+- Live test: one real choice request to `cline-pass/deepseek-v4.1-flash` from a
+  synthetic-but-real bridge fixture. Result `passed`: the model selected
+  `resume_game` from the ten offered candidates and the loop published
+  `cmd-model-0c4942e062d61dc9a97529289e7dd9b2` (`set_paused` `{paused:false}`)
+  into `commands/pending`, `phase = awaiting_human_approval`, `blockers = []`.
+  Token accounting live (1065 in / 1640 out), `structured_output = json_schema`.
+  No game process, no save mutation, no clone loaded.
+- Offline checks: `scripts/test_cline_pass_model_contract.py` 23 passed,
+  `scripts/test_llm_secrets_config.py` 6 passed, `scripts/test_model_loop.py`
+  26 passed, `scripts/verify_llm_fallback.py` passed, `scripts/verify_oni_doctor.py`
+  passed, `scripts/test_executor_model_command_contracts.py` 4 passed.
+- Evidence: `reports/model-integration/relay-probe.json`,
+  `reports/model-integration/probe-shapes.json`,
+  `reports/model-integration/live-integration-smoke.json`.
+- Not executed: no real-game acceptance and no colony progression this round;
+  the live-game prerequisites from the migration pause still apply.
+- Next round: keep the Goal paused for game actions; when the user resumes,
+  rebuild the game/Bridge identity on this host, then continue the existing
+  controller objective with the DeepSeek endpoint in place.
 - The app Goal's stored text still contains older model routing; the latest direct user override and this document govern: main `gpt-6-astra/max`, workers `gpt-6.1-sol/max`. Do not reintroduce the resolved model blocker or mark the unfinished goal complete to replace its record.
 - Old execution host: `oldhost`, user `user`. The new host must freshly establish installation/build compatibility, local user-data paths, protected-save baselines, clone lineage, process identity and startup anchors. Old machine paths, PIDs, volume/file identities, startup receipts and authority records are historical evidence only.

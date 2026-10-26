@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from agent.advanced_actions import (
+    BUILDING_BLUEPRINT_ALLOWLIST,
+    build_cancel_building_blueprint_hint,
     build_duplicant_priority_hint,
     build_mark_dig_hint,
     build_place_building_blueprint_hint,
@@ -25,6 +27,7 @@ from agent.advanced_actions import (
 from agent.canonical_hash import canonical_hash
 from agent.field_contracts import (
     ALERTS_CANONICAL_CONTRACT_ID,
+    ONSET_ALERT_IDS,
     BUILDING_COMPLETED_COUNT_CONTRACT_ID,
     GAME_PAUSED_CONTRACT_ID,
     RESEARCH_COMPLETE_CONTRACT_ID,
@@ -40,9 +43,31 @@ WAIT_CANDIDATE_ID = "wait"
 # Including the always-present "wait"; the full paused set (two research, two
 # priority, one dig, three buildings, resume) never truncates.
 MAX_CANDIDATES = 10
-MAX_AUTONOMOUS_CANDIDATES = 12
+# Five chore groups produce ten priority candidates, and the dig, building and
+# resume candidates have to fit beside them.  At twelve the resume was pushed past
+# the cut and the game could never be unpaused (2026-10-26 round 28).  The
+# authoritative prompt size comes from the loop's own llm-health.json, which
+# reported 1725 of 8000 tokens with twelve candidates, so the headroom is real.
+MAX_AUTONOMOUS_CANDIDATES = 16
 # Early-game chore groups offered for a one-step raise, in preference order.
-PRIORITY_GROUPS = ("Dig", "Build")
+# Chore groups the model may change.
+#
+# ``LifeSupport`` and ``Hauling`` lead because a built oxygen diffuser only
+# produces oxygen once a duplicant supplies it: the three diffusers the loop had
+# built all reported ``operational: false`` and the colony stayed at -192 kg of
+# oxygen per cycle (2026-10-26 round 28).  Operating life-support buildings and
+# supplying them are those two chore groups, and neither was reachable, so the
+# loop could build but never make anything run.
+#
+# ``Farming`` follows: a colony that runs out of food dies faster than any other
+# failure, and with only Dig/Build offered sixteen candidates consumed the whole
+# budget so Farming was never reachable while food fell to 800 kcal (round 21).
+#
+# Dig and Build stay in the list: they were the original pair and the recorded
+# fixtures only carry those two groups.  With five groups the priority candidates
+# can fill the budget, which is why the resume slot is reserved explicitly below.
+# The Mod reports these groups as typed chore priorities.
+PRIORITY_GROUPS = ("LifeSupport", "Hauling", "Farming", "Dig", "Build")
 MAX_PRIORITY_CANDIDATES = 2
 MAX_DIG_RUN_CELLS = 4
 # Tier-1 technologies (no prerequisites) in the order an oxygen-starved early
@@ -65,13 +90,20 @@ MAX_RESEARCH_CANDIDATES = 2
 BUILDING_CANDIDATES = (
     ("MineralDeoxidizer", "oxygen_diffuser", "Oxygen Diffuser (MineralDeoxidizer, algae to oxygen)"),
     ("AlgaeHabitat", "algae_terrarium", "Algae Terrarium (AlgaeHabitat, algae and water to oxygen)"),
+    ("Electrolyzer", "electrolyzer", "Electrolyzer (water to oxygen and hydrogen)"),
+    ("FarmTile", "farm_tile", "Farm Tile (FarmTile, a duplicant plants a seed to grow food)"),
+    ("MicrobeMusher", "microbe_musher", "Microbe Musher (MicrobeMusher, dirt and water to mush bars)"),
     ("Ladder", "ladder", "Ladder"),
 )
 # The oxygen buildings carry the observed oxygen balance in their summary
 # (see oxygen_balance): the first live colonies breathed about four times what
 # they made and the model still waited, because the raw report counters in
 # the colony summary carried no interpretation (run m1-0930b).
-OXYGEN_BUILDING_DEF_IDS = frozenset({"MineralDeoxidizer", "AlgaeHabitat"})
+#
+# The Electrolyser is included: the visible world holds no algae, so the two
+# algae-fed producers are dead ends, while it holds about 5.5 t of water
+# (2026-10-26 rounds 33-38).
+OXYGEN_BUILDING_DEF_IDS = frozenset({"MineralDeoxidizer", "AlgaeHabitat", "Electrolyzer"})
 MAX_SUMMARY_CHARS = 200
 MAX_NAME_CHARS = 32
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
@@ -170,31 +202,193 @@ def _oxygen_note(balance: Mapping[str, Any]) -> str:
     return "; " + ", ".join(parts) if parts else ""
 
 
-def _pause_candidate() -> Dict[str, Any]:
+def _building_needs_consumable(building_def_id: str, consumable: str) -> bool:
+    """True when a shortage of ``consumable`` blocks this building."""
+
+    needed = CONSUMABLE_BY_BUILDING.get(building_def_id)
+    return needed is not None and needed.lower() == str(consumable).strip().lower()
+
+
+def _pause_candidate(snapshot: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """The running-state pause, naming what pausing would actually enable.
+
+    While the game runs, advanced actions are unbuildable, so the candidate set is
+    just this and ``wait``.  Rule 2 tells the model to pause whenever a problem is
+    open, so it paused, and then often resumed without changing anything: three
+    ``set_paused`` commands and no priority or dig command in a whole session
+    (2026-10-26 rounds 36-40).  Naming the pending changes lets the model pause
+    with an intent it can carry out.
+    """
+
     hint = {
         "action": "set_paused",
         "args": {"paused": True},
         "preconditions": [build_condition("game.paused", "eq", False, GAME_PAUSED_CONTRACT_ID)],
         "expected_effects": [build_condition("game.paused", "eq", True, GAME_PAUSED_CONTRACT_ID)],
     }
-    return _candidate("pause_game", "Pause the game so priorities or digging can be changed", hint)
+    summary = "Pause the game so priorities or digging can be changed"
+    if snapshot is not None:
+        enabled: List[str] = []
+        try:
+            runs = _dig_runs(dict(snapshot))
+        except (KeyError, TypeError, ValueError):
+            runs = []
+        if runs:
+            longest = max(len(run) for run in runs)
+            enabled.append(f"mark up to {longest} cell(s) for digging")
+        priorities = safe_get(snapshot, "duplicants.by_instance_id")
+        if isinstance(priorities, Mapping) and priorities:
+            enabled.append("change duplicant priorities")
+        catalog = safe_get(snapshot, "blueprints.catalog")
+        if isinstance(catalog, Mapping):
+            starved = _oxygen_consumable_starved(snapshot) or ""
+            placeable = [
+                name
+                for name, entry in catalog.items()
+                if isinstance(entry, Mapping)
+                and (entry.get("candidate_cells") or [])
+                and not _building_needs_consumable(str(name), starved)
+            ]
+            if placeable:
+                enabled.append("place " + ", ".join(sorted(placeable)[:4]))
+        if enabled:
+            summary = "Pause the game to " + "; ".join(enabled)
+    return _candidate("pause_game", summary, hint)
+
+
+def _stuck_blueprint_count(snapshot: Mapping[str, Any]) -> int:
+    """Placements no duplicant has ever started and nothing has been delivered to.
+
+    One such placement suppresses every building candidate (see
+    ``_pending_blueprint_count``), which is the right guard while a duplicant is
+    working on it.  A placement that has never been started is different: the
+    colony's food and oxygen buildings were each placeable with 32 free cells, and
+    a single dead MineralDeoxidizer kept them unofferable for many cycles while the
+    model kept resuming to let duplicants "work on" it (2026-10-26 round 44).
+    """
+
+    instances = safe_get(snapshot, "blueprints.by_instance_id")
+    if not isinstance(instances, Mapping):
+        return 0
+    stuck = 0
+    for entry in instances.values():
+        if not isinstance(entry, Mapping):
+            continue
+        if entry.get("in_progress") is True:
+            continue
+        prefab_id = entry.get("prefab_id")
+        if not isinstance(prefab_id, str) or prefab_id not in BUILDING_BLUEPRINT_ALLOWLIST:
+            continue
+        progress = entry.get("progress_percent")
+        if not isinstance(progress, (int, float)) or isinstance(progress, bool) or progress > 0:
+            continue
+        worker = entry.get("worker_instance_id")
+        if isinstance(worker, int) and not isinstance(worker, bool) and worker > 0:
+            continue
+        lineage = entry.get("material_lineage")
+        delivered = 0.0
+        if isinstance(lineage, Sequence) and not isinstance(lineage, (str, bytes)):
+            for item in lineage:
+                if isinstance(item, Mapping):
+                    amount = item.get("delivered_mass_kg")
+                    if isinstance(amount, (int, float)) and not isinstance(amount, bool):
+                        delivered += float(amount)
+        if delivered > 0:
+            continue
+        stuck += 1
+    return stuck
+
+
+def _non_operational_building_count(state: Mapping[str, Any]) -> int:
+    """Completed buildings the game reports as not operational.
+
+    They need a duplicant to supply or operate them, which only happens while the
+    game runs, so they are queued work from the resume candidate's point of view
+    (2026-10-26 round 28).
+    """
+
+    instances = safe_get(state, "functional_buildings.instances")
+    if not isinstance(instances, Sequence) or isinstance(instances, (str, bytes)):
+        return 0
+    return sum(
+        1
+        for entry in instances
+        if isinstance(entry, Mapping) and entry.get("operational") is False
+    )
+
+
+def _marked_dig_count(state: Mapping[str, Any]) -> int:
+    """How many cells actually carry a dig designation right now.
+
+    Offered dig candidates mean cells COULD be marked, not that any are.  The
+    model conflated the two and resumed the game believing "pending dig orders
+    are marked" while nothing was designated, so no digging ever happened
+    (2026-10-26 rounds 36-41).
+    """
+
+    by_cell = safe_get(state, "designations.dig.by_cell")
+    if not isinstance(by_cell, Mapping):
+        return 0
+    return sum(
+        1
+        for entry in by_cell.values()
+        if isinstance(entry, Mapping) and entry.get("designation_present") is True
+    )
+
+
+def _queued_work_phrases(state: Mapping[str, Any]) -> List[str]:
+    """What resuming would actually put the duplicants to work on."""
+
+    phrases: List[str] = []
+    placements = _pending_blueprint_count(state)
+    if placements:
+        phrases.append(f"{placements} unbuilt placement(s)")
+    marked = _marked_dig_count(state)
+    if marked:
+        phrases.append(f"{marked} marked dig cell(s)")
+    not_operational = _non_operational_building_count(state)
+    if not_operational:
+        phrases.append(f"{not_operational} built building(s) not operating")
+    return phrases
 
 
 def _resume_candidate(state: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
-    # The executor only resumes on a complete observed empty canonical alert
-    # set; offering it otherwise would only produce a rejected command.
-    if _observed(state, "alerts", ALERTS_CANONICAL_CONTRACT_ID) != []:
+    # The executor only resumes on an observed canonical alert set that is empty
+    # or holds onset alerts only.  An onset alert (low_oxygen, urgent_toilet,
+    # exhaustion) means a duplicant's current need is starting to be unmet; it
+    # clears by itself once the game runs and the duplicant walks to the toilet
+    # or into breathable air.  Treating those as hard blockers deadlocked the
+    # autonomous loop — the game stayed paused, the duplicant could not move, the
+    # alert never cleared, and every resume was refused (2026-10-25 rounds 9-11).
+    # Genuine emergencies (suffocation, incapacitation, starvation, ...) still
+    # refuse the resume, and the executor validates the same rule independently.
+    alerts = _observed(state, "alerts", ALERTS_CANONICAL_CONTRACT_ID)
+    if not isinstance(alerts, list):
+        return None
+    onset = [alert for alert in alerts if alert in ONSET_ALERT_IDS]
+    if len(onset) != len(alerts):
         return None
     hint = {
         "action": "set_paused",
         "args": {"paused": False},
         "preconditions": [
             build_condition("game.paused", "eq", True, GAME_PAUSED_CONTRACT_ID),
-            build_condition("alerts", "eq", [], ALERTS_CANONICAL_CONTRACT_ID),
+            build_condition("alerts", "eq", list(alerts), ALERTS_CANONICAL_CONTRACT_ID),
         ],
         "expected_effects": [build_condition("game.paused", "eq", False, GAME_PAUSED_CONTRACT_ID)],
     }
-    return _candidate("resume_game", "Resume the game so duplicants carry out the current orders", hint)
+    summary = "Resume the game so duplicants carry out the current orders"
+    queued = _queued_work_phrases(state)
+    if queued:
+        summary = "Resume the game to work on " + ", ".join(queued)
+    else:
+        summary = (
+            "Resume the game; nothing is queued yet, so also mark digs or place a "
+            "building while paused first if the colony needs one"
+        )
+    if alerts:
+        summary += " (only onset alerts are open: " + ",".join(alerts) + "; they clear once duplicants move)"
+    return _candidate("resume_game", summary, hint)
 
 
 def _priority_candidates(state: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -347,6 +541,102 @@ def _research_candidates(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     return result
 
 
+def _connected_blueprint_cells(
+    snapshot: Mapping[str, Any],
+    cells: Sequence[Any],
+    width: int = 1,
+    height: int = 1,
+) -> List[int]:
+    """Prefer blueprint cells a duplicant could actually walk to.
+
+    A cell with ``nav_floor`` true but no standable neighbour is an isolated
+    platform: the game accepts the placement, yet no duplicant can path to it, so
+    no construction chore is ever created and the placement sits at progress 0
+    forever while every duplicant idles.  That is exactly what the recorded
+    MineralDeoxidizer at x=102,y=219 was: standable itself, with all four
+    neighbours unstandable (2026-10-26 round 47).
+
+    The check covers the whole footprint, because a multi-cell building is reached
+    through any of its cells: a 2x2 Electrolyser kept stalling on a root whose own
+    neighbours were fine while its upper cells were not (round 49).
+
+    This is a one-step proxy, not a flood fill: it removes isolated platforms and
+    keeps everything else, and it falls back to the unfiltered list whenever the
+    navigation reading is unavailable, so a missing field never removes the only
+    candidate.
+    """
+
+    usable = [cell for cell in cells if isinstance(cell, int) and not isinstance(cell, bool)]
+    if not usable:
+        return []
+    by_id = safe_get(snapshot, "cells.by_id")
+    if not isinstance(by_id, Mapping):
+        return usable
+    standable = set()
+    coords = {}
+    for cell in usable:
+        entry = by_id.get(f"cell_{cell}")
+        if not isinstance(entry, Mapping):
+            continue
+        value = entry.get("nav_floor")
+        if value is None:
+            continue
+        x, y = entry.get("x"), entry.get("y")
+        if not isinstance(x, int) or not isinstance(y, int):
+            continue
+        coords[cell] = (x, y)
+        if value is True:
+            standable.add(cell)
+    if not standable or not coords:
+        return usable
+    standable_xy = {coords[cell] for cell in standable}
+    step = ((1, 0), (-1, 0), (0, 1), (0, -1))
+
+    # One-step adjacency is not enough: a cell can have a standable neighbour and
+    # still sit in a region cut off from the colony by a vacuum gap.  The largest
+    # connected component of standable cells is the region the duplicants actually
+    # live in, so a candidate is only reachable if it touches that component
+    # (2026-10-26 round 51).
+    main: set = set()
+    unseen = set(standable_xy)
+    while unseen:
+        seed = unseen.pop()
+        component = {seed}
+        frontier = [seed]
+        while frontier:
+            cx, cy = frontier.pop()
+            for dx, dy in step:
+                neighbour = (cx + dx, cy + dy)
+                if neighbour in unseen:
+                    unseen.discard(neighbour)
+                    component.add(neighbour)
+                    frontier.append(neighbour)
+        if len(component) > len(main):
+            main = component
+    if not main:
+        return usable
+
+    def reachable(cell: int) -> bool:
+        x, y = coords[cell]
+        footprint = {(x + dx, y + dy) for dx in range(max(1, width)) for dy in range(max(1, height))}
+        # The footprint cells are occupied by the building, so the duplicant has
+        # to stand OUTSIDE it and beside it.  Requiring a standable footprint cell
+        # accepted a 2x2 placement whose own cells were walkable but whose only
+        # approach was blocked, and it never got a construction chore
+        # (2026-10-26 round 50).
+        for fx, fy in footprint:
+            for dx, dy in step:
+                neighbour = (fx + dx, fy + dy)
+                if neighbour in footprint:
+                    continue
+                if neighbour in main:
+                    return True
+        return False
+
+    connected = [cell for cell in usable if reachable(cell)]
+    return connected or usable
+
+
 def _building_candidate(
     state: Dict[str, Any], building_def_id: str, prefix: str, label: str, note: str = ""
 ) -> Optional[Dict[str, Any]]:
@@ -359,7 +649,16 @@ def _building_candidate(
     materials = catalog.get("material_tags")
     if not isinstance(cells, list) or not isinstance(materials, list) or not materials:
         return None
-    for cell in sorted(item for item in cells if isinstance(item, int) and not isinstance(item, bool)):
+    width = catalog.get("width")
+    height = catalog.get("height")
+    for cell in sorted(
+        _connected_blueprint_cells(
+            state,
+            cells,
+            width if isinstance(width, int) and not isinstance(width, bool) else 1,
+            height if isinstance(height, int) and not isinstance(height, bool) else 1,
+        )
+    ):
         try:
             hint = build_place_building_blueprint_hint(
                 state, cells=[cell], material_tags=materials, building_def_id=building_def_id
@@ -377,6 +676,174 @@ def _building_candidate(
     return None
 
 
+def _cancel_blueprint_candidate(snapshot: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """Offer cancelling one placed blueprint no duplicant has started.
+
+    A placement whose material delivery never starts is dead weight: it blocks
+    new placements (``_pending_blueprint_count``) and the colony then has no
+    constructive candidate at all, so the loop only toggles the pause while food
+    and oxygen fall (2026-10-25 round 20: one unbuildable MineralDeoxidizer held
+    the colony at ``done`` 9 while food dropped 13705 -> 7692 kcal).  Offering the
+    cancel lets the model clear the stuck plan and place one that will be built.
+
+    Only a placement the game reports as not in progress is a candidate, so
+    cancelling can never interrupt active construction.
+    """
+
+    instances = safe_get(snapshot, "blueprints.by_instance_id")
+    if not isinstance(instances, Mapping):
+        return None
+    targets: List[tuple] = []
+    for entry in instances.values():
+        if not isinstance(entry, Mapping):
+            continue
+        if entry.get("in_progress") is True:
+            continue
+        prefab_id = entry.get("prefab_id")
+        cell = entry.get("cell")
+        if not isinstance(prefab_id, str) or prefab_id not in BUILDING_BLUEPRINT_ALLOWLIST:
+            continue
+        if isinstance(cell, bool) or not isinstance(cell, int) or cell <= 0:
+            continue
+        targets.append((cell, prefab_id))
+    for cell, prefab_id in sorted(targets):
+        try:
+            hint = build_cancel_building_blueprint_hint(snapshot, cells=[cell])
+        except ValueError:
+            continue
+        return _candidate(
+            f"cancel_blueprint_{cell}",
+            _cancel_blueprint_summary(entry, prefab_id, cell),
+            hint,
+            risk="medium",
+        )
+    return None
+
+
+def _cancel_blueprint_summary(entry: Mapping[str, Any], prefab_id: str, cell: int) -> str:
+    """Name why the placement is stuck and what keeping it costs.
+
+    The model read "unbuilt placements are pending" as work in progress and kept
+    resuming to let duplicants do it, while the placement had never been started
+    (``worker_instance_id`` 0, ``progress_percent`` 0) and its delivery had never
+    arrived.  Because one pending placement suppresses every building candidate,
+    keeping it also kept the colony's only food and oxygen buildings unofferable
+    (2026-10-26 round 43).
+    """
+
+    parts = [f"Cancel the unbuilt {prefab_id} blueprint at cell {cell}"]
+    details: List[str] = []
+    progress = entry.get("progress_percent")
+    if isinstance(progress, (int, float)) and not isinstance(progress, bool) and progress <= 0:
+        details.append("no duplicant has started it")
+    lineage = entry.get("material_lineage")
+    if isinstance(lineage, Sequence) and not isinstance(lineage, (str, bytes)):
+        for item in lineage:
+            if not isinstance(item, Mapping):
+                continue
+            delivered = item.get("delivered_mass_kg")
+            required = item.get("required_mass_kg")
+            tag = item.get("tag")
+            if isinstance(delivered, (int, float)) and isinstance(required, (int, float)):
+                details.append(f"{delivered:g} of {required:g} kg {tag} delivered")
+            break
+    if details:
+        parts.append(" (" + "; ".join(details) + ")")
+    parts.append(" so a plan that will actually be constructed can be placed instead")
+    return "".join(parts)
+
+
+# Which consumable each oxygen producer actually needs, so a shortage suppresses
+# only the producers it blocks.  A single shared set suppressed the Electrolyser
+# too: the world has no algae, but it does hold about 5.5 t of water, and the
+# Electrolyser is the only route that works here (2026-10-26 round 40).
+CONSUMABLE_BY_BUILDING = {
+    "MineralDeoxidizer": "algae",
+    "AlgaeHabitat": "algae",
+    "Electrolyzer": "water",
+}
+
+
+def _oxygen_consumable_starved(snapshot: Mapping[str, Any]) -> Optional[str]:
+    """Name the consumable that blocks an already-placed oxygen building.
+
+    A building whose ``ManualDeliveryKG`` reports a positive capacity while the
+    world's own inventory holds none of the requested item can never be supplied,
+    so placing another one only adds another dead building.  The model kept
+    pursuing exactly that: it switched research to Basic Farming to unlock the
+    Algae Terrarium, which consumes the same missing algae (2026-10-26 round 34).
+
+    The check needs ``inventory_valid`` so an unreadable inventory is never
+    mistaken for an empty world, and it only fires for oxygen buildings.
+    """
+
+    instances = safe_get(snapshot, "life_support_buildings.instances")
+    if not isinstance(instances, Sequence) or isinstance(instances, (str, bytes)):
+        return None
+    for entry in instances:
+        if not isinstance(entry, Mapping):
+            continue
+        if entry.get("prefab_id") not in OXYGEN_BUILDING_DEF_IDS:
+            continue
+        if entry.get("inventory_valid") is not True:
+            continue
+        available = entry.get("requested_item_available_kg")
+        capacity = entry.get("delivery_capacity_kg")
+        if not isinstance(capacity, (int, float)) or isinstance(capacity, bool) or capacity <= 0:
+            continue
+        if not isinstance(available, (int, float)) or isinstance(available, bool):
+            continue
+        if available > 0:
+            continue
+        item = entry.get("requested_item_tag")
+        return display_text(item, 40) if isinstance(item, str) and item else "its consumable"
+    return None
+
+
+def _pending_blueprint_count(snapshot: Mapping[str, Any]) -> int:
+    """Count placed blueprints that are not yet constructed.
+
+    ``blueprints.by_instance_id`` lists every placement the game reports; a
+    placement whose ``in_progress`` flag is false is queued work that no
+    duplicant has started.  Used to stop the model from adding still more
+    blueprints while unbuilt ones are already queued.
+    """
+
+    instances = safe_get(snapshot, "blueprints.by_instance_id")
+    if not isinstance(instances, Mapping):
+        return 0
+    count = 0
+    for entry in instances.values():
+        if not isinstance(entry, Mapping):
+            continue
+        if entry.get("in_progress") is True:
+            continue
+        if entry.get("prefab_id"):
+            count += 1
+    return count
+
+
+def _active_construction_count(snapshot: Mapping[str, Any]) -> int:
+    """Count blueprints a duplicant is constructing right now.
+
+    Only active construction justifies withholding the pause.  A placement that
+    merely exists is not active work: after a build completes the game keeps
+    reporting the placement with ``in_progress`` false and progress 0, so
+    treating any placement as "keep running" suppressed the pause forever and
+    left ``wait`` as the only candidate (2026-10-25 round 14: one completed
+    diffuser plus one lingering placement stalled the loop for minutes).
+    """
+
+    instances = safe_get(snapshot, "blueprints.by_instance_id")
+    if not isinstance(instances, Mapping):
+        return 0
+    return sum(
+        1
+        for entry in instances.values()
+        if isinstance(entry, Mapping) and entry.get("in_progress") is True
+    )
+
+
 def generate_candidates(
     state: Optional[Mapping[str, Any]],
     *,
@@ -390,12 +857,21 @@ def generate_candidates(
     allowed = set(allowed_actions)
     items: List[Dict[str, Any]] = []
     blockers: List[str] = []
+    # Informational: explains an absent candidate without stopping proposal.
+    notes: List[str] = []
     snapshot = dict(state) if isinstance(state, Mapping) else {}
     paused = _observed(snapshot, "game.paused", GAME_PAUSED_CONTRACT_ID)
     if not isinstance(paused, bool):
         blockers.append("game_paused_unobserved")
     elif not paused:
-        items.append(_pause_candidate())
+        # Blueprints are only constructed while the game runs, so the pause is
+        # withheld while a duplicant is actively constructing one; interrupting
+        # that work wasted whole game-minutes and no diffuser was ever built
+        # (2026-10-25 rounds 9-12).  A placement that merely exists is not active
+        # work, so the pause stays available then; otherwise the loop loses every
+        # candidate but ``wait`` and stalls (round 14).
+        if _active_construction_count(snapshot) == 0:
+            items.append(_pause_candidate(snapshot))
         # Research needs no pause: the executor only binds research.current.
         items.extend(_research_candidates(snapshot))
     else:
@@ -409,15 +885,65 @@ def generate_candidates(
         if dig is not None:
             items.append(dig)
         oxygen_note = _oxygen_note(oxygen_balance(snapshot))
-        for building_def_id, prefix, label in BUILDING_CANDIDATES:
-            note = oxygen_note if building_def_id in OXYGEN_BUILDING_DEF_IDS else ""
-            building = _building_candidate(snapshot, building_def_id, prefix, label, note)
-            if building is not None:
-                items.append(building)
+        # A blueprint that is already placed but not yet constructed makes more
+        # blueprint placement pointless: nothing is built while the game is
+        # paused, and the colony cannot run without resuming.  The model
+        # otherwise kept placing Oxygen Diffusers instead of resuming, so the
+        # game stayed frozen and no diffuser was ever built (2026-10-25 round 10:
+        # game_time_cycles unchanged for 90 s with 11 pending blueprints).
+        pending_builds = _pending_blueprint_count(snapshot)
+        # Do not offer another oxygen building while an already-placed one is
+        # provably unsupplyable: the world holds none of its consumable, so a
+        # second one cannot work either.  This is reported as a note rather than
+        # a blocker: it explains an absent candidate, it is not a reason to stop
+        # proposing (round 34).
+        starved = _oxygen_consumable_starved(snapshot)
+        if starved is not None:
+            notes.append(f"oxygen_consumable_unavailable:{starved}")
+        # A placement a duplicant is actually working on suppresses new placements,
+        # so plans do not pile up.  One that has never been started does not: it
+        # blocked the colony's only food and oxygen buildings for many cycles
+        # (2026-10-26 round 44).  The cancel stays offered so the model can still
+        # clear it.
+        stuck = _stuck_blueprint_count(snapshot)
+        if stuck:
+            notes.append(f"stuck_placement_ignored:{stuck}")
+        if pending_builds == 0 or stuck == pending_builds:
+            # The cancel goes first: with several buildings now offered, a stuck
+            # placement's cancel was crowded out of the candidate budget and the
+            # model lost the only way to clear it (2026-10-26 round 44).
+            if stuck:
+                cancel = _cancel_blueprint_candidate(snapshot)
+                if cancel is not None:
+                    items.append(cancel)
+            for building_def_id, prefix, label in BUILDING_CANDIDATES:
+                if starved is not None and _building_needs_consumable(building_def_id, starved):
+                    continue
+                note = oxygen_note if building_def_id in OXYGEN_BUILDING_DEF_IDS else ""
+                building = _building_candidate(snapshot, building_def_id, prefix, label, note)
+                if building is not None:
+                    items.append(building)
+        else:
+            # Unbuilt placements are queued, so no new placement is offered; the
+            # cancel is what lets the model clear one that will never be built.
+            cancel = _cancel_blueprint_candidate(snapshot)
+            if cancel is not None:
+                items.append(cancel)
         resume = _resume_candidate(snapshot)
         if resume is not None:
             items.append(resume)
     maximum = MAX_AUTONOMOUS_CANDIDATES if autonomous else MAX_CANDIDATES
+    # ``resume_game`` is what makes every other paused-only change take effect, so
+    # it must survive the budget.  It is appended after the priority, dig and
+    # building candidates, and those alone can fill the list: with five chore
+    # groups the nine priority candidates plus a dig and three placements pushed
+    # the resume past the cut, so the model never saw it and the game stayed
+    # paused forever (2026-10-26 round 28).  Reserve its slot before truncating.
+    resume_items = [item for item in items if item.get("candidate_id") == "resume_game"]
+    if resume_items:
+        items = [
+            item for item in items if item.get("candidate_id") != "resume_game"
+        ][: max(0, maximum - 1 - len(resume_items))] + resume_items
     items = [item for item in items if item["action"] in allowed][: maximum - 1]
     items.append(
         {
@@ -433,6 +959,7 @@ def generate_candidates(
         "schema": CANDIDATE_SET_SCHEMA,
         "items": items,
         "blockers": blockers,
+        "notes": notes,
         "candidate_set_hash": canonical_hash(
             [{"candidate_id": item["candidate_id"], "contract_hash": item["contract_hash"]} for item in items]
         ),

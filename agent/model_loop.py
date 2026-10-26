@@ -38,7 +38,30 @@ from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence
 from agent.action_policy import action_policy_hash, action_policy_is_valid
 from agent.action_outcomes import command_intent_hash
 from agent.canonical_hash import canonical_bytes, loads_strict
-from agent.candidates import WAIT_CANDIDATE_ID, display_text, generate_candidates, oxygen_balance
+from agent.candidates import (
+    WAIT_CANDIDATE_ID,
+    _pending_blueprint_count,
+    display_text,
+    generate_candidates,
+    oxygen_balance,
+)
+
+
+def _non_operational_building_count(state: Mapping[str, Any]) -> int:
+    """Count built buildings the game reports as not operational.
+
+    A building that is not operational is waiting on a duplicant to supply or
+    operate it, which only happens while the game runs.
+    """
+
+    instances = safe_get(state, "functional_buildings.instances")
+    if not isinstance(instances, Sequence) or isinstance(instances, (str, bytes)):
+        return 0
+    return sum(
+        1
+        for entry in instances
+        if isinstance(entry, Mapping) and entry.get("operational") is False
+    )
 from agent.colony_plan import TERMINAL_PLAN_STATUSES, load_active_plan
 from agent.command_custody import lifecycle_custody, publish_pending_command, read_bytes_share_delete, read_stable_bytes
 from agent.command_queue import (
@@ -54,10 +77,13 @@ from agent.decision_frame_archive import load_archived_decision_frame
 from agent.field_contracts import NON_MUTATING_ACTIONS
 from agent.llm_planner import (
     effective_request_timeout,
+    effective_wire_api,
+    response_usage,
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
     MAX_PROMPT_TOKENS,
     ModelRequestError,
+    WIRE_API_RESPONSES,
     atomic_write_json,
     classify_request_failure,
     compact_value,
@@ -95,6 +121,15 @@ DEFAULT_DEADLINE_SECONDS = 90.0
 PER_OPERATION_TIMEOUT_SECONDS = 30.0
 MIN_REQUEST_INTERVAL_SECONDS = 20.0
 MAX_REQUESTS_PER_HOUR = 30
+# How long the loop keeps the game running before it may pause again while
+# construction is queued.  Blueprint actions (place and cancel) require a paused
+# game, and a duplicant needs roughly a minute and a half of game time to deliver
+# material and finish one diffuser.  Without a hold the model paused as soon as it
+# could, so the simulation advanced 0.2 cycles in nine minutes and no blueprint was
+# ever completed (2026-10-25 round 20).  The hold is bounded on purpose: a
+# placement that can never be built must not lock the pause out forever, because
+# the cancel that clears it is itself a paused-only action.
+CONSTRUCTION_RUN_HOLD_SECONDS = 150.0
 SAME_SET_RECHECK_SECONDS = 300.0
 DECISION_TTL_SECONDS = 120.0
 FAILURE_BACKOFF_SECONDS = (60.0, 120.0, 300.0)
@@ -258,6 +293,24 @@ def choice_response_schema(candidate_ids: Sequence[str]) -> Dict[str, Any]:
     }
 
 
+def structured_output_unsupported(code: str) -> bool:
+    """Whether one failure means "this endpoint rejected structured output".
+
+    Gateways differ: OpenAI-compatible relays answer ``http_400`` for an
+    unsupported ``response_format``, while some report the rejection inside an
+    HTTP 200 body, which ONI surfaces as a ``gateway_*`` code.  Either way the
+    correct recovery is one retry without structured output, because ONI's own
+    output validation remains authoritative.
+    """
+
+    text = str(code or "").lower()
+    if text == "http_400":
+        return True
+    if not text.startswith("gateway_"):
+        return False
+    return any(token in text for token in ("invalid", "unsupported", "response_format", "schema", "bad_request"))
+
+
 def validate_choice_output(
     parsed: Any, candidate_ids: Sequence[str]
 ) -> Tuple[Optional[Dict[str, str]], Optional[str]]:
@@ -343,6 +396,80 @@ def advice_suggests_mutation(item: Mapping[str, Any]) -> bool:
     return isinstance(command, Mapping) and command.get("action") not in NON_MUTATING_ACTIONS
 
 
+def oxygen_outlook(state: Mapping[str, Any]) -> Dict[str, Any]:
+    """Report whether the placeable oxygen buildings can actually work.
+
+    The prompt used to assert that placing an oxygen producer addresses a
+    negative oxygen balance.  That is only true when the world holds the
+    consumable, and on this clone it holds none: the diffuser requests Algae
+    while ``WorldInventory`` reports zero, and a complete scan of the visible
+    world found neither algae nor water.  Without the facts in the payload the
+    model kept placing producers that could never run and kept pausing to do it
+    (2026-10-26 rounds 33-37).
+
+    Every value is reported only when the game observed it; ``None`` means "not
+    observed", which is deliberately distinct from a measured zero.
+    """
+
+    outlook: Dict[str, Any] = {
+        "requested_consumable": None,
+        "consumable_available_kg": None,
+        "world_algae_kg": None,
+        "world_clean_water_kg": None,
+        "world_polluted_water_kg": None,
+        "world_water_kg": None,
+        "world_scan_progress": None,
+        "oxygen_buildings_can_operate": None,
+        "electrolyzer_can_operate": None,
+    }
+
+    instances = safe_get(state, "life_support_buildings.instances")
+    if isinstance(instances, Sequence) and not isinstance(instances, (str, bytes)):
+        for entry in instances:
+            if not isinstance(entry, Mapping):
+                continue
+            if entry.get("inventory_valid") is not True:
+                continue
+            tag = entry.get("requested_item_tag")
+            if isinstance(tag, str) and tag:
+                outlook["requested_consumable"] = display_text(tag, 40)
+                outlook["consumable_available_kg"] = compact_value(
+                    entry.get("requested_item_available_kg"), depth=0
+                )
+                break
+
+    # The world scan is a rolling window, so its fields are ``estimated`` until a
+    # pass completes; a measured value is still far more useful than null, and
+    # ``world_scan_status`` tells the reader which it is.  Sampling only complete
+    # passes once produced a wrong "the world has no water" conclusion from
+    # windows that happened to read zero (2026-10-26 rounds 36-37).
+    for path, key in (
+        ("materials.active_world_cells.algae_kg", "world_algae_kg"),
+        ("materials.active_world_cells.clean_water_kg", "world_clean_water_kg"),
+        ("materials.active_world_cells.polluted_water_kg", "world_polluted_water_kg"),
+    ):
+        if field_status(state, path) in {"observed", "estimated"}:
+            outlook[key] = compact_value(safe_get(state, path), depth=0)
+    if field_status(state, "materials.active_world_cells.scan_progress_ratio") in {"observed", "estimated"}:
+        outlook["world_scan_progress"] = compact_value(
+            safe_get(state, "materials.active_world_cells.scan_progress_ratio"), depth=0
+        )
+
+    waters = [
+        value
+        for value in (outlook["world_clean_water_kg"], outlook["world_polluted_water_kg"])
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    ]
+    if waters:
+        outlook["world_water_kg"] = round(sum(waters), 3)
+        outlook["electrolyzer_can_operate"] = sum(waters) > 0
+
+    available = outlook["consumable_available_kg"]
+    if isinstance(available, (int, float)) and not isinstance(available, bool):
+        outlook["oxygen_buildings_can_operate"] = available > 0
+    return outlook
+
+
 def build_choice_payload(
     state: Mapping[str, Any],
     candidates: Sequence[Mapping[str, Any]],
@@ -351,11 +478,34 @@ def build_choice_payload(
     advice: Sequence[Mapping[str, Any]] = (),
     *,
     autonomous: bool = False,
+    notes: Sequence[str] = (),
 ) -> Dict[str, Any]:
+    outlook = oxygen_outlook(state)
+    oxygen_rule = (
+        "colony.oxygen_balance.*_net_kg is oxygen made minus oxygen breathed per cycle from the game's report; "
+        "a negative value means the colony is losing breathable air, and a candidate that places an oxygen "
+        "producer (Oxygen Diffuser, Algae Terrarium) addresses it before an alert fires."
+    )
+    if outlook["oxygen_buildings_can_operate"] is False and outlook["electrolyzer_can_operate"] is True:
+        oxygen_rule = (
+            "colony.oxygen_balance.*_net_kg is oxygen made minus oxygen breathed per cycle from the game's report; "
+            "a negative value means the colony is losing breathable air. resource_outlook reports that the world "
+            "holds none of the consumable the placeable oxygen producers need, but it does hold water, so an "
+            "electrolyser would work if one could be placed; no oxygen producer is currently offered."
+        )
+    elif outlook["oxygen_buildings_can_operate"] is False:
+        oxygen_rule = (
+            "colony.oxygen_balance.*_net_kg is oxygen made minus oxygen breathed per cycle from the game's report; "
+            "a negative value means the colony is losing breathable air. resource_outlook reports that the world "
+            "holds none of the consumable the placeable oxygen producers need, so placing another one cannot help "
+            "and no such candidate is offered; prefer a candidate that changes what the colony can reach."
+        )
     return {
         "schema": CHOICE_INPUT_SCHEMA,
         "goal": display_text(goal, 500),
         "colony": colony_summary(state),
+        "resource_outlook": outlook,
+        "candidate_notes": [display_text(item, 80) for item in list(notes)[:4]],
         "rule_findings": [
             {"title": display_text(item.get("title"), 160), "risk": display_text(item.get("risk"), 16)}
             for item in list(advice)[:FEEDBACK_LIMIT]
@@ -378,19 +528,35 @@ def build_choice_payload(
             ),
             "recent_outcomes lists earlier choices and whether the game confirmed their effect.",
             "colony.fields holds only values the game observed; null means not observed.",
-            "colony.oxygen_balance.*_net_kg is oxygen made minus oxygen breathed per cycle from the game's report; "
-            "a negative value means the colony is losing breathable air, and a candidate that places an oxygen "
-            "producer (Oxygen Diffuser, Algae Terrarium) addresses it before an alert fires.",
+            oxygen_rule,
+            "candidate_notes explains why a candidate you might expect is absent.",
             "rule_findings lists open findings of the local safety rules (informational).",
         ],
     }
 
 
 def build_choice_prompt_text(payload: Mapping[str, Any]) -> str:
+    # The rules block deliberately contains no blank line: the JSON payload must
+    # stay the first content after the single blank line that follows the
+    # instruction, which is how the payload is recovered from a recorded prompt.
+    rules = "\n".join(
+        (
+            "Rules for choosing:",
+            "1. The candidate list is generated from the colony's current pause state, so it is sometimes short. While the game is running, only pause_game and wait are offered; while it is paused, the colony's own work is frozen and only resume_game starts it again.",
+            "2. Building, digging, duplicant priorities and research can only be CHANGED while the game is paused. So when the colony needs a change (low oxygen, falling food, idle duplicants, an unbuilt blueprint) and only pause_game is offered, choose pause_game: the next candidate list will contain the change you need.",
+            "3. A placed blueprint, a new priority or new research does NOTHING while the game stays paused. After you have made a change, choose resume_game so duplicants actually perform it. Never choose pause_game again while the game is already paused and pending work exists.",
+            "4. Choose wait only when the colony is genuinely fine and nothing needs changing, and never twice in a row while the same problem is still open.",
+            "5. Prefer the change that addresses the most urgent observed problem first: breathable air, then food, then water and sanitation, then power and temperature, then work priorities, research, building and production.",
+            "6. If an alert is open or a store is falling and the previous choices did not change it, the colony is stuck: prefer any candidate that changes the game state over wait or a repeat of the same action.",
+            "--- end of rules ---",
+        )
+    )
     return (
         "You choose the next action for an Oxygen Not Included colony. Return JSON only: "
         '{"schema":"oni.llm-choice.v1","candidate_id":"<one id from candidates>",'
-        '"reason":"<one short sentence>"}.\n\n'
+        '"reason":"<one short sentence>"}.\n'
+        + rules
+        + "\n\n"
         + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     )
 
@@ -411,7 +577,7 @@ def call_choice_model(
         {"role": "user", "content": prompt_text},
     ]
     # No temperature: several reasoning models reject it (review M5).
-    if str(config.get("wire_api") or "").lower().startswith("responses"):
+    if effective_wire_api(config) == WIRE_API_RESPONSES:
         url = base_url + "/responses"
         body: Dict[str, Any] = {"model": model, "input": messages}
         if response_schema is not None:
@@ -555,6 +721,10 @@ class ModelLoop:
         self._min_interval = float(min_interval_seconds)
         self._max_per_hour = int(max_requests_per_hour)
         self._monotonic = monotonic
+        # Start of the current "game is running with construction queued" streak.
+        self._construction_run_started: Optional[float] = None
+        # Start of the current "game is paused with work queued" streak.
+        self._resume_hold_started: Optional[float] = None
         self.autonomous = bool(autonomous)
         self._autonomous_identity = dict(autonomous_identity or {})
         if round_command_limit is not None and (not self.autonomous or type(round_command_limit) is not int or round_command_limit <= 0):
@@ -611,6 +781,7 @@ class ModelLoop:
                 blockers.append("candidate_generation_error")
             else:
                 blockers.extend(candidate_set.get("blockers") or [])
+                self._hold_construction_run(latest, candidate_set, current)
 
         self._harvest(current)
         published: Optional[Dict[str, Any]] = None
@@ -629,6 +800,134 @@ class ModelLoop:
 
     # -- eligibility --------------------------------------------------------
 
+    def _hold_construction_run(
+        self,
+        latest: Optional[Mapping[str, Any]],
+        candidate_set: Dict[str, Any],
+        current: float,
+    ) -> None:
+        """Keep the game running for a bounded window while work is queued.
+
+        Blueprint actions require a paused game, so the pause is what the model
+        reaches for whenever it wants to change something.  Left alone it paused as
+        soon as it could, so the simulation advanced 0.2 cycles in nine minutes and
+        no queued blueprint was ever completed (2026-10-25 round 20).
+
+        Two kinds of queued work hold the pause:
+
+        * a placement no duplicant has started, and
+        * a built building the game reports as not operational, which needs a
+          duplicant to supply or operate it.  The three oxygen diffusers the loop
+          had built all reported ``operational: false`` while the game sat paused,
+          so the colony stayed at -192 kg of oxygen per cycle even after the loop
+          raised the LifeSupport and Hauling chore groups (2026-10-26 round 28).
+
+        The hold is bounded on purpose: a placement that can never be built must
+        stay cancellable, and the cancel is itself a paused-only action.
+
+        Round 41 tried making the not-operational case unbounded, on the theory
+        that only a running game can make a completed building work.  That was
+        wrong: it removed the pause entirely, the running candidate set collapsed
+        to ``wait``, and the loop could then neither cancel a stuck placement nor
+        place the colony's food and oxygen buildings (2026-10-26 round 43).  Both
+        cases keep the bounded window; a periodic pause is what lets the loop act.
+        """
+
+        items = candidate_set.get("items")
+        if not isinstance(items, list):
+            return
+        paused = safe_get(latest or {}, "game.paused")
+        waiting = _pending_blueprint_count(latest or {}) + _non_operational_building_count(latest or {})
+        if paused is True:
+            # Symmetric case: while the game is paused with work already queued,
+            # the model reached for the paused-only churn action (cancel then
+            # place then cancel) instead of resuming, so the simulation never
+            # advanced and nothing was ever supplied or built (2026-10-26 round
+            # 28).  Withhold the cancel for the same bounded window so resuming
+            # is the constructive choice; afterwards it is offered again, because
+            # a placement that can never be built must stay cancellable.
+            self._construction_run_started = None
+            if waiting <= 0:
+                self._resume_hold_started = None
+                return
+            if self._resume_hold_started is None:
+                self._resume_hold_started = current
+            held_for = current - self._resume_hold_started
+            if held_for >= CONSTRUCTION_RUN_HOLD_SECONDS:
+                candidate_set["resume_hold_expired"] = True
+                return
+            candidate_set["items"] = [
+                item
+                for item in items
+                if not str(item.get("candidate_id") or "").startswith("cancel_blueprint_")
+            ]
+            candidate_set["resume_hold_remaining_seconds"] = round(
+                CONSTRUCTION_RUN_HOLD_SECONDS - held_for, 1
+            )
+            candidate_set["resume_hold_waiting"] = waiting
+            return
+        self._resume_hold_started = None
+        if waiting <= 0:
+            self._construction_run_started = None
+            return
+        if self._construction_run_started is None:
+            self._construction_run_started = current
+        held_for = current - self._construction_run_started
+        if held_for >= CONSTRUCTION_RUN_HOLD_SECONDS:
+            candidate_set["construction_run_hold_expired"] = True
+            return
+        candidate_set["items"] = [
+            item for item in items if item.get("candidate_id") != "pause_game"
+        ]
+        candidate_set["construction_run_hold_remaining_seconds"] = round(
+            CONSTRUCTION_RUN_HOLD_SECONDS - held_for, 1
+        )
+        candidate_set["construction_run_waiting"] = waiting
+
+    def _proposal_blocked_only_by_own_pending(
+        self, root: pathlib.Path, propose: Mapping[str, Any]
+    ) -> bool:
+        """True when the frame's propose gate is blocked only by this loop's own
+        single pending command.
+
+        This mirrors ``validate_autonomous_pending_custody``, which permits the
+        ``mutation_pending_*`` blockers that name the command being authorized.
+        Anything else — another mutation, an ambiguous outcome, more than one
+        pending command — still refuses.
+        """
+
+        if propose.get("blockers") != ["COMMAND_PIPELINE_MUTATION_BLOCKED"]:
+            return False
+        try:
+            health = json.loads((root / "health.json").read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        pipeline = health.get("command_pipeline") if isinstance(health, dict) else None
+        if not isinstance(pipeline, Mapping):
+            return False
+        entries = pipeline.get("blockers")
+        if not isinstance(entries, list) or not entries:
+            return False
+        named: set = set()
+        for entry in entries:
+            if not isinstance(entry, str):
+                return False
+            for prefix in ("mutation_pending_model_selection:", "mutation_pending_selection:"):
+                if entry.startswith(prefix):
+                    named.add(entry[len(prefix):])
+                    break
+            else:
+                return False
+        if len(named) != 1:
+            return False
+        pending = root / "commands" / "pending"
+        if not pending.is_dir():
+            return False
+        files = sorted(pending.glob("*.json"))
+        if len(files) != 1:
+            return False
+        return files[0].stem in named
+
     def _eligibility_blockers(
         self,
         root: pathlib.Path,
@@ -646,7 +945,16 @@ class ModelLoop:
         if trust.get("status") != "trusted":
             blockers.append("frame_untrusted")
         if not (isinstance(propose, dict) and propose.get("ready") is True and propose.get("blockers") == []):
-            blockers.append("frame_proposal_not_ready")
+            # The frame marks ``propose`` not ready whenever the command pipeline
+            # carries a mutation blocker, and the command this loop just published
+            # to pending/ is itself such a blocker.  The authorization path already
+            # tolerates exactly that case (``permitted`` covers
+            # mutation_pending_model_selection:<this command>), so refusing here
+            # only burned the command's TTL and produced expired_before_approval
+            # (2026-10-25 round 22).  Accept the frame when the pipeline's blockers
+            # are only the loop's own single pending command.
+            if not (isinstance(propose, dict) and self._proposal_blocked_only_by_own_pending(root, propose)):
+                blockers.append("frame_proposal_not_ready")
         source = frame.get("source") if isinstance(frame.get("source"), Mapping) else {}
         if (
             source.get("snapshot_id") != latest.get("snapshot_id")
@@ -785,7 +1093,15 @@ class ModelLoop:
             self._next_request_at = current + FAILURE_BACKOFF_SECONDS[0]
             self._event("config_unavailable", status=str(config.get("config_error") or "missing_api_key"))
             return
-        payload = build_choice_payload(latest or {}, items, outcomes, self._goal, advice, autonomous=self.autonomous)
+        payload = build_choice_payload(
+            latest or {},
+            items,
+            outcomes,
+            self._goal,
+            advice,
+            autonomous=self.autonomous,
+            notes=candidate_set.get("notes") or (),
+        )
         prompt_text = build_choice_prompt_text(payload)
         if estimate_tokens(prompt_text) > MAX_PROMPT_TOKENS:
             self._next_request_at = current + FAILURE_BACKOFF_SECONDS[-1]
@@ -819,7 +1135,7 @@ class ModelLoop:
             response, structured = self._call(request, config, prompt_text, ids)
             content = extract_message_content(response)
             choice, error = validate_choice_output(parse_json_content(content), ids)
-            usage = normalize_usage(response.get("usage"))
+            usage = normalize_usage(response_usage(response))
             request.result = {
                 "status": "ok" if error is None else error,
                 "choice": choice,
@@ -852,8 +1168,10 @@ class ModelLoop:
                 )
             except ModelRequestError as exc:
                 # Gateways without structured output answer 400; retry once
-                # without it (the local validation stays authoritative).
-                if structured == "json_schema" and exc.code == "http_400":
+                # without it (the local validation stays authoritative).  A
+                # gateway that reports the rejection inside a 200 body produces
+                # a ``gateway_*`` code instead.
+                if structured == "json_schema" and structured_output_unsupported(exc.code):
                     continue
                 raise
             if not isinstance(response, dict):
@@ -1111,8 +1429,17 @@ class ModelLoop:
                 approved = authorize_autonomous_command(root, command_id, latest_state=latest, frame=frame, policy=policy)
             except AutonomousAuthorizationError as exc:
                 uncertain = bool(getattr(exc, "outcome_unknown", False))
+                # The reason was previously dropped, so a refused authorization
+                # left no way to tell a frame-drift race from a genuine contract
+                # failure without re-running the authorizer by hand (2026-10-25
+                # round 22).  Record it, bounded, as its own event field.
+                reason = str(exc)[:240]
                 self._set_autonomous_intent(root, command_id, "uncertain" if uncertain else "pending", "authorization_outcome_unknown" if uncertain else "authorization_refused")
-                self._event("autonomous_authorization_unknown" if uncertain else "autonomous_authorization_refused", command_id=command_id)
+                self._event(
+                    "autonomous_authorization_unknown" if uncertain else "autonomous_authorization_refused",
+                    command_id=command_id,
+                    authorization_reason=reason,
+                )
             except Exception:  # noqa: BLE001 - reconcile the same custody id after every unknown result
                 self._set_autonomous_intent(root, command_id, "uncertain", "authorization_outcome_uncertain")
                 self._event("autonomous_authorization_unknown", command_id=command_id)

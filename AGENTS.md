@@ -41,6 +41,7 @@ These rules apply to every Codex task working in this workspace.
 - Existing workers must finish or reach a verified safe checkpoint for their current atomic step before switching; do not start a duplicate writer or replay an uncertain action. Subsequent worker work must use `gpt-6.1-sol` / `max`; the main controller remains `gpt-6-astra` / `max`.
 - If the requested model/reasoning combination is unavailable, report the blocker immediately. Do not silently substitute another model or reasoning effort, or wait silently for capacity.
 - Do not change model, reasoning effort, or service tier in the middle of a live action. End the atomic step first.
+- ONI's own controller model endpoint (2026-10-25): DeepSeek through the Cline-pass gateway, `cline-pass/deepseek-v4.1-flash` at `https://api.cline.bot/api/v1`, wire API `chat_completions`, credential `CLINE_API_KEY`. This is a separate concern from the Codex task routing above; see `docs/model-routing-20261025.md` and use `scripts/configure-oni-model.ps1`.
 
 ## Current autonomous-controller goal
 
@@ -54,3 +55,9 @@ These rules apply to every Codex task working in this workspace.
 
 - Keep large logs in evidence files. Return paths, hashes, counts, timestamps, and small relevant excerpts rather than injecting raw logs into the conversation.
 - Before declaring a run complete, verify normal exit, original save hashes, restored Mod/config state, empty command queues, and the absence of leftover helper processes.
+
+## Process lifetime (learned the hard way, twice)
+
+- Start the long-lived processes — the ONI game and the controller (which is also the Bridge) — in their own **short** command, and never in a command that also runs a polling loop.
+- A polling command that exceeds its timeout becomes a background job; cancelling that job terminates its whole process tree. On 2026-10-25 (round 19) and again on 2026-10-26 (round 27) this killed a healthy controller mid-run: the controller then exited with `status: ok` and an empty stderr, which reads like a clean shutdown rather than a kill.
+- Watch runs belong in a separate command. Verified 2026-10-26: after starting the controller in a short command, cancelling an unrelated watch job left the controller running (PID 15000) and publishing.

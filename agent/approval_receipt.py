@@ -28,7 +28,11 @@ from agent.canonical_hash import (
     loads_strict,
 )
 from agent.decision import DecisionFrameError, validate_decision_frame
-from agent.state_quality import canonical_state_hash, snapshot_trust_blockers
+from agent.state_quality import (
+    BRIDGE_PUBLISH_MARGIN_SECONDS,
+    canonical_state_hash,
+    snapshot_trust_blockers,
+)
 
 
 APPROVAL_RECEIPT_SCHEMA = "oni.approval-receipt.v1"
@@ -191,7 +195,14 @@ def _validate_autonomous_snapshot(
     from agent.command_queue import trusted_proposal_state
 
     _require(trusted_proposal_state(dict(state)), "autonomous latest state is not trustworthy")
-    blockers = autonomous_policy_state_blockers(policy, state) + snapshot_trust_blockers(dict(state))
+    # The authorization runs inside the Bridge's own publish cycle, so it must
+    # allow the same publish lag the Bridge and the model loop allow.  Without
+    # the margin the threshold here was 5s * 3 = 15s while the loop's was 45s, so
+    # a snapshot the loop accepted was refused as ``snapshot_stale`` and the
+    # command sat in pending/ until its TTL expired (2026-10-26 round 26).
+    blockers = autonomous_policy_state_blockers(policy, state) + snapshot_trust_blockers(
+        dict(state), bridge_margin_seconds=BRIDGE_PUBLISH_MARGIN_SECONDS
+    )
     _require(not blockers, "autonomous startup/state binding refused: " + ",".join(blockers))
     source = frame.get("source") if isinstance(frame.get("source"), Mapping) else {}
     expected = {

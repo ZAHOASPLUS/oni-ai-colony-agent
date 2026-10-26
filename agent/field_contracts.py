@@ -24,6 +24,25 @@ RESEARCH_COMPLETE_CONTRACT_ID = "oni.qc.research.complete.v1"
 RESEARCH_COMPLETE_SOURCE = "Db.Techs+Research.Get+TechInstance.IsComplete"
 REGISTERED_FOOD_CONTRACT_ID = "oni.qc.resources.registered_food.v1"
 ALERTS_CANONICAL_CONTRACT_ID = "oni.qc.alerts.canonical.v1"
+# "Onset" alerts: a duplicant's current need is starting to be unmet, but no
+# duplicant is taking harm and the need clears by itself once the game runs and
+# the duplicant walks to the toilet / into breathable air / into a comfortable
+# temperature.  They must not block resuming, because blocking them deadlocks an
+# autonomous run: the game stays paused, the duplicant cannot move, the alert
+# never clears (2026-10-25 rounds 9-11 for low_oxygen/urgent_toilet, round 19 for
+# the temperature pair).
+#
+# Actual harm keeps blocking.  The Mod reports health damage separately as
+# ``wounded`` (Health.HealthState Scuffed/Injured/Critical), so ``hypothermia``
+# and ``hyperthermia`` are the temperature-comfort states, not injury.
+ONSET_ALERT_IDS = (
+    "exhaustion",
+    "hyperthermia",
+    "hypothermia",
+    "low_oxygen",
+    "urgent_toilet",
+)
+LOW_OXYGEN_ALERT_ID = "low_oxygen"
 CANONICAL_ALERT_IDS = (
     "bionic_low_battery",
     "bionic_offline",
@@ -151,6 +170,11 @@ _PATH_NATIVE_BOOLEAN_FIELDS = frozenset(
         "can_place_wire",
         "can_place_mineral_deoxidizer",
         "can_place_algae_habitat",
+        "can_place_electrolyzer",
+        "can_place_farm_tile",
+        "can_place_microbe_musher",
+        "nav_floor",
+        "nav_floor_below",
         "blueprint_present",
         "blueprint_in_progress",
         "blueprint_is_utility",
@@ -670,7 +694,7 @@ _CONTRACTS: Tuple[FieldContract, ...] = (
         contract_id=BLUEPRINT_CATALOG_CONTRACT_ID,
         paths=(),
         path_patterns=(
-            r"^blueprints\.catalog\.(Ladder|Wire|MineralDeoxidizer|AlgaeHabitat)\."
+            r"^blueprints\.catalog\.(Ladder|Wire|MineralDeoxidizer|AlgaeHabitat|Electrolyzer|FarmTile|MicrobeMusher)\."
             r"(available|prefab_id|is_utility|cancellable|orientation|facade_id|material_tags)$",
         ),
         statuses=("observed",),
@@ -691,6 +715,8 @@ _CONTRACTS: Tuple[FieldContract, ...] = (
             r"(cell|x|y|world_id|visible|solid|foundation|element_id|mass_kg|damage|"
             r"object_count|empty_for_blueprint|can_place_ladder|can_place_wire|"
             r"can_place_mineral_deoxidizer|can_place_algae_habitat|"
+            r"can_place_electrolyzer|can_place_farm_tile|can_place_microbe_musher|"
+            r"nav_floor|nav_floor_below|"
             r"blueprint_present|blueprint_instance_id|blueprint_prefab_id|"
             r"blueprint_orientation|blueprint_material_tags|blueprint_in_progress|"
             r"blueprint_is_utility|blueprint_progress_percent|"

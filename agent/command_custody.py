@@ -54,6 +54,7 @@ COMMAND_SCHEMA = "oni.command.v3"
 AUTONOMOUS_COMMAND_SCHEMA = "oni.command.v4"
 PENDING_STATUS = "pending_human_approval"
 AUTONOMOUS_PENDING_STATUS = "pending_autonomous_authorization"
+APPROVED_STATUS = "approved"
 DISPOSITION_STATUSES = {"rejected": "rejected", "quarantine": "quarantined"}
 _LOCK_HEADER = b"ONI command lifecycle custody v1\n"
 _REPARSE_POINT = 0x0400
@@ -964,6 +965,8 @@ def _validate_command_envelope(
     )
     if expected_stage == "pending" and value.get("status") != pending_status:
         raise CommandCustodyConflict(f"{label} status is not pending approval")
+    if expected_stage == "approved" and value.get("status") != APPROVED_STATUS:
+        raise CommandCustodyConflict(f"{label} status is not approved")
     if expected_status is not None and value.get("status") != expected_status:
         raise CommandCustodyConflict(f"{label} status is not canonical")
     return value
@@ -1296,13 +1299,14 @@ def _journal_value(
     transaction: str,
     phase: str,
     journal_identity: Tuple[int, int],
+    source_stage: str = "pending",
 ) -> Dict[str, Any]:
     return {
         "schema": LIFECYCLE_JOURNAL_SCHEMA,
         "transaction": transaction,
         "command_id": command_id,
         "operation": operation,
-        "source_stage": "pending",
+        "source_stage": source_stage,
         "source_status": source_status,
         "target_stage": operation,
         "target_status": DISPOSITION_STATUSES[operation],
@@ -1411,12 +1415,15 @@ def _transition_pending_envelope_locked(
     expected_source: Optional[Mapping[str, Any]],
     expected_observation: Optional[PendingEnvelopeObservation] = None,
     operation: str,
+    source_stage: str = "pending",
 ) -> Optional[pathlib.Path]:
     if operation not in DISPOSITION_STAGES:
         raise CommandCustodyError(f"unsupported pending disposition: {operation}")
+    if source_stage not in COMMAND_STAGES:
+        raise CommandCustodyError(f"unsupported disposition source stage: {source_stage}")
     source = _absolute(source)
     target = _absolute(target)
-    expected_source_path = queue_stage_path(bridge_dir, "pending", source.name)
+    expected_source_path = queue_stage_path(bridge_dir, source_stage, source.name)
     expected_target_path = queue_stage_path(bridge_dir, operation, source.name)
     if not _same_path(source, expected_source_path) or not _same_path(target, expected_target_path):
         raise CommandCustodyConflict("pending disposition paths are outside the canonical queue")
@@ -1453,7 +1460,7 @@ def _transition_pending_envelope_locked(
         raise CommandCustodyConflict(f"pending disposition source is not the sole command owner: {command_id}")
     if target_location is not None:
         raise CommandCustodyConflict(f"pending disposition target already exists: {target}")
-    if len(owned_locations) != 1 or source_location.stage != "pending":
+    if len(owned_locations) != 1 or source_location.stage != source_stage:
         raise CommandCustodyConflict(
             f"pending disposition command id is present in multiple queue locations: {command_id}"
         )
@@ -1464,7 +1471,7 @@ def _transition_pending_envelope_locked(
     original_command = _validate_command_envelope(
         _strict_json_loads(original_bytes, label="pending source"),
         expected_id=command_id,
-        expected_stage="pending",
+        expected_stage=source_stage,
         label="pending source",
     )
     if final_command.get("schema") != original_command.get("schema"):
@@ -1480,7 +1487,7 @@ def _transition_pending_envelope_locked(
         _validate_command_envelope(
             _strict_json_loads(expected_bytes, label="expected pending source"),
             expected_id=command_id,
-            expected_stage="pending",
+            expected_stage=source_stage,
             label="expected pending source",
         )
         if expected_bytes != _json_bytes(original_command):
@@ -1515,6 +1522,7 @@ def _transition_pending_envelope_locked(
             final_payload_identity=final_payload_identity,
             transaction=transaction,
             phase="staged",
+            source_stage=source_stage,
             # The first body is intentionally not a recoverable record until
             # its real journal inode has been bound into the self-hash.
             journal_identity=(0, 1),
@@ -1592,11 +1600,19 @@ def transition_pending_envelope(
     expected_source: Optional[Mapping[str, Any]] = None,
     expected_observation: Optional[PendingEnvelopeObservation] = None,
     operation: str,
+    source_stage: str = "pending",
 ) -> Optional[pathlib.Path]:
     """Move one exact pending envelope to rejected or quarantine custody.
 
     The source is never overwritten. A recovery journal and exact byte payloads
     remain if any post-write boundary is uncertain.
+
+    ``source_stage`` names the queue stage the envelope is being taken from.  It
+    defaults to ``pending``; ``approved`` is also allowed, because an approved
+    command the executor never claimed can expire and must reach a terminal
+    stage or its intent latches forever (2026-10-26 round 35).  Every other
+    guarantee is unchanged: the source must be the canonical path for that
+    stage, and the payload is validated exactly as before.
     """
 
     with lifecycle_custody(bridge_dir):
@@ -1609,6 +1625,7 @@ def transition_pending_envelope(
             expected_source=expected_source,
             expected_observation=expected_observation,
             operation=operation,
+            source_stage=source_stage,
         )
 
 
@@ -1684,9 +1701,9 @@ def _validate_journal_record(
     operation = journal.get("operation")
     if operation not in DISPOSITION_STAGES:
         raise CommandCustodyConflict("lifecycle journal operation is invalid")
-    if journal.get("source_stage") != "pending" or journal.get("target_stage") != operation:
+    if journal.get("source_stage") not in {"pending", "approved"} or journal.get("target_stage") != operation:
         raise CommandCustodyConflict("lifecycle journal stage role mapping is invalid")
-    if journal.get("source_status") not in (PENDING_STATUS, AUTONOMOUS_PENDING_STATUS):
+    if journal.get("source_status") not in (PENDING_STATUS, AUTONOMOUS_PENDING_STATUS, APPROVED_STATUS):
         raise CommandCustodyConflict("lifecycle journal source status is invalid")
     if journal.get("target_status") != DISPOSITION_STATUSES[operation]:
         raise CommandCustodyConflict("lifecycle journal target status is invalid")

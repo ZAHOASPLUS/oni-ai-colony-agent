@@ -49,8 +49,19 @@ from agent.model_loop import (
     ModelLoop, _assert_committed_frame, load_autonomous_control,
     validate_autonomous_control, write_autonomous_document,
 )
-from agent.state_quality import parse_snapshot_timestamp, safe_get, snapshot_trust_blockers
-from bridge.oni_bridge import validate_startup_expectations, watch
+from agent.state_quality import (
+    BRIDGE_PUBLISH_MARGIN_SECONDS,
+    parse_snapshot_timestamp,
+    safe_get,
+    snapshot_trust_blockers,
+)
+from bridge.oni_bridge import (
+    read_new_records,
+    replay_initial_records,
+    validate_startup_expectations,
+    watch,
+    write_outputs,
+)
 
 CONFIG_SCHEMA = "oni.autonomous-controller-config.v1"
 STATUS_SCHEMA = "oni.autonomous-controller-status.v1"
@@ -333,7 +344,11 @@ def controller_status(config: Mapping[str, Any]) -> Dict[str, Any]:
     if latest is None and not terminal:
         blockers.append("live_observation_missing")
     elif latest is not None and not terminal:
-        blockers.extend(snapshot_trust_blockers(latest))
+        # Same publishing Bridge, same cadence margin: an independent re-check
+        # must not contradict the Bridge's own freshness verdict.
+        blockers.extend(
+            snapshot_trust_blockers(latest, bridge_margin_seconds=BRIDGE_PUBLISH_MARGIN_SECONDS)
+        )
     if control is None:
         phase = "not_started"
     elif desired == "running":
@@ -447,10 +462,71 @@ def _controller_lease(root: pathlib.Path) -> Iterator[None]:
         os.close(descriptor)
 
 
+def _observation_is_untrusted(latest: Optional[Mapping[str, Any]]) -> bool:
+    return (
+        latest is None
+        or bool(snapshot_trust_blockers(latest, bridge_margin_seconds=BRIDGE_PUBLISH_MARGIN_SECONDS))
+        or safe_get(latest, "bridge.trust_ready") is not True
+        or safe_get(latest, "bridge.replay_mode") is not False
+    )
+
+
+def _bootstrap_observation(config: Mapping[str, Any]) -> None:
+    """Publish one trusted observation before the controller's start checks.
+
+    The controller owns the Bridge for its run (see the ``watch`` call below), so
+    on a fresh run nothing has published ``latest_state.json`` yet and the start
+    precondition could never be met.  Replay the admitted log once and publish the
+    outputs, then the normal checks run against a real observation.
+
+    The replay plus the publish take about 27 s on a rotated 31 MB log, so the
+    snapshot published by that first pass is already that old and the freshness
+    check can refuse it (2026-10-26 round 28).  A second pass over only the
+    records that arrived meanwhile costs milliseconds and publishes a snapshot
+    that is current, which is what the check measures.
+
+    A standalone bridge must NOT be used to prime this: two watches on one bridge
+    directory race each other's log cursor and rotation (2026-10-25 rounds 5-15).
+    """
+
+    root = config["bridge_dir"]
+    runtime, position = replay_initial_records(
+        root / "state.jsonl",
+        root,
+        startup_expectations=config["startup_expectations"],
+        require_startup_binding=True,
+        strategy_goal=config["goal"],
+        session_archive_prefix=True,
+    )
+    write_outputs(
+        root,
+        runtime,
+        enable_llm=False,
+        secrets_dir=config.get("secrets_dir"),
+        goal=config["goal"],
+    )
+    # Catch up on whatever the Probe wrote during the pass above.
+    records, _position, invalid, partial = read_new_records(root / "state.jsonl", position)
+    if records or partial:
+        runtime.process_many(records)
+        runtime.invalid_json_count += invalid
+        runtime.partial_bytes = partial
+        write_outputs(
+            root,
+            runtime,
+            enable_llm=False,
+            secrets_dir=config.get("secrets_dir"),
+            goal=config["goal"],
+        )
+
+
 def start_controller(config: Mapping[str, Any]) -> int:
     root = config["bridge_dir"]
     _, latest, _ = _bound_inputs(config)
-    if latest is None or snapshot_trust_blockers(latest) or safe_get(latest, "bridge.trust_ready") is not True or safe_get(latest, "bridge.replay_mode") is not False:
+    if _observation_is_untrusted(latest):
+        _bootstrap_observation(config)
+        _, latest, _ = _bound_inputs(config)
+    if _observation_is_untrusted(latest):
         raise ValueError("start requires a fresh trustworthy live observation from the externally admitted run")
     frame = _object(root / "decision-frame.json")
     assert frame is not None
@@ -508,7 +584,29 @@ def start_controller(config: Mapping[str, Any]) -> int:
 
         try:
             print(json.dumps({"phase": "controller_started", "run_id": config["run_id"], "controller_id": config["controller_id"], "controller_pid": os.getpid(), "scope": "foreground watch of the existing admitted run"}, ensure_ascii=False), flush=True)
-            watch(root, config["poll_seconds"], startup_expectations=config["startup_expectations"], secrets_dir=config.get("secrets_dir"), goal=config["goal"], model_loop=loop, stop_requested=stop_requested)
+            # The controller IS the Bridge for its run: this watch owns the log
+            # cursor, the archives and every published output.  A second watch on
+            # the same bridge directory (a standalone bridge process started
+            # alongside the controller) races it: each rotates the log and keeps
+            # its own cursor, so records are lost, ``seq_gap`` false positives
+            # appear and the two loops overwrite health.json and latest_state.json
+            # (2026-10-25 rounds 5-15).  Run the controller alone.
+            #
+            # Rotation is safe again with a single owner, and it is required: with
+            # it disabled the append-only log reached 998 MB, so every startup
+            # replay had to read the whole file and the controller failed to start
+            # (round 22).  ``watch`` continues from the pre-rotation cursor in the
+            # moved file, so the records written across the rename are not lost.
+            watch(
+                root,
+                config["poll_seconds"],
+                startup_expectations=config["startup_expectations"],
+                secrets_dir=config.get("secrets_dir"),
+                goal=config["goal"],
+                model_loop=loop,
+                stop_requested=stop_requested,
+                allow_log_rotation=bool(config.get("allow_log_rotation", True)),
+            )
         except BaseException:
             # Failure revokes issuance, retains all queues and evidence, and
             # reports that a safe drain was not observed. Never claim stopped.
