@@ -59,8 +59,27 @@ namespace OniAiProbeMod.Probe
             // a Microbe Musher needs dirt and water; the game's own research lock
             // and placement rules decide which of them is actually usable.
             "FarmTile",
-            "MicrobeMusher"
+            "MicrobeMusher",
+            // Roadmap B15: an Electrolyzer needs power and takes water only
+            // through a liquid pipe, so Phase 2's six Electrolyzers never ran.
+            // A Manual Generator powers it, a Liquid Pump (placed in liquid)
+            // feeds it, and the Wire and Liquid Pipe links between their ports
+            // are offered as blueprints.supply_links.
+            "LiquidConduit",
+            "LiquidPump",
+            "ManualGenerator"
         };
+
+        /// <summary>Allowlisted utilities: placed only as ordered paths.</summary>
+        internal static readonly string[] UtilityBlueprintAllowlist = { "Wire", "LiquidConduit" };
+
+        /// <summary>Buildings whose footprint may hold liquid (a pump works only submerged).</summary>
+        private static readonly string[] SubmergedBlueprintAllowlist = { "LiquidPump" };
+
+        internal static bool IsUtilityBlueprintDef(string defId)
+        {
+            return !string.IsNullOrEmpty(defId) && Array.IndexOf(UtilityBlueprintAllowlist, defId) >= 0;
+        }
 
         private static Dictionary<string, object> cachedBuildings;
         private static int cachedBuildingsWorldId = int.MinValue;
@@ -101,6 +120,9 @@ namespace OniAiProbeMod.Probe
         private static int cachedBlueprintWorldId = int.MinValue;
         private static DateTimeOffset nextBlueprintCandidateRefreshAt = DateTimeOffset.MinValue;
         private static int blueprintCandidateScanOffset;
+        private static List<SupplyLink> cachedSupplyLinks;
+        private static int cachedSupplyLinksWorldId = int.MinValue;
+        private static DateTimeOffset nextSupplyLinkRefreshAt = DateTimeOffset.MinValue;
 
         internal static void ResetSession()
         {
@@ -119,6 +141,9 @@ namespace OniAiProbeMod.Probe
             cachedBlueprintWorldId = int.MinValue;
             nextBlueprintCandidateRefreshAt = DateTimeOffset.MinValue;
             blueprintCandidateScanOffset = 0;
+            cachedSupplyLinks = null;
+            cachedSupplyLinksWorldId = int.MinValue;
+            nextSupplyLinkRefreshAt = DateTimeOffset.MinValue;
             SurvivalTelemetryReader.ResetSession();
         }
 
@@ -182,6 +207,14 @@ namespace OniAiProbeMod.Probe
         internal static bool UtilityPathExists(string pathId)
         {
             return !string.IsNullOrEmpty(pathId) && UtilityPaths.ContainsKey(pathId);
+        }
+
+        /// <summary>The utility a registered path was placed with, or null.</summary>
+        internal static string UtilityPathDefId(string pathId)
+        {
+            return !string.IsNullOrEmpty(pathId) && UtilityPaths.TryGetValue(pathId, out UtilityPathRecord record)
+                ? record.BuildingDefId
+                : null;
         }
 
         internal static bool UtilityPathMatches(
@@ -1260,6 +1293,9 @@ namespace OniAiProbeMod.Probe
                         cells.Add(target.Cell);
                     }
                 }
+                // Link cells join the published cells, so a link's placement
+                // contract can bind every cell it would occupy.
+                Dictionary<string, object> supplyLinks = ReadSupplyLinks(worldId, selectedMaterialsByDef, cells);
 
                 Dictionary<string, object> byCell = new Dictionary<string, object>(StringComparer.Ordinal);
                 Dictionary<string, object> byInstanceId = new Dictionary<string, object>(StringComparer.Ordinal);
@@ -1286,6 +1322,7 @@ namespace OniAiProbeMod.Probe
                 result.Blueprints["catalog"] = catalog;
                 result.Blueprints["by_instance_id"] = byInstanceId;
                 result.Blueprints["utility_paths"] = ReadUtilityPathState();
+                result.Blueprints["supply_links"] = supplyLinks;
                 result.Cells["by_id"] = byCell;
                 result.Status = "observed";
                 result.Source = "BuildingDef+Grid+Constructable+WorldInventory";
@@ -1296,6 +1333,7 @@ namespace OniAiProbeMod.Probe
                 result.Blueprints["catalog"] = new Dictionary<string, object>();
                 result.Blueprints["by_instance_id"] = new Dictionary<string, object>();
                 result.Blueprints["utility_paths"] = new Dictionary<string, object>();
+                result.Blueprints["supply_links"] = new Dictionary<string, object>();
                 result.Cells["by_id"] = new Dictionary<string, object>();
                 result.Status = "error";
                 return result;
@@ -1843,7 +1881,11 @@ namespace OniAiProbeMod.Probe
                 List<Tag> selected;
                 List<float> ignored;
                 bool ignoredAvailable;
-                if (TrySelectBlueprintMaterials(def, world, out selected, out ignored, out ignoredAvailable))
+                // Utilities are offered only as port-to-port supply links; a
+                // scanned list of loose wire cells is never placed and would
+                // keep the scan from ever reporting its lists as full.
+                if (def != null && !def.isUtility &&
+                    TrySelectBlueprintMaterials(def, world, out selected, out ignored, out ignoredAvailable))
                 {
                     selectedByDef[defId] = selected;
                 }
@@ -1897,7 +1939,9 @@ namespace OniAiProbeMod.Probe
                 int x = minX + offset % width;
                 int y = minY + offset / width;
                 int cell = Grid.XYToCell(x, y);
-                if (!IsEmptyBlueprintCell(cell, worldId))
+                // Cheap pre-filter only; IsSafeBlueprintPlacement applies each
+                // building's own footprint rule (a pump's cell holds liquid).
+                if (!IsOpenCell(cell, worldId) || CountCellObjects(cell) != 0)
                 {
                     continue;
                 }
@@ -1917,6 +1961,312 @@ namespace OniAiProbeMod.Probe
             }
             nextBlueprintCandidateRefreshAt = now.AddSeconds(
                 BlueprintCandidateListsFull(selectedByDef) ? BlueprintCandidateRefreshSeconds : 1);
+        }
+
+        // Supply links (roadmap B15).  A wire or pipe connects a port only by
+        // occupying the port's cell, so the link is computed here from the
+        // completed buildings' own port cells; the model only chooses it.
+        private const int SupplyLinkMaxVisited = 2048;
+        // Mirror ActionExecutor.MaxUtilityBlueprintCells and its path_id bound.
+        private const int MaxUtilityPathCells = 64;
+        private const int MaxUtilityPathIdLength = 64;
+        private const int SupplyLinkRefreshSeconds = 30;
+        private static readonly string[] PoweredSupplyConsumers = { "Electrolyzer", "LiquidPump" };
+
+        private sealed class SupplyLink
+        {
+            internal string PathId;
+            internal string Kind;
+            internal string BuildingDefId;
+            internal int SourceInstanceId;
+            internal string SourcePrefabId;
+            internal List<int> ConsumerInstanceIds = new List<int>();
+            internal List<string> ConsumerPrefabIds = new List<string>();
+            internal List<int> Cells;
+        }
+
+        private sealed class SupplyBuilding
+        {
+            internal int InstanceId;
+            internal string PrefabId;
+            internal Building Building;
+        }
+
+        /// <summary>
+        /// The current supply links, recomputed every
+        /// <see cref="SupplyLinkRefreshSeconds"/>; in between, a cached link is
+        /// dropped as soon as any of its cells stops being placeable.
+        /// </summary>
+        private static Dictionary<string, object> ReadSupplyLinks(
+            int worldId,
+            Dictionary<string, List<Tag>> selectedMaterialsByDef,
+            HashSet<int> trackedCells)
+        {
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            if (cachedSupplyLinks == null || cachedSupplyLinksWorldId != worldId || now >= nextSupplyLinkRefreshAt)
+            {
+                cachedSupplyLinks = ComputeSupplyLinks(worldId, selectedMaterialsByDef);
+                cachedSupplyLinksWorldId = worldId;
+                nextSupplyLinkRefreshAt = now.AddSeconds(SupplyLinkRefreshSeconds);
+            }
+            Dictionary<string, object> result = new Dictionary<string, object>(StringComparer.Ordinal);
+            List<SupplyLink> current = new List<SupplyLink>();
+            foreach (SupplyLink link in cachedSupplyLinks)
+            {
+                BuildingDef def = Assets.GetBuildingDef(link.BuildingDefId);
+                List<Tag> selected = selectedMaterialsByDef.TryGetValue(link.BuildingDefId, out List<Tag> chosen)
+                    ? chosen
+                    : new List<Tag>();
+                if (UtilityPathExists(link.PathId) ||
+                    !link.Cells.TrueForAll(cell => IsSafeBlueprintPlacement(cell, worldId, def, selected)))
+                {
+                    continue;
+                }
+                current.Add(link);
+                foreach (int cell in link.Cells)
+                {
+                    trackedCells.Add(cell);
+                }
+                List<object> cells = new List<object>();
+                link.Cells.ForEach(cell => cells.Add(cell));
+                List<object> consumerIds = new List<object>();
+                link.ConsumerInstanceIds.ForEach(id => consumerIds.Add(id));
+                List<object> consumerPrefabs = new List<object>();
+                link.ConsumerPrefabIds.ForEach(id => consumerPrefabs.Add(id));
+                result["id_" + link.PathId] = new Dictionary<string, object>
+                {
+                    { "path_id", link.PathId },
+                    { "kind", link.Kind },
+                    { "building_def_id", link.BuildingDefId },
+                    { "source_instance_id", link.SourceInstanceId },
+                    { "source_prefab_id", link.SourcePrefabId },
+                    { "consumer_instance_ids", consumerIds },
+                    { "consumer_prefab_ids", consumerPrefabs },
+                    { "cells", cells }
+                };
+            }
+            cachedSupplyLinks = current;
+            return result;
+        }
+
+        private static List<SupplyLink> ComputeSupplyLinks(
+            int worldId,
+            Dictionary<string, List<Tag>> selectedMaterialsByDef)
+        {
+            List<SupplyLink> links = new List<SupplyLink>();
+            List<SupplyBuilding> buildings = new List<SupplyBuilding>();
+            int enumerated = 0;
+            foreach (BuildingComplete item in Components.BuildingCompletes.GetWorldItems(worldId))
+            {
+                if (++enumerated > EnumerationLimit)
+                {
+                    return links;
+                }
+                string prefabId = item?.Def?.PrefabID;
+                if (prefabId != "ManualGenerator" && prefabId != "Electrolyzer" && prefabId != "LiquidPump")
+                {
+                    continue;
+                }
+                KPrefabID prefab = item.GetComponent<KPrefabID>();
+                if (prefab == null || prefab.InstanceID <= 0)
+                {
+                    continue;
+                }
+                buildings.Add(new SupplyBuilding { InstanceId = prefab.InstanceID, PrefabId = prefabId, Building = item });
+            }
+            buildings.Sort((left, right) => left.InstanceId.CompareTo(right.InstanceId));
+
+            // Every port cell is reserved for its own building's link, so one
+            // link never runs through (and so connects) another building's port.
+            HashSet<int> reserved = new HashSet<int>();
+            foreach (SupplyBuilding entry in buildings)
+            {
+                BuildingDef def = entry.Building.Def;
+                if (def.RequiresPowerInput) reserved.Add(entry.Building.GetPowerInputCell());
+                if (def.RequiresPowerOutput) reserved.Add(entry.Building.GetPowerOutputCell());
+                if (def.InputConduitType != ConduitType.None) reserved.Add(entry.Building.GetUtilityInputCell());
+                if (def.OutputConduitType != ConduitType.None) reserved.Add(entry.Building.GetUtilityOutputCell());
+            }
+
+            SupplyLink power = ComputePowerLink(worldId, buildings, reserved, selectedMaterialsByDef);
+            if (power != null)
+            {
+                links.Add(power);
+            }
+            links.AddRange(ComputeLiquidLinks(worldId, buildings, reserved, selectedMaterialsByDef));
+            return links;
+        }
+
+        private static Func<int, bool> UtilityPassable(
+            int worldId,
+            string utilityDefId,
+            HashSet<int> reserved,
+            HashSet<int> ends,
+            Dictionary<string, List<Tag>> selectedMaterialsByDef)
+        {
+            BuildingDef def = Assets.GetBuildingDef(utilityDefId);
+            List<Tag> selected = selectedMaterialsByDef.TryGetValue(utilityDefId, out List<Tag> chosen)
+                ? chosen
+                : new List<Tag>();
+            return cell => (ends.Contains(cell) || !reserved.Contains(cell)) &&
+                IsOpenCell(cell, worldId) &&
+                IsSafeBlueprintPlacement(cell, worldId, def, selected);
+        }
+
+        private static int CellDistance(int left, int right)
+        {
+            Vector2I a = Grid.CellToXY(left);
+            Vector2I b = Grid.CellToXY(right);
+            return Math.Abs(a.x - b.x) + Math.Abs(a.y - b.y);
+        }
+
+        /// <summary>
+        /// One wire from the first Manual Generator through every unpowered
+        /// consumer, nearest first; with a too-long trunk, the nearest consumer
+        /// alone.  A wired port (completed or blueprint) is never a stop.
+        /// </summary>
+        private static SupplyLink ComputePowerLink(
+            int worldId,
+            List<SupplyBuilding> buildings,
+            HashSet<int> reserved,
+            Dictionary<string, List<Tag>> selectedMaterialsByDef)
+        {
+            BuildingDef wire = Assets.GetBuildingDef("Wire");
+            if (wire == null)
+            {
+                return null;
+            }
+            Func<int, bool> free = cell =>
+                Grid.Objects[cell, (int)wire.ObjectLayer] == null &&
+                Grid.IsValidCellInWorld(cell, worldId);
+            SupplyBuilding generator = buildings.Find(entry =>
+                entry.PrefabId == "ManualGenerator" &&
+                entry.Building.Def.RequiresPowerOutput &&
+                free(entry.Building.GetPowerOutputCell()));
+            if (generator == null)
+            {
+                return null;
+            }
+            int start = generator.Building.GetPowerOutputCell();
+            List<SupplyBuilding> consumers = buildings.FindAll(entry =>
+                Array.IndexOf(PoweredSupplyConsumers, entry.PrefabId) >= 0 &&
+                entry.Building.Def.RequiresPowerInput &&
+                free(entry.Building.GetPowerInputCell()));
+            consumers.Sort((left, right) =>
+                CellDistance(start, left.Building.GetPowerInputCell())
+                    .CompareTo(CellDistance(start, right.Building.GetPowerInputCell())));
+            int[] attempts = consumers.Count > 1 ? new[] { consumers.Count, 1 } : new[] { consumers.Count };
+            foreach (int count in attempts)
+            {
+                if (count < 1)
+                {
+                    continue;
+                }
+                List<SupplyBuilding> chosen = consumers.GetRange(0, count);
+                List<int> stops = new List<int> { start };
+                chosen.ForEach(entry => stops.Add(entry.Building.GetPowerInputCell()));
+                List<int> cells = UtilityPathPlanner.FindTrunk(
+                    stops,
+                    Grid.WidthInCells,
+                    Grid.HeightInCells,
+                    UtilityPassable(worldId, "Wire", reserved, new HashSet<int>(stops), selectedMaterialsByDef),
+                    MaxUtilityPathCells,
+                    SupplyLinkMaxVisited);
+                if (cells == null)
+                {
+                    continue;
+                }
+                SupplyLink link = new SupplyLink
+                {
+                    PathId = "power" + generator.InstanceId.ToString(CultureInfo.InvariantCulture),
+                    Kind = "power",
+                    BuildingDefId = "Wire",
+                    SourceInstanceId = generator.InstanceId,
+                    SourcePrefabId = generator.PrefabId,
+                    Cells = cells
+                };
+                foreach (SupplyBuilding entry in chosen)
+                {
+                    link.PathId += "n" + entry.InstanceId.ToString(CultureInfo.InvariantCulture);
+                    link.ConsumerInstanceIds.Add(entry.InstanceId);
+                    link.ConsumerPrefabIds.Add(entry.PrefabId);
+                }
+                return link.PathId.Length <= MaxUtilityPathIdLength ? link : null;
+            }
+            return null;
+        }
+
+        /// <summary>One liquid pipe per unfed Electrolyzer, from the nearest free pump outlet.</summary>
+        private static List<SupplyLink> ComputeLiquidLinks(
+            int worldId,
+            List<SupplyBuilding> buildings,
+            HashSet<int> reserved,
+            Dictionary<string, List<Tag>> selectedMaterialsByDef)
+        {
+            List<SupplyLink> links = new List<SupplyLink>();
+            BuildingDef pipe = Assets.GetBuildingDef("LiquidConduit");
+            if (pipe == null)
+            {
+                return links;
+            }
+            Func<int, bool> free = cell =>
+                Grid.Objects[cell, (int)pipe.ObjectLayer] == null &&
+                Grid.IsValidCellInWorld(cell, worldId);
+            Dictionary<int, SupplyBuilding> outlets = new Dictionary<int, SupplyBuilding>();
+            foreach (SupplyBuilding entry in buildings)
+            {
+                if (entry.PrefabId == "LiquidPump" &&
+                    entry.Building.Def.OutputConduitType == ConduitType.Liquid &&
+                    free(entry.Building.GetUtilityOutputCell()))
+                {
+                    outlets[entry.Building.GetUtilityOutputCell()] = entry;
+                }
+            }
+            foreach (SupplyBuilding consumer in buildings)
+            {
+                if (outlets.Count == 0)
+                {
+                    break;
+                }
+                if (consumer.PrefabId != "Electrolyzer" ||
+                    consumer.Building.Def.InputConduitType != ConduitType.Liquid ||
+                    !free(consumer.Building.GetUtilityInputCell()))
+                {
+                    continue;
+                }
+                int inlet = consumer.Building.GetUtilityInputCell();
+                HashSet<int> ends = new HashSet<int>(outlets.Keys) { inlet };
+                List<int> cells = UtilityPathPlanner.FindPath(
+                    inlet,
+                    outlets.Keys,
+                    Grid.WidthInCells,
+                    Grid.HeightInCells,
+                    UtilityPassable(worldId, "LiquidConduit", reserved, ends, selectedMaterialsByDef),
+                    MaxUtilityPathCells,
+                    SupplyLinkMaxVisited);
+                if (cells == null)
+                {
+                    continue;
+                }
+                // Laid from the pump to the consumer, the direction water flows.
+                cells.Reverse();
+                SupplyBuilding source = outlets[cells[0]];
+                outlets.Remove(cells[0]);
+                SupplyLink link = new SupplyLink
+                {
+                    PathId = "liquid" + source.InstanceId.ToString(CultureInfo.InvariantCulture) +
+                        "n" + consumer.InstanceId.ToString(CultureInfo.InvariantCulture),
+                    Kind = "liquid",
+                    BuildingDefId = "LiquidConduit",
+                    SourceInstanceId = source.InstanceId,
+                    SourcePrefabId = source.PrefabId,
+                    Cells = cells
+                };
+                link.ConsumerInstanceIds.Add(consumer.InstanceId);
+                link.ConsumerPrefabIds.Add(consumer.PrefabId);
+                links.Add(link);
+            }
+            return links;
         }
 
         private static bool BlueprintCandidateListsFull(Dictionary<string, List<Tag>> selectedByDef)
@@ -1970,7 +2320,7 @@ namespace OniAiProbeMod.Probe
             if (def == null ||
                 Array.IndexOf(BlueprintAllowlist, def.PrefabID) < 0 ||
                 !Grid.IsValidCellInWorld(cell, worldId) ||
-                !IsEmptyBlueprintCell(cell, worldId) ||
+                !IsFreeBlueprintFootprintCell(cell, worldId, def) ||
                 Game.Instance == null ||
                 Game.Instance.SandboxModeActive ||
                 DebugHandler.InstantBuildMode)
@@ -1994,11 +2344,18 @@ namespace OniAiProbeMod.Probe
                 {
                     int footprintCell = Grid.OffsetCell(cell, offset);
                     if (!Grid.IsValidCellInWorld(footprintCell, worldId) ||
-                        !IsEmptyBlueprintCell(footprintCell, worldId))
+                        !IsFreeBlueprintFootprintCell(footprintCell, worldId, def))
                     {
                         return false;
                     }
                 }
+            }
+            // A pump draws from the liquid around its intake, so its root cell
+            // must already be liquid; otherwise it is built dry and never runs.
+            if (Array.IndexOf(SubmergedBlueprintAllowlist, def.PrefabID) >= 0 &&
+                Grid.Element[cell]?.IsLiquid != true)
+            {
+                return false;
             }
             try
             {
@@ -2143,6 +2500,53 @@ namespace OniAiProbeMod.Probe
                 return false;
             }
             return CountCellObjects(cell) == 0;
+        }
+
+        /// <summary>
+        /// Whether one footprint cell is free for <paramref name="def"/>.
+        ///
+        /// Ordinary buildings keep the strict rule: no object on any layer, no
+        /// liquid.  A utility shares cells with buildings by design (a wire or
+        /// pipe connects a port only by occupying the port cell), so it needs
+        /// only its own layers free and no unfinished blueprint of anything in
+        /// the cell; liquid is fine.  A submerged building may stand in liquid.
+        /// </summary>
+        private static bool IsFreeBlueprintFootprintCell(int cell, int worldId, BuildingDef def)
+        {
+            if (def == null)
+            {
+                return false;
+            }
+            if (def.isUtility)
+            {
+                return IsFreeUtilityCell(cell, worldId, def);
+            }
+            if (Array.IndexOf(SubmergedBlueprintAllowlist, def.PrefabID) >= 0)
+            {
+                return IsOpenCell(cell, worldId) && CountCellObjects(cell) == 0;
+            }
+            return IsEmptyBlueprintCell(cell, worldId);
+        }
+
+        private static bool IsOpenCell(int cell, int worldId)
+        {
+            return Grid.IsValidCellInWorld(cell, worldId) &&
+                Grid.IsVisible(cell) &&
+                !Grid.Solid[cell] &&
+                !Grid.Foundation[cell] &&
+                Diggable.GetDiggable(cell) == null;
+        }
+
+        private static bool IsFreeUtilityCell(int cell, int worldId, BuildingDef def)
+        {
+            if (!IsOpenCell(cell, worldId) ||
+                Grid.Objects[cell, (int)def.ObjectLayer] != null ||
+                (def.TileLayer != ObjectLayer.NumLayers && Grid.Objects[cell, (int)def.TileLayer] != null))
+            {
+                return false;
+            }
+            FindAnyBlueprint(cell, out GameObject blueprint, out _, out _);
+            return blueprint == null;
         }
 
         private static int CountCellObjects(int cell)
@@ -2511,6 +2915,7 @@ namespace OniAiProbeMod.Probe
                 { "electrolyzer", 0 },
                 { "microbe_musher", 0 },
                 { "farm_tile", 0 },
+                { "liquid_pump", 0 },
                 { "_scanned", 0 },
                 { "_active_world_id", activeWorldId },
                 { "_source", "unavailable" },
@@ -2598,6 +3003,7 @@ namespace OniAiProbeMod.Probe
             IncrementIfExactMatch(counts, id, "electrolyzer", "Electrolyzer");
             IncrementIfExactMatch(counts, id, "microbe_musher", "MicrobeMusher");
             IncrementIfExactMatch(counts, id, "farm_tile", "FarmTile");
+            IncrementIfExactMatch(counts, id, "liquid_pump", "LiquidPump");
         }
 
         private static void CacheBuildings(
@@ -3385,6 +3791,7 @@ namespace OniAiProbeMod.Probe
                 { "buildings.electrolyzer", BuildingCountQuality(buildingStatus, buildingSource, buildingCountObserved, buildingCompleteness) },
                 { "buildings.microbe_musher", BuildingCountQuality(buildingStatus, buildingSource, buildingCountObserved, buildingCompleteness) },
                 { "buildings.farm_tile", BuildingCountQuality(buildingStatus, buildingSource, buildingCountObserved, buildingCompleteness) },
+                { "buildings.liquid_pump", BuildingCountQuality(buildingStatus, buildingSource, buildingCountObserved, buildingCompleteness) },
                 { "buildings._source", Quality(buildingSource == "unavailable" ? "unsupported" : "observed", buildingSource) },
                 { "buildings._scanned", Quality(buildingSource == "unavailable" ? "unsupported" : "observed", buildingSource) },
                 { "functional_buildings", functionalBuildingQuality },
@@ -3423,6 +3830,7 @@ namespace OniAiProbeMod.Probe
                 { "blueprints.catalog", Quality(blueprintStatus, blueprintSource) },
                 { "blueprints.by_instance_id", Quality(blueprintStatus, blueprintSource) },
                 { "blueprints.utility_paths", Quality(blueprintStatus, blueprintSource) },
+                { "blueprints.supply_links", Quality(blueprintStatus, blueprintSource) },
                 { "cells.by_id", Quality(blueprintStatus, blueprintSource) }
             };
             AddDuplicantPriorityQuality(quality, duplicants, duplicantDetailsStatus, duplicantDetailsSource);
@@ -3552,6 +3960,31 @@ namespace OniAiProbeMod.Probe
                 "probe_tracked_utility_paths",
                 "complete_for_tracked_path",
                 CommandFieldContracts.UtilityPathId);
+            // Diagnostic only: a link is a suggestion the candidate builder
+            // turns into a placement whose contract binds every cell itself.
+            AddNestedObjectQuality(
+                quality,
+                blueprintState.Blueprints,
+                "supply_links",
+                "blueprints.supply_links.",
+                new[]
+                {
+                    "path_id",
+                    "kind",
+                    "building_def_id",
+                    "source_instance_id",
+                    "source_prefab_id",
+                    "consumer_instance_ids",
+                    "consumer_prefab_ids",
+                    "cells"
+                },
+                status,
+                source,
+                "utility_supply_link_field",
+                "field_native",
+                "probe_computed_supply_links",
+                "complete_for_computed_link",
+                null);
             AddNestedObjectQuality(
                 quality,
                 blueprintState.Cells,
@@ -3581,6 +4014,9 @@ namespace OniAiProbeMod.Probe
                     "can_place_electrolyzer",
                     "can_place_farm_tile",
                     "can_place_microbe_musher",
+                    "can_place_liquid_conduit",
+                    "can_place_liquid_pump",
+                    "can_place_manual_generator",
                     "blueprint_present",
                     "blueprint_instance_id",
                     "blueprint_prefab_id",
@@ -3901,7 +4337,8 @@ namespace OniAiProbeMod.Probe
                 {
                     { "catalog", new Dictionary<string, object>(StringComparer.Ordinal) },
                     { "by_instance_id", new Dictionary<string, object>(StringComparer.Ordinal) },
-                    { "utility_paths", new Dictionary<string, object>(StringComparer.Ordinal) }
+                    { "utility_paths", new Dictionary<string, object>(StringComparer.Ordinal) },
+                    { "supply_links", new Dictionary<string, object>(StringComparer.Ordinal) }
                 };
 
             internal Dictionary<string, object> Cells { get; } =

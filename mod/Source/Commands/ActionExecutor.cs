@@ -1655,9 +1655,13 @@ namespace OniAiProbeMod.Commands
                 }
                 case "place_utility_blueprint_path":
                 {
+                    if (!TryReadUtilityBlueprintDefId(args, out string utilityDefId, out string utilityError))
+                    {
+                        return "place_utility_blueprint_path: " + utilityError;
+                    }
                     if (!TryReadBlueprintPlacementArgs(
                             args,
-                            "Wire",
+                            utilityDefId,
                             MaxUtilityBlueprintCells,
                             requiresPathId: true,
                             out string pathId,
@@ -1692,7 +1696,9 @@ namespace OniAiProbeMod.Commands
                     }
                     List<int> cells = targets.Select(target => target.Cell).ToList();
                     List<int> instanceIds = targets.Select(target => target.BlueprintInstanceId).ToList();
-                    if (!ProbeStateReader.UtilityPathMatches(pathId, "Wire", cells, instanceIds))
+                    string utilityDefId = ProbeStateReader.UtilityPathDefId(pathId);
+                    if (!ProbeStateReader.IsUtilityBlueprintDef(utilityDefId) ||
+                        !ProbeStateReader.UtilityPathMatches(pathId, utilityDefId, cells, instanceIds))
                     {
                         return "Utility cancellation targets do not match the exact session path registry.";
                     }
@@ -1701,7 +1707,7 @@ namespace OniAiProbeMod.Commands
                         ProbeStateReader.TrackBlueprintCell(target.Cell);
                         if (!TryValidateBlueprintCancelTarget(
                                 target,
-                                "Wire",
+                                utilityDefId,
                                 expectedUtility: true,
                                 out _,
                                 out _,
@@ -1914,7 +1920,8 @@ namespace OniAiProbeMod.Commands
                 case "place_utility_blueprint_path":
                     return TryPlaceBlueprints(args, isUtilityPath: true, out createdBlueprints, out message);
                 case "cancel_utility_blueprint_path":
-                    return TryCancelBlueprints(args, "Wire", expectedUtility: true, out message);
+                    // The utility comes from the session path registry.
+                    return TryCancelBlueprints(args, null, expectedUtility: true, out message);
                 default:
                     message = "Unsupported action.";
                     return false;
@@ -2205,8 +2212,10 @@ namespace OniAiProbeMod.Commands
             out string message)
         {
             created = new List<GameObject>();
-            string expectedDefId = isUtilityPath ? "Wire" : null;
-            if (!isUtilityPath && !TryReadBuildingBlueprintDefId(args, out expectedDefId, out message))
+            string expectedDefId;
+            if (isUtilityPath
+                ? !TryReadUtilityBlueprintDefId(args, out expectedDefId, out message)
+                : !TryReadBuildingBlueprintDefId(args, out expectedDefId, out message))
             {
                 return false;
             }
@@ -2238,7 +2247,7 @@ namespace OniAiProbeMod.Commands
                 utilityManager = networkProvider?.GetNetworkManager();
                 if (utilityManager == null)
                 {
-                    message = "Wire utility network manager is unavailable.";
+                    message = expectedDefId + " utility network manager is unavailable.";
                     return false;
                 }
             }
@@ -2274,7 +2283,7 @@ namespace OniAiProbeMod.Commands
                 if (isUtilityPath && blueprint.GetComponent<KAnimGraphTileVisualizer>() == null)
                 {
                     int rolledBack = CancelCreatedBlueprints(created);
-                    message = "Wire blueprint lacks its utility visualizer; rolled back " +
+                    message = expectedDefId + " blueprint lacks its utility visualizer; rolled back " +
                         rolledBack.ToString(CultureInfo.InvariantCulture) + " item(s).";
                     return false;
                 }
@@ -2296,7 +2305,7 @@ namespace OniAiProbeMod.Commands
                     if (direction == 0)
                     {
                         int rolledBack = CancelCreatedBlueprints(created);
-                        message = "Wire path cells are not four-neighbor adjacent; rolled back " +
+                        message = expectedDefId + " path cells are not four-neighbor adjacent; rolled back " +
                             rolledBack.ToString(CultureInfo.InvariantCulture) + " item(s).";
                         return false;
                     }
@@ -2345,7 +2354,9 @@ namespace OniAiProbeMod.Commands
                 }
                 List<int> cells = targets.Select(target => target.Cell).ToList();
                 List<int> instanceIds = targets.Select(target => target.BlueprintInstanceId).ToList();
-                if (!ProbeStateReader.UtilityPathMatches(pathId, expectedDefId, cells, instanceIds))
+                expectedDefId = ProbeStateReader.UtilityPathDefId(pathId);
+                if (!ProbeStateReader.IsUtilityBlueprintDef(expectedDefId) ||
+                    !ProbeStateReader.UtilityPathMatches(pathId, expectedDefId, cells, instanceIds))
                 {
                     message = "Utility cancellation targets no longer match the exact session path registry.";
                     return false;
@@ -3473,8 +3484,10 @@ namespace OniAiProbeMod.Commands
 
         private static bool VerifyPlacedBlueprints(JObject args, bool isUtilityPath, out string error)
         {
-            string expectedDefId = isUtilityPath ? "Wire" : null;
-            if (!isUtilityPath && !TryReadBuildingBlueprintDefId(args, out expectedDefId, out error))
+            string expectedDefId;
+            if (isUtilityPath
+                ? !TryReadUtilityBlueprintDefId(args, out expectedDefId, out error)
+                : !TryReadBuildingBlueprintDefId(args, out expectedDefId, out error))
             {
                 return false;
             }
@@ -4125,9 +4138,25 @@ namespace OniAiProbeMod.Commands
             bool utility = action == "place_utility_blueprint_path" ||
                 action == "cancel_utility_blueprint_path";
             string defId;
-            if (utility)
+            if (utility && placement)
             {
-                defId = "Wire";
+                if (!TryReadUtilityBlueprintDefId(command["args"] as JObject, out defId, out string utilityError))
+                {
+                    return action + ": " + utilityError;
+                }
+            }
+            else if (utility)
+            {
+                // A cancellation names its utility only through the path it
+                // binds; the exact path contract below then checks every field.
+                if (!TryReadPathId(command["args"] as JObject, "path_id", out string cancelPathId) ||
+                    !TryGetObservedEquality(preconditions, UtilityPathPath(cancelPathId) + ".building_def_id", out JToken boundDefId) ||
+                    boundDefId.Type != JTokenType.String ||
+                    !ProbeStateReader.IsUtilityBlueprintDef(boundDefId.ToString()))
+                {
+                    return action + " must bind the allowlisted utility of its path.";
+                }
+                defId = boundDefId.ToString();
             }
             else if (placement)
             {
@@ -4267,7 +4296,20 @@ namespace OniAiProbeMod.Commands
                 fingerprint.Type != JTokenType.String ||
                 !fingerprint.ToString().StartsWith("sha256:", StringComparison.Ordinal) ||
                 !TryGetObservedEquality(preconditions, prefix + ".empty_fingerprint", out JToken emptyFingerprint) ||
-                !TokenEquals(fingerprint, emptyFingerprint))
+                emptyFingerprint.Type != JTokenType.String ||
+                !emptyFingerprint.ToString().StartsWith("sha256:", StringComparison.Ordinal) ||
+                !TryGetObservedEquality(preconditions, prefix + ".object_count", out JToken objectCount) ||
+                objectCount.Type != JTokenType.Integer ||
+                objectCount.Value<long>() < 0)
+            {
+                return "Blueprint placement must bind observed current and empty fingerprints and object count for every cell.";
+            }
+            // Only a utility may share its cell with what is already there: a
+            // wire or pipe connects a port by occupying the port's cell (roadmap
+            // B15).  An empty cell keeps the exact empty-cell contract.
+            long existing = objectCount.Value<long>();
+            if ((existing != 0 && !utility) ||
+                (existing == 0 && !TokenEquals(fingerprint, emptyFingerprint)))
             {
                 return "Blueprint placement must bind matching observed empty and current fingerprints for every cell.";
             }
@@ -4278,13 +4320,16 @@ namespace OniAiProbeMod.Commands
             {
                 return "Blueprint placement must prove physical cell state and empty fingerprint remain unchanged.";
             }
-            if (!ContainsObservedEquality(preconditions, prefix + ".object_count", new JValue(0)) ||
-                !ContainsObservedEquality(preconditions, prefix + ".empty_for_blueprint", new JValue(true)) ||
+            bool emptyBound = utility
+                ? TryGetObservedEquality(preconditions, prefix + ".empty_for_blueprint", out JToken emptyFlag) &&
+                    emptyFlag.Type == JTokenType.Boolean
+                : ContainsObservedEquality(preconditions, prefix + ".empty_for_blueprint", new JValue(true));
+            if (!emptyBound ||
                 !ContainsObservedEquality(preconditions, prefix + "." + canPlaceField, new JValue(true)) ||
                 !ContainsObservedEquality(preconditions, prefix + ".blueprint_present", new JValue(false)) ||
                 !ContainsObservedEquality(preconditions, prefix + ".blueprint_instance_id", new JValue(0)) ||
                 !ContainsObservedCondition(expectedEffects, prefix + ".fingerprint", "ne", fingerprint) ||
-                !ContainsObservedCondition(expectedEffects, prefix + ".object_count", "gt", new JValue(0)) ||
+                !ContainsObservedCondition(expectedEffects, prefix + ".object_count", "gt", new JValue(existing)) ||
                 !ContainsObservedEquality(expectedEffects, prefix + ".empty_for_blueprint", new JValue(false)) ||
                 !ContainsObservedEquality(expectedEffects, prefix + "." + canPlaceField, new JValue(false)) ||
                 !ContainsObservedEquality(expectedEffects, prefix + ".blueprint_present", new JValue(true)) ||
@@ -4342,10 +4387,29 @@ namespace OniAiProbeMod.Commands
             {
                 return "Blueprint cancellation is missing its exact instance precondition contract.";
             }
-            if (!ContainsObservedEquality(expectedEffects, prefix + ".fingerprint", emptyFingerprint) ||
+            // A utility may have been laid over a building's port cell; its
+            // cancellation then restores the cell minus exactly the blueprint,
+            // not an empty cell.  Everything else restores an empty cell.
+            long remaining = 0;
+            if (utility)
+            {
+                if (!TryGetObservedEquality(preconditions, prefix + ".object_count", out JToken objectCount) ||
+                    objectCount.Type != JTokenType.Integer ||
+                    objectCount.Value<long>() < 1)
+                {
+                    return "Utility cancellation must bind the observed object count of every cell.";
+                }
+                remaining = objectCount.Value<long>() - 1;
+            }
+            bool restoredFingerprint = remaining == 0
+                ? ContainsObservedEquality(expectedEffects, prefix + ".fingerprint", emptyFingerprint)
+                : ContainsObservedCondition(expectedEffects, prefix + ".fingerprint", "ne", fingerprint);
+            bool restoredEmptiness = utility ||
+                ContainsObservedEquality(expectedEffects, prefix + ".empty_for_blueprint", new JValue(true));
+            if (!restoredFingerprint ||
+                !restoredEmptiness ||
                 !ContainsObservedEquality(expectedEffects, prefix + ".empty_fingerprint", emptyFingerprint) ||
-                !ContainsObservedEquality(expectedEffects, prefix + ".object_count", new JValue(0)) ||
-                !ContainsObservedEquality(expectedEffects, prefix + ".empty_for_blueprint", new JValue(true)) ||
+                !ContainsObservedEquality(expectedEffects, prefix + ".object_count", new JValue(remaining)) ||
                 !ContainsObservedEquality(expectedEffects, prefix + "." + canPlaceField, new JValue(true)) ||
                 !ContainsObservedEquality(expectedEffects, prefix + ".blueprint_present", new JValue(false)) ||
                 !ContainsObservedEquality(expectedEffects, prefix + ".blueprint_instance_id", new JValue(0)) ||
@@ -4661,12 +4725,33 @@ namespace OniAiProbeMod.Commands
             // Food production, which the catalog lacked entirely while the
             // colony's stored food reached zero (2026-10-26 round 42).
             "FarmTile",
-            "MicrobeMusher"
+            "MicrobeMusher",
+            // Roadmap B15: the Electrolyzer's power and water supply.
+            "LiquidPump",
+            "ManualGenerator"
         };
 
         private static bool IsAllowlistedBuildingBlueprint(string defId)
         {
             return !string.IsNullOrEmpty(defId) && Array.IndexOf(BuildingBlueprintAllowlist, defId) >= 0;
+        }
+
+        // Utility paths name their utility (Wire or LiquidConduit) in
+        // args.building_def_id; ProbeStateReader.UtilityBlueprintAllowlist is
+        // the single list both sides share.
+        private static bool TryReadUtilityBlueprintDefId(JObject args, out string defId, out string error)
+        {
+            defId = args?["building_def_id"]?.Type == JTokenType.String
+                ? args["building_def_id"].ToString()
+                : null;
+            if (!ProbeStateReader.IsUtilityBlueprintDef(defId))
+            {
+                defId = null;
+                error = "building_def_id must name an allowlisted utility blueprint.";
+                return false;
+            }
+            error = null;
+            return true;
         }
 
         private static bool TryReadBuildingBlueprintDefId(JObject args, out string defId, out string error)

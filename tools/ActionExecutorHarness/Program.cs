@@ -49,7 +49,8 @@ namespace ActionExecutorHarness
                     result["receipt_error"] = Invoke(receipt, new object[] { command, policy }, result, "receipt_exception");
                     // This is a separate, pure contract check, never a substitute
                     // for the full shape/native BuildingDef validation above.
-                    if (action == "place_building_blueprint")
+                    bool utility = action == "place_utility_blueprint_path" || action == "cancel_utility_blueprint_path";
+                    if (action == "place_building_blueprint" || action == "place_utility_blueprint_path")
                     {
                         MethodInfo cellContract = typeof(ActionExecutor).GetMethod("ValidateBlueprintPlaceCellContract", Static);
                         if (cellContract == null) throw new MissingMethodException("Blueprint place cell contract not found");
@@ -59,7 +60,7 @@ namespace ActionExecutorHarness
                         {
                             var cellResult = new JObject { ["cell"] = cell };
                             cellResult["error"] = Invoke(cellContract, new object[] {
-                                (int)cell, defId, false, ProbeStateReader.BlueprintCanPlaceField(defId),
+                                (int)cell, defId, utility, ProbeStateReader.BlueprintCanPlaceField(defId),
                                 (JArray)command["args"]["material_tags"],
                                 (JArray)command["preconditions"], (JArray)command["expected_effects"]
                             }, cellResult, "exception");
@@ -67,7 +68,7 @@ namespace ActionExecutorHarness
                         }
                         result["cell_contracts"] = cellResults;
                     }
-                    else if (action == "cancel_building_blueprint")
+                    else if (action == "cancel_building_blueprint" || action == "cancel_utility_blueprint_path")
                     {
                         MethodInfo cellContract = typeof(ActionExecutor).GetMethod("ValidateBlueprintCancelCellContract", Static);
                         Type targetType = typeof(ActionExecutor).GetNestedType("BlueprintCancelTarget", BindingFlags.NonPublic);
@@ -85,7 +86,7 @@ namespace ActionExecutorHarness
                                 .SetValue(typedTarget, (int)target["blueprint_instance_id"]);
                             var cellResult = new JObject { ["cell"] = cell };
                             cellResult["error"] = Invoke(cellContract, new object[] {
-                                typedTarget, defId, false, ProbeStateReader.BlueprintCanPlaceField(defId),
+                                typedTarget, defId, utility, ProbeStateReader.BlueprintCanPlaceField(defId),
                                 (JArray)command["preconditions"], (JArray)command["expected_effects"]
                             }, cellResult, "exception");
                             cellResults.Add(cellResult);

@@ -20,9 +20,11 @@ from agent.advanced_actions import (
     BUILDING_BLUEPRINT_ALLOWLIST,
     UTILITY_BLUEPRINT_ALLOWLIST,
     build_cancel_building_blueprint_hint,
+    build_cancel_utility_blueprint_path_hint,
     build_duplicant_priority_hint,
     build_mark_dig_hint,
     build_place_building_blueprint_hint,
+    build_place_utility_blueprint_path_hint,
     build_set_research_hint,
 )
 from agent.canonical_hash import canonical_hash
@@ -76,9 +78,11 @@ MAX_DIG_RUN_CELLS = 4
 # when that set is unobserved (older Probe) every entry is offered, a finished
 # tech is refused by the executor ("already researched") and that refusal
 # reaches the model as outcome feedback.
-RESEARCH_LADDER = ("ImprovedOxygen", "FarmingTech", "PowerRegulation", "BasicRefinement")
+RESEARCH_LADDER = ("ImprovedOxygen", "LiquidPiping", "FarmingTech", "PowerRegulation", "BasicRefinement")
 RESEARCH_SUMMARIES = {
     "ImprovedOxygen": "Air Systems: unlocks the Electrolyzer, which makes oxygen from water",
+    # Roadmap B15: the Electrolyzer takes water only through a pipe.
+    "LiquidPiping": "Plumbing: unlocks the Liquid Pipe and Liquid Pump that feed an Electrolyzer water",
     "FarmingTech": "Basic Farming: unlocks the Algae Terrarium, Planter Box and Compost",
     "PowerRegulation": "Power Regulation: unlocks batteries and power transformers",
     "BasicRefinement": "Basic Refinement: unlocks the Rock Crusher and Kiln",
@@ -94,8 +98,21 @@ BUILDING_CANDIDATES = (
     ("Electrolyzer", "electrolyzer", "Electrolyzer (water to oxygen and hydrogen)"),
     ("FarmTile", "farm_tile", "Farm Tile (FarmTile, a duplicant plants a seed to grow food)"),
     ("MicrobeMusher", "microbe_musher", "Microbe Musher (MicrobeMusher, dirt and water to mush bars)"),
+    # Roadmap B15: offered only once an Electrolyzer exists and while none of
+    # their own kind does (see SUPPLY_BUILDINGS).
+    ("ManualGenerator", "manual_generator", "Manual Generator (ManualGenerator, a duplicant runs it to make power)"),
+    ("LiquidPump", "liquid_pump", "Liquid Pump (LiquidPump, pumps the liquid it stands in into a pipe)"),
     ("Ladder", "ladder", "Ladder"),
 )
+# Supply buildings exist for an Electrolyzer: one of each is enough for the
+# first one (a Manual Generator makes 400 W; Electrolyzer 120 W plus Liquid
+# Pump 240 W fit), and a second would only be one more idle building.
+SUPPLY_BUILDINGS = ("ManualGenerator", "LiquidPump")
+SUPPLY_LINK_LABELS = {
+    "power": ("Wire", "power"),
+    "liquid": ("Liquid Pipe", "water"),
+}
+MAX_SUPPLY_LINK_CANDIDATES = 2
 # The oxygen buildings carry the observed oxygen balance in their summary
 # (see oxygen_balance): the first live colonies breathed about four times what
 # they made and the model still waited, because the raw report counters in
@@ -218,19 +235,25 @@ BUILDING_COUNT_PATHS = {
     "Electrolyzer": "buildings.electrolyzer",
     "FarmTile": "buildings.farm_tile",
     "MicrobeMusher": "buildings.microbe_musher",
+    "ManualGenerator": "buildings.manual_generator",
+    "LiquidPump": "buildings.liquid_pump",
 }
 # The Electrolyzer takes water only through a liquid pipe input and needs
 # power (ElectrolyzerConfig: InputConduitType + ConduitConsumer,
-# RequiresPowerInput); duplicants never carry water to it.  Until the action
-# catalog can lay a liquid pipe, every Electrolyzer the controller places is
-# dead: Phase 2 built six and none ever ran (docs/b2-blueprint-lifecycle-20261027.md).
-ELECTROLYZER_SUPPLY_UTILITIES = ("LiquidConduit",)
+# RequiresPowerInput); duplicants never carry water to it.  Without a pipe,
+# a pump and a power source every Electrolyzer the controller places is dead:
+# Phase 2 built six and none ever ran (docs/b2-blueprint-lifecycle-20261027.md).
+# Roadmap B15 added all three; the links come from blueprints.supply_links.
+ELECTROLYZER_SUPPLY_UTILITIES = ("Wire", "LiquidConduit")
+ELECTROLYZER_SUPPLY_BUILDINGS = ("ManualGenerator", "LiquidPump")
 
 
 def electrolyzer_supply_offered() -> bool:
-    """True when the action catalog can lay the pipe an Electrolyzer needs."""
+    """True when the action catalog can supply an Electrolyzer with power and water."""
 
-    return all(utility in UTILITY_BLUEPRINT_ALLOWLIST for utility in ELECTROLYZER_SUPPLY_UTILITIES)
+    return all(utility in UTILITY_BLUEPRINT_ALLOWLIST for utility in ELECTROLYZER_SUPPLY_UTILITIES) and all(
+        building in BUILDING_BLUEPRINT_ALLOWLIST for building in ELECTROLYZER_SUPPLY_BUILDINGS
+    )
 
 
 MAX_IDLE_STATUS_ITEMS = 8
@@ -400,7 +423,9 @@ def _stuck_blueprint_count(
         if not _old_enough(key, blueprint_ages):
             continue
         prefab_id = entry.get("prefab_id")
-        if not isinstance(prefab_id, str) or prefab_id not in BUILDING_BLUEPRINT_ALLOWLIST:
+        if not isinstance(prefab_id, str) or (
+            prefab_id not in BUILDING_BLUEPRINT_ALLOWLIST and prefab_id not in UTILITY_BLUEPRINT_ALLOWLIST
+        ):
             continue
         progress = entry.get("progress_percent")
         if not isinstance(progress, (int, float)) or isinstance(progress, bool) or progress > 0:
@@ -799,6 +824,127 @@ def _building_candidate(
     return None
 
 
+def _supply_building_wanted(
+    status: Mapping[str, Mapping[str, Any]], building_def_id: str, electrolyzers: Any
+) -> bool:
+    """A supply building is offered for a built Electrolyzer, and only the first one."""
+
+    built = status.get(building_def_id, {}).get("built")
+    return (
+        isinstance(electrolyzers, int)
+        and not isinstance(electrolyzers, bool)
+        and electrolyzers > 0
+        and built == 0
+    )
+
+
+def _supply_link_candidates(state: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """Wire and Liquid Pipe paths the Probe computed between built ports.
+
+    A wire or pipe connects a port only by occupying the port's cell, so the
+    Probe finds the path from the completed buildings' own port cells
+    (``blueprints.supply_links``); the placement contract then binds every one
+    of those cells as the executor will check it.
+    """
+
+    if field_status(state, "blueprints.supply_links") != "observed":
+        return []
+    links = safe_get(state, "blueprints.supply_links")
+    if not isinstance(links, Mapping):
+        return []
+    result: List[Dict[str, Any]] = []
+    for key in sorted(links):
+        link = links[key]
+        if not isinstance(link, Mapping):
+            continue
+        kind = link.get("kind")
+        utility = link.get("building_def_id")
+        path_id = link.get("path_id")
+        cells = link.get("cells")
+        if (
+            kind not in SUPPLY_LINK_LABELS
+            or utility not in UTILITY_BLUEPRINT_ALLOWLIST
+            or not isinstance(path_id, str)
+            or key != f"id_{path_id}"
+            or not isinstance(cells, list)
+            or not cells
+        ):
+            continue
+        materials = safe_get(state, f"blueprints.catalog.{utility}.material_tags")
+        if not isinstance(materials, list) or not materials:
+            continue
+        try:
+            hint = build_place_utility_blueprint_path_hint(
+                dict(state), path_id=path_id, cells=cells, material_tags=materials, building_def_id=utility
+            )
+        except (ValueError, TypeError):
+            continue
+        label, purpose = SUPPLY_LINK_LABELS[kind]
+        consumers = link.get("consumer_prefab_ids")
+        names = ", ".join(display_text(name, 40) for name in consumers if isinstance(name, str)) if isinstance(
+            consumers, list
+        ) else ""
+        source = display_text(link.get("source_prefab_id"), 40)
+        result.append(
+            _candidate(
+                f"{kind}_link_{path_id}",
+                f"Lay a {label} over {len(cells)} cells from the {source} to the {names or 'consumer'} "
+                f"so it gets {purpose}",
+                hint,
+                risk="medium",
+            )
+        )
+        if len(result) >= MAX_SUPPLY_LINK_CANDIDATES:
+            break
+    return result
+
+
+def _cancel_utility_path_candidate(
+    snapshot: Mapping[str, Any], blueprint_ages: Optional[Mapping[str, float]] = None
+) -> Optional[Dict[str, Any]]:
+    """Offer cancelling one whole utility path no duplicant has started.
+
+    An unbuilt supply link blocks new placements like any other placement, and
+    a path is cancelled only as the exact path it was placed as.
+    """
+
+    paths = safe_get(snapshot, "blueprints.utility_paths")
+    instances = safe_get(snapshot, "blueprints.by_instance_id")
+    if not isinstance(paths, Mapping) or not isinstance(instances, Mapping):
+        return None
+    for key in sorted(paths):
+        path = paths[key]
+        if not isinstance(path, Mapping) or path.get("active") is not True or path.get("fully_active") is not True:
+            continue
+        ids = path.get("blueprint_instance_ids")
+        if not isinstance(ids, list) or not ids:
+            continue
+        started = False
+        for instance_id in ids:
+            entry = instances.get(f"id_{instance_id}")
+            if (
+                not isinstance(entry, Mapping)
+                or entry.get("in_progress") is not False
+                or not _old_enough(f"id_{instance_id}", blueprint_ages)
+            ):
+                started = True
+                break
+        if started:
+            continue
+        path_id = path.get("path_id")
+        try:
+            hint = build_cancel_utility_blueprint_path_hint(dict(snapshot), path_id=path_id)
+        except (ValueError, TypeError):
+            continue
+        utility = display_text(path.get("building_def_id"), 40)
+        return _candidate(
+            f"cancel_blueprint_path_{path_id}",
+            f"Cancel the unbuilt {utility} path {display_text(path_id, 64)} ({len(ids)} cells) no duplicant has started",
+            hint,
+        )
+    return None
+
+
 def _cancel_blueprint_candidate(
     snapshot: Mapping[str, Any], blueprint_ages: Optional[Mapping[str, float]] = None
 ) -> Optional[Dict[str, Any]]:
@@ -1012,6 +1158,10 @@ def generate_candidates(
         # Advanced actions require a paused game; resume is offered last so a
         # model that wants duplicants to act can still return to play.
         items.extend(_research_candidates(snapshot))
+        # Supply links are inserted here once known (see below): the priority
+        # candidates alone can fill the budget, and a link is what makes an
+        # already-built building work.
+        link_slot = len(items)
         items.extend(
             _autonomous_priority_candidates(snapshot) if autonomous else _priority_candidates(snapshot)
         )
@@ -1047,9 +1197,12 @@ def generate_candidates(
             # placement's cancel was crowded out of the candidate budget and the
             # model lost the only way to clear it (2026-10-26 round 44).
             if stuck:
-                cancel = _cancel_blueprint_candidate(snapshot, blueprint_ages)
-                if cancel is not None:
-                    items.append(cancel)
+                for cancel in (
+                    _cancel_blueprint_candidate(snapshot, blueprint_ages),
+                    _cancel_utility_path_candidate(snapshot, blueprint_ages),
+                ):
+                    if cancel is not None:
+                        items.append(cancel)
             # A building that exists but of which none works is not offered again:
             # Phase 2 built six identical Electrolyzers that could never run, because
             # the controller could not see the first one (B14).  The Electrolyzer is
@@ -1060,12 +1213,25 @@ def generate_candidates(
             supply = electrolyzer_supply_offered()
             if not supply:
                 notes.append("electrolyzer_needs_power_and_liquid_pipe")
+            # Roadmap B15: wire and pipe links between built ports, computed by
+            # the Probe.  An idle Electrolyzer with no link to offer is noted,
+            # so the model knows a supply building (or a route) is missing.
+            links = _supply_link_candidates(snapshot)
+            items[link_slot:link_slot] = links
+            status = building_status(snapshot)
+            electrolyzers = status.get("Electrolyzer", {}).get("built")
+            if "Electrolyzer" in idle and not links:
+                notes.append("electrolyzer_idle_no_supply_link")
             for building_def_id, prefix, label in BUILDING_CANDIDATES:
                 if starved is not None and _building_needs_consumable(building_def_id, starved):
                     continue
                 if building_def_id in idle:
                     continue
                 if building_def_id == "Electrolyzer" and not supply:
+                    continue
+                if building_def_id in SUPPLY_BUILDINGS and not _supply_building_wanted(
+                    status, building_def_id, electrolyzers
+                ):
                     continue
                 note = oxygen_note if building_def_id in OXYGEN_BUILDING_DEF_IDS else ""
                 building = _building_candidate(snapshot, building_def_id, prefix, label, note)
@@ -1074,9 +1240,12 @@ def generate_candidates(
         else:
             # Unbuilt placements are queued, so no new placement is offered; the
             # cancel is what lets the model clear one that will never be built.
-            cancel = _cancel_blueprint_candidate(snapshot, blueprint_ages)
-            if cancel is not None:
-                items.append(cancel)
+            for cancel in (
+                _cancel_blueprint_candidate(snapshot, blueprint_ages),
+                _cancel_utility_path_candidate(snapshot, blueprint_ages),
+            ):
+                if cancel is not None:
+                    items.append(cancel)
         resume = _resume_candidate(snapshot)
         if resume is not None:
             items.append(resume)

@@ -78,10 +78,10 @@ class OxygenOutlookTests(unittest.TestCase):
         outlook = oxygen_outlook(state())
         self.assertEqual(outlook["consumable_available_kg"], 0)
         self.assertIs(outlook["oxygen_buildings_can_operate"], False)
-        # Water in the world is not enough: an Electrolyzer needs a liquid pipe
-        # the action catalog cannot lay yet, so it cannot operate (B14).
-        self.assertIs(outlook["electrolyzer_supply_offered"], False)
-        self.assertIs(outlook["electrolyzer_can_operate"], False)
+        # An Electrolyzer needs power and a liquid pipe; since B15 the action
+        # catalog can supply both, so the world's water makes it workable.
+        self.assertIs(outlook["electrolyzer_supply_offered"], True)
+        self.assertIs(outlook["electrolyzer_can_operate"], True)
 
     def test_a_missing_value_reports_null(self):
         # The framework treats a present value as observed even without a quality
@@ -107,9 +107,11 @@ class OxygenOutlookTests(unittest.TestCase):
         self.assertEqual(len(rules), 1)
         self.assertIn("none of the consumable", rules[0])
         # The rule once said "an electrolyser would work" because the world held
-        # water, and the model built six that never ran (B14).
+        # water, and the model built six that never ran (B14).  It now names the
+        # whole supply chain the catalog can build (B15).
         self.assertNotIn("electrolyser would work", rules[0])
-        self.assertIn("liquid pipe", rules[0])
+        self.assertIn("liquid pipe from a Liquid Pump", rules[0])
+        self.assertIn("Manual Generator", rules[0])
         self.assertEqual(payload["candidate_notes"], ["oxygen_consumable_unavailable:Algae"])
         self.assertIs(payload["resource_outlook"]["oxygen_buildings_can_operate"], False)
 

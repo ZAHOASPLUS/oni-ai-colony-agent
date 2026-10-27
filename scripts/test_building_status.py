@@ -136,14 +136,17 @@ class PlacementCandidateTests(unittest.TestCase):
             result = C.generate_candidates(state, allowed_actions=("place_building_blueprint",), autonomous=True)
         return offered, result["notes"]
 
-    def test_idle_buildings_and_the_unsuppliable_electrolyzer_are_withheld(self):
+    def test_idle_buildings_are_withheld_and_an_unlinked_electrolyzer_is_noted(self):
         offered, notes = self.offered(phase2_state())
         self.assertNotIn("Electrolyzer", offered)
         self.assertNotIn("MineralDeoxidizer", offered)
         self.assertIn("MicrobeMusher", offered)
         self.assertIn("built_not_operational:Electrolyzer:6", notes)
         self.assertIn("built_not_operational:MineralDeoxidizer:2", notes)
-        self.assertIn("electrolyzer_needs_power_and_liquid_pipe", notes)
+        # Since B15 the catalog can supply an Electrolyzer, so the reason given
+        # is the missing link rather than a missing action.
+        self.assertNotIn("electrolyzer_needs_power_and_liquid_pipe", notes)
+        self.assertIn("electrolyzer_idle_no_supply_link", notes)
 
     def test_a_working_diffuser_keeps_its_candidate(self):
         offered, notes = self.offered(phase2_state(diffuser_working=True))

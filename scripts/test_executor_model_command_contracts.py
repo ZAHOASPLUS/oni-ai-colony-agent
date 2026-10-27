@@ -218,6 +218,63 @@ class ExecutorModelCommandContractTests(unittest.TestCase):
             # These are unsigned hints, not executed or approved cancellations.
             self.assertTrue(result["receipt_error"], name)
 
+    def test_utility_overlay_contracts_match_the_executor(self):
+        """Roadmap B15: a pipe over a port cell binds what is already there."""
+        from agent.advanced_actions import (
+            build_cancel_utility_blueprint_path_hint,
+            build_place_utility_blueprint_path_hint,
+        )
+        from scripts import test_supply_links as links
+
+        place = build_place_utility_blueprint_path_hint(
+            links.link_state(), path_id=links.PATH_ID, cells=links.LINK_CELLS,
+            material_tags=["Granite"], building_def_id="LiquidConduit",
+        )
+        cancel = build_cancel_utility_blueprint_path_hint(links.placed_link_state(), path_id=links.PATH_ID)
+        outlet = f"cells.by_id.cell_{links.PUMP_OUTLET}."
+        cases = [
+            {"name": "place_overlay", "command": place, "policy": {}},
+            {"name": "cancel_overlay", "command": cancel, "policy": {}},
+        ]
+        # An occupied cell must not pass as empty, and a cancellation must not
+        # promise an empty cell where the pump still stands.
+        for label, section, field, replacement, hint in (
+            ("place_count_understated", "expected_effects", "object_count", 0, place),
+            ("place_empty_print_claimed", "preconditions", "fingerprint", None, place),
+            ("cancel_emptied_port", "expected_effects", "object_count", 0, cancel),
+        ):
+            changed = copy.deepcopy(hint)
+            condition = next(item for item in changed[section] if item["path"] == outlet + field)
+            if replacement is None:
+                condition["value"] = next(
+                    item["value"] for item in changed["preconditions"] if item["path"] == outlet + "empty_fingerprint"
+                )
+            else:
+                condition["value"] = replacement
+            cases.append({"name": label, "command": changed, "policy": {}})
+        building = copy.deepcopy(place)
+        building["action"] = "place_building_blueprint"
+        building["args"] = {key: value for key, value in place["args"].items() if key != "path_id"}
+        building["args"]["building_def_id"] = "Ladder"
+        cases.append({"name": "building_over_occupied_cell", "command": building, "policy": {}})
+
+        results = self.run_harness(cases)
+        for name in ("place_overlay", "cancel_overlay"):
+            self.assertEqual(len(results[name]["cell_contracts"]), len(links.LINK_CELLS), name)
+            for cell in results[name]["cell_contracts"]:
+                self.assertIsNone(cell["error"], (name, cell))
+                self.assertNotIn("exception", cell, name)
+        for name in ("place_count_understated", "place_empty_print_claimed", "cancel_emptied_port"):
+            outlet_result = next(
+                cell for cell in results[name]["cell_contracts"] if cell["cell"] == links.PUMP_OUTLET
+            )
+            self.assertTrue(outlet_result["error"], name)
+        building_outlet = next(
+            cell for cell in results["building_over_occupied_cell"]["cell_contracts"]
+            if cell["cell"] == links.PUMP_OUTLET
+        )
+        self.assertTrue(building_outlet["error"])
+
     def test_building_cancel_requires_one_prefab_across_targets(self):
         cases = []
         pairs = (("MineralDeoxidizer", "MineralDeoxidizer"),

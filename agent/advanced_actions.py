@@ -33,8 +33,14 @@ BUILDING_BLUEPRINT_ALLOWLIST = {
     "Electrolyzer",
     "FarmTile",
     "MicrobeMusher",
+    # Roadmap B15: the Electrolyzer needs power and water through a liquid
+    # pipe.  The pump must stand in liquid (the Probe's candidate cells say so).
+    "LiquidPump",
+    "ManualGenerator",
 }
-UTILITY_BLUEPRINT_ALLOWLIST = {"Wire"}
+# Utilities are placed as ordered paths and may share a cell with a building:
+# a wire or pipe connects a port only by occupying the port's cell.
+UTILITY_BLUEPRINT_ALLOWLIST = {"Wire", "LiquidConduit"}
 BLUEPRINT_PRIORITY_CLASSES = {"idle", "basic", "high", "personalNeeds", "topPriority", "compulsory"}
 
 
@@ -423,7 +429,7 @@ def _build_blueprint_place_contract(
         material_tags,
         is_utility=is_utility,
     )
-    can_place_field = "can_place_wire" if is_utility else blueprint_can_place_field(building_def_id)
+    can_place_field = blueprint_can_place_field(building_def_id)
     preconditions = _blueprint_environment_conditions()
     preconditions.extend(
         _blueprint_catalog_conditions(
@@ -438,25 +444,36 @@ def _build_blueprint_place_contract(
         prefix = blueprint_cell_path(cell)
         values = _blueprint_cell_values(state, cell, (can_place_field,))
         values_by_cell[cell] = values
+        existing = values["object_count"]
+        # Only a utility may share its cell with what is already there (a port
+        # cell); an empty cell keeps the exact empty-cell contract.  Mirrors
+        # ActionExecutor.ValidateBlueprintPlaceCellContract.
+        overlay = is_utility and isinstance(existing, int) and not isinstance(existing, bool) and existing > 0
         if (
             values["cell"] != cell
-            or values["object_count"] != 0
-            or values["empty_for_blueprint"] is not True
+            or isinstance(existing, bool)
+            or not isinstance(existing, int)
+            or existing < 0
+            or (existing > 0 and not is_utility)
+            or not isinstance(values["empty_for_blueprint"], bool)
+            or (not is_utility and values["empty_for_blueprint"] is not True)
             or values[can_place_field] is not True
             or values["blueprint_present"] is not False
             or values["blueprint_instance_id"] != 0
             or values["blueprint_prefab_id"] != "none"
-            or values["fingerprint"] != values["empty_fingerprint"]
+            or (not overlay and values["fingerprint"] != values["empty_fingerprint"])
             or not isinstance(values["fingerprint"], str)
             or not values["fingerprint"].startswith("sha256:")
+            or not isinstance(values["empty_fingerprint"], str)
+            or not values["empty_fingerprint"].startswith("sha256:")
         ):
-            raise ValueError(f"cell {cell} is not a verified empty {building_def_id} target.")
+            raise ValueError(f"cell {cell} is not a verified free {building_def_id} target.")
         preconditions.extend(
             [
                 _observed_eq(f"{prefix}.fingerprint", values["fingerprint"]),
                 _observed_eq(f"{prefix}.empty_fingerprint", values["empty_fingerprint"]),
-                _observed_eq(f"{prefix}.object_count", 0),
-                _observed_eq(f"{prefix}.empty_for_blueprint", True),
+                _observed_eq(f"{prefix}.object_count", existing),
+                _observed_eq(f"{prefix}.empty_for_blueprint", values["empty_for_blueprint"]),
                 _observed_eq(f"{prefix}.{can_place_field}", True),
                 _observed_eq(f"{prefix}.blueprint_present", False),
                 _observed_eq(f"{prefix}.blueprint_instance_id", 0),
@@ -467,7 +484,7 @@ def _build_blueprint_place_contract(
             [
                 _observed_eq(f"{prefix}.empty_fingerprint", values["empty_fingerprint"]),
                 _condition(f"{prefix}.fingerprint", "ne", values["fingerprint"]),
-                _condition(f"{prefix}.object_count", "gt", 0),
+                _condition(f"{prefix}.object_count", "gt", existing),
                 _observed_eq(f"{prefix}.empty_for_blueprint", False),
                 _observed_eq(f"{prefix}.{can_place_field}", False),
                 _observed_eq(f"{prefix}.blueprint_present", True),
@@ -492,7 +509,7 @@ def _build_blueprint_cancel_target_contract(
     is_utility: bool,
 ) -> tuple[Dict[str, int], List[Dict[str, Any]], List[Dict[str, Any]]]:
     prefix = blueprint_cell_path(cell)
-    can_place_field = "can_place_wire" if is_utility else blueprint_can_place_field(building_def_id)
+    can_place_field = blueprint_can_place_field(building_def_id)
     values = _blueprint_cell_values(state, cell, (can_place_field,))
     instance_prefix = blueprint_instance_path(instance_id)
     instance_values = {
@@ -538,11 +555,23 @@ def _build_blueprint_cancel_target_contract(
         _observed_eq(f"{instance_prefix}.in_progress", False),
     ]
     preconditions.extend(_blueprint_physical_conditions(prefix, values))
+    # A utility laid over a port cell leaves the building behind when it is
+    # cancelled: exactly one object fewer, and the empty-cell fingerprint only
+    # once nothing remains (ActionExecutor.ValidateBlueprintCancelCellContract).
+    remaining = 0
+    if is_utility:
+        preconditions.append(_observed_eq(f"{prefix}.object_count", values["object_count"]))
+        remaining = values["object_count"] - 1
     effects = [
-        _observed_eq(f"{prefix}.fingerprint", values["empty_fingerprint"]),
+        _observed_eq(f"{prefix}.fingerprint", values["empty_fingerprint"])
+        if remaining == 0
+        else _condition(f"{prefix}.fingerprint", "ne", values["fingerprint"]),
         _observed_eq(f"{prefix}.empty_fingerprint", values["empty_fingerprint"]),
-        _observed_eq(f"{prefix}.object_count", 0),
-        _observed_eq(f"{prefix}.empty_for_blueprint", True),
+        _observed_eq(f"{prefix}.object_count", remaining),
+    ]
+    if not is_utility:
+        effects.append(_observed_eq(f"{prefix}.empty_for_blueprint", True))
+    effects += [
         _observed_eq(f"{prefix}.{can_place_field}", True),
         _observed_eq(f"{prefix}.blueprint_present", False),
         _observed_eq(f"{prefix}.blueprint_instance_id", 0),
@@ -707,7 +736,7 @@ def build_cancel_utility_blueprint_path_hint(
     instance_ids = path_values["blueprint_instance_ids"]
     if (
         path_values["path_id"] != path_id
-        or path_values["building_def_id"] != "Wire"
+        or path_values["building_def_id"] not in UTILITY_BLUEPRINT_ALLOWLIST
         or path_values["active"] is not True
         or path_values["fully_active"] is not True
         or not isinstance(cells, list)
@@ -717,7 +746,8 @@ def build_cancel_utility_blueprint_path_hint(
         or len(instance_ids) != len(cells)
         or path_values["active_blueprint_instance_ids"] != instance_ids
     ):
-        raise ValueError("utility path is not an exact fully-active Wire blueprint path.")
+        raise ValueError("utility path is not an exact fully-active allowlisted utility blueprint path.")
+    utility = path_values["building_def_id"]
     normalized_cells = _normalize_cells(
         cells,
         maximum=MAX_UTILITY_BLUEPRINT_CELLS,
@@ -730,7 +760,7 @@ def build_cancel_utility_blueprint_path_hint(
     preconditions.extend(
         [
             _observed_eq(f"{prefix}.path_id", path_id),
-            _observed_eq(f"{prefix}.building_def_id", "Wire"),
+            _observed_eq(f"{prefix}.building_def_id", utility),
             _observed_eq(f"{prefix}.cells", normalized_cells),
             _observed_eq(f"{prefix}.blueprint_instance_ids", instance_ids),
             _observed_eq(f"{prefix}.active_blueprint_instance_ids", instance_ids),
@@ -744,7 +774,7 @@ def build_cancel_utility_blueprint_path_hint(
             state,
             cell=cell,
             instance_id=instance_id,
-            building_def_id="Wire",
+            building_def_id=utility,
             is_utility=True,
         )
         targets.append(target)
@@ -753,7 +783,7 @@ def build_cancel_utility_blueprint_path_hint(
     effects.extend(
         [
             _observed_eq(f"{prefix}.path_id", path_id),
-            _observed_eq(f"{prefix}.building_def_id", "Wire"),
+            _observed_eq(f"{prefix}.building_def_id", utility),
             _observed_eq(f"{prefix}.cells", normalized_cells),
             _observed_eq(f"{prefix}.blueprint_instance_ids", instance_ids),
             _observed_eq(f"{prefix}.active_blueprint_instance_ids", []),

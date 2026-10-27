@@ -40,16 +40,16 @@ class BlueprintAllowlistTests(unittest.TestCase):
             field = advanced_actions.blueprint_can_place_field(building)
             self.assertEqual(contract_id_for_path(f"cells.by_id.cell_12.{field}"), BLUEPRINT_CELL_CONTRACT_ID)
         # A building outside the allowlist has no trusted contract at all.  The
-        # Electrolyzer used to serve as the example until it was allowlisted
-        # (2026-10-26 round 44); the Liquid Pump is not.
-        self.assertNotIn("LiquidPump", advanced_actions.BUILDING_BLUEPRINT_ALLOWLIST)
-        self.assertIsNone(contract_id_for_path("blueprints.catalog.LiquidPump.available"))
-        self.assertIsNone(contract_id_for_path("cells.by_id.cell_12.can_place_liquid_pump"))
+        # Electrolyzer and then the Liquid Pump served as the example until they
+        # were allowlisted (round 44, B15); the Battery is not.
+        self.assertNotIn("Battery", advanced_actions.BUILDING_BLUEPRINT_ALLOWLIST)
+        self.assertIsNone(contract_id_for_path("blueprints.catalog.Battery.available"))
+        self.assertIsNone(contract_id_for_path("cells.by_id.cell_12.can_place_battery"))
 
     def test_a_building_outside_the_allowlist_is_refused_before_reading_state(self):
         with self.assertRaisesRegex(ValueError, "allowlist"):
             advanced_actions.build_place_building_blueprint_hint(
-                {}, cells=[1], material_tags=["Cuprite"], building_def_id="LiquidPump"
+                {}, cells=[1], material_tags=["Cuprite"], building_def_id="Battery"
             )
 
 

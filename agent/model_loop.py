@@ -522,8 +522,10 @@ def build_choice_payload(
         oxygen_rule = (
             "colony.oxygen_balance.*_net_kg is oxygen made minus oxygen breathed per cycle from the game's report; "
             "a negative value means the colony is losing breathable air. resource_outlook reports that the world "
-            "holds none of the consumable the placeable oxygen producers need, but it does hold water, so an "
-            "electrolyser would work if one could be placed; no oxygen producer is currently offered."
+            "holds none of the consumable the algae-fed oxygen producers need, but it does hold water. An "
+            "Electrolyzer makes oxygen from water only with power and a liquid pipe from a Liquid Pump standing in "
+            "water: place the Electrolyzer, then a Manual Generator and a Liquid Pump, then lay the Wire and Liquid "
+            "Pipe links that are offered between their ports."
         )
     elif outlook["oxygen_buildings_can_operate"] is False:
         oxygen_rule = (
