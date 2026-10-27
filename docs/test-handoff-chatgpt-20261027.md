@@ -92,6 +92,13 @@ py -3 -B scripts/verify_oni_model_integration.py
   - 建成后电解器的 `life_support_buildings` 实例是否变为 `operational: true`。
 
   逐项待确认的风险见 `docs/b15-supply-links-20261027.md` 末尾。
+- 温度（B6）：同样需要先部署新的 Mod 构建。实盘时核对：
+  - 快照里每个复制人有没有 `temperature_state`、`body_temperature_c`、`cell_temperature_c`，挖掘格有没有 `temperature_c`；
+  - 出现 `hypothermia` 时，候选集备注里是否有 `temperature_alert:hypothermia:exposed=<n>`，暂停时是否有 `priority_<id>_Dig_<p-1>` 缓解候选；
+  - 挖掘候选的摘要是否带温度范围，有告警时过冷的段是否被扣下；
+  - 降低 Dig 之后，失温是否消失。
+
+  逐项待确认的风险见 `docs/b6-temperature-20261027.md` 末尾。
 - 每轮结束后按 AGENTS.md 收尾，并核对存档基线（`scripts/save_tree_baseline.py compare`）。
 - 进展要跨进程保留：准备时加 `--checkpoints`（配置里会写入 `checkpoints: true`），游戏的加载指针用 `scripts/set_oni_load_save.py --latest-checkpoint <克隆清单> <克隆 .sav>` 设置。停止时控制器会自动存出下一环检查点，状态文档里的 `checkpoint` 字段会给出结果（`verified` 或 `failed` 及原因）。第一次带检查点的实盘测试要专门核对 `docs/b16-checkpoint-design-20261027.md` 末尾列出的待确认风险。
 
