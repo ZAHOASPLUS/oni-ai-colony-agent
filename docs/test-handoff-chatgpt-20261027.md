@@ -86,6 +86,12 @@ py -3 -B scripts/verify_oni_model_integration.py
   失败时输出一行 JSON 的 `error`，退出码 2，不会写半成品配置。
 - 启动控制器用 `scripts/start-controller.ps1`，观察用 `scripts/watch_controller.py`，两者放在不同的命令里。
 - 暂停/恢复由控制器的节奏规则决定（B7），不再由模型选择。实盘时核对 `model-loop.json`：`pause_cadence` 显示当前是运行还是暂停、已运行多少周期或暂停中已做几项改动；规则发出的命令在 `last_event` 中为 `rule_choice`，命令证据的 `model` 是 `rule:pause-cadence.v1`。如果游戏长时间停在暂停状态，先看 `pause_cadence.resume_offered`：为 false 表示有紧急告警，这是预期行为。
+- 电解器的供给链（B15）：本次 Mod 改动需要先按部署流程安装新构建，再做实盘测试。实盘时核对：
+  - 快照里的 `blueprints.supply_links` 有没有出现，路径格数是否合理；
+  - `power_link_*` / `liquid_link_*` 候选被选中后，执行器是否接受；
+  - 建成后电解器的 `life_support_buildings` 实例是否变为 `operational: true`。
+
+  逐项待确认的风险见 `docs/b15-supply-links-20261027.md` 末尾。
 - 每轮结束后按 AGENTS.md 收尾，并核对存档基线（`scripts/save_tree_baseline.py compare`）。
 - 进展要跨进程保留：准备时加 `--checkpoints`（配置里会写入 `checkpoints: true`），游戏的加载指针用 `scripts/set_oni_load_save.py --latest-checkpoint <克隆清单> <克隆 .sav>` 设置。停止时控制器会自动存出下一环检查点，状态文档里的 `checkpoint` 字段会给出结果（`verified` 或 `failed` 及原因）。第一次带检查点的实盘测试要专门核对 `docs/b16-checkpoint-design-20261027.md` 末尾列出的待确认风险。
 
