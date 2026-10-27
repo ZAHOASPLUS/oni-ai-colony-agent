@@ -121,6 +121,14 @@ class TemperatureMappingTests(unittest.TestCase):
         self.assertFalse(self.ids(state)[0].startswith(f"priority_{COLD_ID}_Dig_"))
         self.assertEqual(C._temperature_relief_candidates(state, C.temperature_exposure(state)), [])
 
+    def test_relief_stops_at_the_floor(self) -> None:
+        # Review fix: repeated pauses must not ratchet Dig down to 0 (disabled).
+        for current, expected in ((3, [f"priority_{COLD_ID}_Dig_2"]), (2, []), (1, [])):
+            state = temperature_state(exposed={COLD_ID: "hypothermic"})
+            state["duplicants"]["by_instance_id"][f"id_{COLD_ID}"]["chore_priorities"]["Dig"] = current
+            relief = C._temperature_relief_candidates(state, C.temperature_exposure(state))
+            self.assertEqual([item["candidate_id"] for item in relief], expected, current)
+
     def test_stale_state_without_the_alert_is_ignored(self) -> None:
         state = temperature_state(exposed={COLD_ID: "hypothermic"}, alerts=["urgent_toilet"])
         result = self.generate(state)

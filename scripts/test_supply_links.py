@@ -262,5 +262,64 @@ class SupplyBuildingGatingTests(unittest.TestCase):
         self.assertNotIn("ManualGenerator", offered)
 
 
+
+def power_link_state(consumers) -> dict:
+    """The link fixture as a Wire trunk from a Manual Generator."""
+
+    state = link_state()
+    catalog = dict(state["blueprints"]["catalog"]["LiquidConduit"], prefab_id="Wire")
+    state["blueprints"]["catalog"]["Wire"] = catalog
+    for field in catalog:
+        state["quality"][f"blueprints.catalog.Wire.{field}"] = contract_quality_fixture(BLUEPRINT_CATALOG_CONTRACT_ID)
+    link = state["blueprints"]["supply_links"].pop(f"id_{PATH_ID}")
+    link.update(
+        path_id="power301n302", kind="power", building_def_id="Wire", source_prefab_id="ManualGenerator",
+        consumer_prefab_ids=list(consumers), consumer_instance_ids=list(range(302, 302 + len(consumers))),
+    )
+    state["blueprints"]["supply_links"]["id_power301n302"] = link
+    return state
+
+
+class PowerLinkOrderTests(unittest.TestCase):
+    """Review fix: one generator port takes one wire, so it must reach the pump too."""
+
+    def links(self, state, pumps):
+        notes = []
+        status = {"LiquidPump": {"built": pumps, "operational": None, "idle_status": None}}
+        with mock.patch.object(C, "building_status", return_value=status):
+            ids = [item["candidate_id"] for item in C._supply_link_candidates(state, notes)]
+        return ids, notes
+
+    def test_waits_while_no_pump_is_built(self) -> None:
+        for pumps in (0, None):
+            ids, notes = self.links(power_link_state(["Electrolyzer"]), pumps)
+            self.assertEqual(ids, [])
+            self.assertEqual(notes, ["power_link_waits_for_liquid_pump"])
+
+    def test_offered_once_a_pump_is_built(self) -> None:
+        ids, notes = self.links(power_link_state(["Electrolyzer"]), 1)
+        self.assertEqual(ids, ["power_link_power301n302"])
+        self.assertEqual(notes, [])
+
+    def test_a_trunk_that_reaches_the_pump_is_offered(self) -> None:
+        ids, _ = self.links(power_link_state(["LiquidPump", "Electrolyzer"]), 0)
+        self.assertEqual(ids, ["power_link_power301n302"])
+
+    def test_liquid_links_are_not_gated(self) -> None:
+        ids, notes = self.links(link_state(), 0)
+        self.assertEqual(ids, [f"liquid_link_{PATH_ID}"])
+        self.assertEqual(notes, [])
+
+
+class UtilityCancelCountTests(unittest.TestCase):
+    def test_a_cell_without_the_blueprint_is_refused(self) -> None:
+        # The executor refuses a cancellation count below 1; so does the builder.
+        for count in (0, None):
+            state = placed_link_state()
+            state["cells"]["by_id"][f"cell_{MIDDLE}"]["object_count"] = count
+            with self.assertRaises(ValueError):
+                build_cancel_utility_blueprint_path_hint(state, path_id=PATH_ID)
+
+
 if __name__ == "__main__":
     unittest.main()

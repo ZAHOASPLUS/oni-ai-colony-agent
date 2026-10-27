@@ -701,6 +701,10 @@ DIG_HOT_LIMIT_C = 60.0
 # The chore group that walks duplicants into unexplored, untempered material.
 TEMPERATURE_RELIEF_GROUP = "Dig"
 MAX_TEMPERATURE_RELIEF_CANDIDATES = 2
+# Hypothermia clears slowly and the pause cadence asks again every quarter
+# cycle, so an uncapped relief would ratchet Dig down to 0 (disabled) within a
+# few pauses.  It stops at 2: digging continues, just behind other work.
+TEMPERATURE_RELIEF_FLOOR = 2
 
 
 def _observed_number(
@@ -817,7 +821,7 @@ def _temperature_relief_candidates(
         current = safe_get(
             state, f"duplicants.by_instance_id.id_{instance_id}.chore_priorities.{TEMPERATURE_RELIEF_GROUP}"
         )
-        if type(current) is not int or not 0 < current <= 5:
+        if type(current) is not int or not TEMPERATURE_RELIEF_FLOOR < current <= 5:
             continue
         try:
             hint = build_duplicant_priority_hint(
@@ -1012,7 +1016,26 @@ def _supply_building_wanted(
     )
 
 
-def _supply_link_candidates(state: Mapping[str, Any]) -> List[Dict[str, Any]]:
+def _power_link_waits_for_pump(link: Mapping[str, Any], status: Mapping[str, Mapping[str, Any]]) -> bool:
+    """True while a power link would wire an Electrolyzer before its pump exists.
+
+    A Manual Generator's output port takes exactly one wire, and the Probe
+    starts every power link there, so the first link is the only one: wiring
+    the Electrolyzer alone strands the pump built after it, without power, and
+    the Electrolyzer without water.  The link waits until a pump is built, so
+    the trunk reaches both.  An unobserved pump count also waits.
+    """
+
+    consumers = link.get("consumer_prefab_ids")
+    if not isinstance(consumers, list) or "LiquidPump" in consumers:
+        return False
+    pumps = status.get("LiquidPump", {}).get("built")
+    return not (type(pumps) is int and pumps > 0)
+
+
+def _supply_link_candidates(
+    state: Mapping[str, Any], notes: Optional[List[str]] = None
+) -> List[Dict[str, Any]]:
     """Wire and Liquid Pipe paths the Probe computed between built ports.
 
     A wire or pipe connects a port only by occupying the port's cell, so the
@@ -1027,11 +1050,16 @@ def _supply_link_candidates(state: Mapping[str, Any]) -> List[Dict[str, Any]]:
     if not isinstance(links, Mapping):
         return []
     result: List[Dict[str, Any]] = []
+    status = building_status(state)
     for key in sorted(links):
         link = links[key]
         if not isinstance(link, Mapping):
             continue
         kind = link.get("kind")
+        if kind == "power" and _power_link_waits_for_pump(link, status):
+            if notes is not None:
+                notes.append("power_link_waits_for_liquid_pump")
+            continue
         utility = link.get("building_def_id")
         path_id = link.get("path_id")
         cells = link.get("cells")
@@ -1401,7 +1429,7 @@ def generate_candidates(
             # Roadmap B15: wire and pipe links between built ports, computed by
             # the Probe.  An idle Electrolyzer with no link to offer is noted,
             # so the model knows a supply building (or a route) is missing.
-            links = _supply_link_candidates(snapshot)
+            links = _supply_link_candidates(snapshot, notes)
             items[link_slot:link_slot] = links
             status = building_status(snapshot)
             electrolyzers = status.get("Electrolyzer", {}).get("built")

@@ -560,8 +560,12 @@ def _build_blueprint_cancel_target_contract(
     # once nothing remains (ActionExecutor.ValidateBlueprintCancelCellContract).
     remaining = 0
     if is_utility:
-        preconditions.append(_observed_eq(f"{prefix}.object_count", values["object_count"]))
-        remaining = values["object_count"] - 1
+        count = values["object_count"]
+        # The executor refuses a count below 1: the blueprint itself is one.
+        if type(count) is not int or count < 1:
+            raise ValueError(f"cell {cell} does not hold the utility blueprint being cancelled.")
+        preconditions.append(_observed_eq(f"{prefix}.object_count", count))
+        remaining = count - 1
     effects = [
         _observed_eq(f"{prefix}.fingerprint", values["empty_fingerprint"])
         if remaining == 0
