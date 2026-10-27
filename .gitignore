@@ -30,3 +30,4 @@ mod/reports/
 # .NET harness build outputs.
 tools/*/bin/
 tools/*/obj/
+.claude/settings.local.json

@@ -94,7 +94,9 @@ PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
         "base_url": "http://127.0.0.1:14861/v1",
         "model": None,
         "wire_api": WIRE_API_CHAT_COMPLETIONS,
-        "key_env": ("COCKPIT_API_KEY", "ONI_AI_API_KEY", "OPENAI_API_KEY"),
+        # Only the proxy's own key: falling back to OPENAI_API_KEY handed an
+        # unrelated key to the proxy, which answered 401 (live, 2026-10-27).
+        "key_env": ("COCKPIT_API_KEY",),
         "models": (),
         "hosts": ("127.0.0.1", "localhost", "::1"),
         "structured_output": ("json_schema", "plain"),

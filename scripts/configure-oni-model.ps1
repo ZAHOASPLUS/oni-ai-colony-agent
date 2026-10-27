@@ -50,7 +50,8 @@ $presets = @{
         BaseUrl = "http://127.0.0.1:14861/v1"
         Model   = $null
         WireApi = "chat_completions"
-        KeyEnv  = @("COCKPIT_API_KEY", "ONI_AI_API_KEY", "OPENAI_API_KEY")
+        # Only the proxy's own key; another provider's key is answered with 401.
+        KeyEnv  = @("COCKPIT_API_KEY")
     }
 }
 

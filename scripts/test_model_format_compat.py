@@ -295,6 +295,13 @@ class ProviderSafetyTests(unittest.TestCase):
         self.assertEqual(remote["config_error"], "provider_endpoint_mismatch")
         self.assertIsNone(remote["api_key"])
 
+    def test_cockpit_never_borrows_another_providers_key(self):
+        # setUp provides OPENAI_API_KEY and CLINE_API_KEY but no Cockpit key.
+        os.environ["ONI_AI_PROVIDER"] = "cockpit"
+        os.environ["ONI_AI_API_KEY"] = "sk-generic-fixture-0000000000000000000"
+        os.environ["OPENAI_MODEL"] = "fixture-terra-model"
+        self.assertIsNone(self.resolved()["api_key"])
+
     def test_without_a_named_provider_the_old_rules_hold(self):
         os.environ["OPENAI_BASE_URL"] = "https://self-hosted.example/v1"
         config = self.resolved()
