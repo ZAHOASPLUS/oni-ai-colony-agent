@@ -67,7 +67,10 @@ namespace OniAiProbeMod.Probe
             // are offered as blueprints.supply_links.
             "LiquidConduit",
             "LiquidPump",
-            "ManualGenerator"
+            "ManualGenerator",
+            // Roadmap B6: hypothermia on a cold map.  It needs power, so it gets
+            // its own Manual Generator and a wire link (blueprints.supply_links).
+            "SpaceHeater"
         };
 
         /// <summary>Allowlisted utilities: placed only as ordered paths.</summary>
@@ -1448,8 +1451,45 @@ namespace OniAiProbeMod.Probe
                 { "required_mass_kg", required },
                 { "available_mass_kg", available },
                 { "materials_available", materialsAvailable },
-                { "candidate_cells", candidateCells }
+                { "candidate_cells", candidateCells },
+                // Roadmap B6: which tech unlocks a locked building, so research
+                // for it can be offered without a hard-coded tech tree.
+                { "unlocked", IsBlueprintUnlocked(def) },
+                { "research_tech_id", UnlockingTechId(def) },
+                { "research_prerequisites_complete", UnlockingTechPrerequisitesComplete(def) }
             };
+        }
+
+        // Null when no tech unlocks the building (or the lookup fails).
+        private static Tech UnlockingTech(BuildingDef def)
+        {
+            try
+            {
+                return def == null ? null : Db.Get()?.TechItems?.GetTechFromItemID(def.PrefabID);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static object UnlockingTechId(BuildingDef def)
+        {
+            Tech tech = UnlockingTech(def);
+            return string.IsNullOrEmpty(tech?.Id) ? null : tech.Id;
+        }
+
+        private static object UnlockingTechPrerequisitesComplete(BuildingDef def)
+        {
+            try
+            {
+                Tech tech = UnlockingTech(def);
+                return tech == null ? null : (object)tech.ArePrerequisitesComplete();
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private static Dictionary<string, object> ReadBlueprintIdentity(Dictionary<string, object> cell)
@@ -2032,6 +2072,7 @@ namespace OniAiProbeMod.Probe
         private const int MaxUtilityPathIdLength = 64;
         private const int SupplyLinkRefreshSeconds = 30;
         private static readonly string[] PoweredSupplyConsumers = { "Electrolyzer", "LiquidPump" };
+        private static readonly string[] HeatingConsumers = { "SpaceHeater" };
 
         private sealed class SupplyLink
         {
@@ -2123,7 +2164,8 @@ namespace OniAiProbeMod.Probe
                     return links;
                 }
                 string prefabId = item?.Def?.PrefabID;
-                if (prefabId != "ManualGenerator" && prefabId != "Electrolyzer" && prefabId != "LiquidPump")
+                if (prefabId != "ManualGenerator" && prefabId != "Electrolyzer" && prefabId != "LiquidPump" &&
+                    prefabId != "SpaceHeater")
                 {
                     continue;
                 }
@@ -2148,11 +2190,7 @@ namespace OniAiProbeMod.Probe
                 if (def.OutputConduitType != ConduitType.None) reserved.Add(entry.Building.GetUtilityOutputCell());
             }
 
-            SupplyLink power = ComputePowerLink(worldId, buildings, reserved, selectedMaterialsByDef);
-            if (power != null)
-            {
-                links.Add(power);
-            }
+            links.AddRange(ComputePowerLinks(worldId, buildings, reserved, selectedMaterialsByDef));
             links.AddRange(ComputeLiquidLinks(worldId, buildings, reserved, selectedMaterialsByDef));
             return links;
         }
@@ -2181,47 +2219,75 @@ namespace OniAiProbeMod.Probe
         }
 
         /// <summary>
-        /// One wire from the first Manual Generator through every unpowered
-        /// consumer, nearest first; with a too-long trunk, the nearest consumer
-        /// alone.  A wired port (completed or blueprint) is never a stop.
+        /// Wires from Manual Generators to unpowered consumers.  A generator's
+        /// output takes one wire, so each generator serves one group: the first
+        /// free one feeds the oxygen supply (every unpowered Electrolyzer and
+        /// Liquid Pump, nearest first; with a too-long trunk, the nearest alone),
+        /// the next free one the nearest unpowered Space Heater (roadmap B6),
+        /// whose load would otherwise overdraw the oxygen supply's generator.
+        /// A wired port (completed or blueprint) is never a stop.
         /// </summary>
-        private static SupplyLink ComputePowerLink(
+        private static List<SupplyLink> ComputePowerLinks(
             int worldId,
             List<SupplyBuilding> buildings,
             HashSet<int> reserved,
             Dictionary<string, List<Tag>> selectedMaterialsByDef)
         {
+            List<SupplyLink> links = new List<SupplyLink>();
             BuildingDef wire = Assets.GetBuildingDef("Wire");
             if (wire == null)
             {
-                return null;
+                return links;
             }
             Func<int, bool> free = cell =>
-                Grid.Objects[cell, (int)wire.ObjectLayer] == null &&
-                Grid.IsValidCellInWorld(cell, worldId);
-            SupplyBuilding generator = buildings.Find(entry =>
+                Grid.IsValidCellInWorld(cell, worldId) &&
+                Grid.Objects[cell, (int)wire.ObjectLayer] == null;
+            List<SupplyBuilding> generators = buildings.FindAll(entry =>
                 entry.PrefabId == "ManualGenerator" &&
                 entry.Building.Def.RequiresPowerOutput &&
                 free(entry.Building.GetPowerOutputCell()));
-            if (generator == null)
-            {
-                return null;
-            }
-            int start = generator.Building.GetPowerOutputCell();
-            List<SupplyBuilding> consumers = buildings.FindAll(entry =>
-                Array.IndexOf(PoweredSupplyConsumers, entry.PrefabId) >= 0 &&
+            Func<string[], List<SupplyBuilding>> unpowered = prefabs => buildings.FindAll(entry =>
+                Array.IndexOf(prefabs, entry.PrefabId) >= 0 &&
                 entry.Building.Def.RequiresPowerInput &&
                 free(entry.Building.GetPowerInputCell()));
-            consumers.Sort((left, right) =>
-                CellDistance(start, left.Building.GetPowerInputCell())
-                    .CompareTo(CellDistance(start, right.Building.GetPowerInputCell())));
-            int[] attempts = consumers.Count > 1 ? new[] { consumers.Count, 1 } : new[] { consumers.Count };
-            foreach (int count in attempts)
+            List<SupplyBuilding>[] groups =
             {
-                if (count < 1)
+                unpowered(PoweredSupplyConsumers),
+                unpowered(HeatingConsumers)
+            };
+            int next = 0;
+            for (int group = 0; group < groups.Length && next < generators.Count; group++)
+            {
+                if (groups[group].Count == 0)
                 {
                     continue;
                 }
+                SupplyLink link = ComputePowerTrunk(
+                    worldId, generators[next], groups[group], group == 0, reserved, selectedMaterialsByDef);
+                if (link != null)
+                {
+                    links.Add(link);
+                    next++;
+                }
+            }
+            return links;
+        }
+
+        private static SupplyLink ComputePowerTrunk(
+            int worldId,
+            SupplyBuilding generator,
+            List<SupplyBuilding> consumers,
+            bool trunk,
+            HashSet<int> reserved,
+            Dictionary<string, List<Tag>> selectedMaterialsByDef)
+        {
+            int start = generator.Building.GetPowerOutputCell();
+            consumers.Sort((left, right) =>
+                CellDistance(start, left.Building.GetPowerInputCell())
+                    .CompareTo(CellDistance(start, right.Building.GetPowerInputCell())));
+            int[] attempts = trunk && consumers.Count > 1 ? new[] { consumers.Count, 1 } : new[] { 1 };
+            foreach (int count in attempts)
+            {
                 List<SupplyBuilding> chosen = consumers.GetRange(0, count);
                 List<int> stops = new List<int> { start };
                 chosen.ForEach(entry => stops.Add(entry.Building.GetPowerInputCell()));
@@ -2976,6 +3042,7 @@ namespace OniAiProbeMod.Probe
                 { "microbe_musher", 0 },
                 { "farm_tile", 0 },
                 { "liquid_pump", 0 },
+                { "space_heater", 0 },
                 { "_scanned", 0 },
                 { "_active_world_id", activeWorldId },
                 { "_source", "unavailable" },
@@ -3064,6 +3131,7 @@ namespace OniAiProbeMod.Probe
             IncrementIfExactMatch(counts, id, "microbe_musher", "MicrobeMusher");
             IncrementIfExactMatch(counts, id, "farm_tile", "FarmTile");
             IncrementIfExactMatch(counts, id, "liquid_pump", "LiquidPump");
+            IncrementIfExactMatch(counts, id, "space_heater", "SpaceHeater");
         }
 
         private static void CacheBuildings(
@@ -3852,6 +3920,7 @@ namespace OniAiProbeMod.Probe
                 { "buildings.microbe_musher", BuildingCountQuality(buildingStatus, buildingSource, buildingCountObserved, buildingCompleteness) },
                 { "buildings.farm_tile", BuildingCountQuality(buildingStatus, buildingSource, buildingCountObserved, buildingCompleteness) },
                 { "buildings.liquid_pump", BuildingCountQuality(buildingStatus, buildingSource, buildingCountObserved, buildingCompleteness) },
+                { "buildings.space_heater", BuildingCountQuality(buildingStatus, buildingSource, buildingCountObserved, buildingCompleteness) },
                 { "buildings._source", Quality(buildingSource == "unavailable" ? "unsupported" : "observed", buildingSource) },
                 { "buildings._scanned", Quality(buildingSource == "unavailable" ? "unsupported" : "observed", buildingSource) },
                 { "functional_buildings", functionalBuildingQuality },
@@ -3980,7 +4049,10 @@ namespace OniAiProbeMod.Probe
                     "required_mass_kg",
                     "available_mass_kg",
                     "materials_available",
-                    "candidate_cells"
+                    "candidate_cells",
+                    "unlocked",
+                    "research_tech_id",
+                    "research_prerequisites_complete"
                 },
                 status,
                 source,
@@ -4111,6 +4183,7 @@ namespace OniAiProbeMod.Probe
                     "can_place_liquid_conduit",
                     "can_place_liquid_pump",
                     "can_place_manual_generator",
+                    "can_place_space_heater",
                     "blueprint_present",
                     "blueprint_instance_id",
                     "blueprint_prefab_id",

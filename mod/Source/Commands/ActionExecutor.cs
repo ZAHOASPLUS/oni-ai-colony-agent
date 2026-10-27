@@ -4728,7 +4728,9 @@ namespace OniAiProbeMod.Commands
             "MicrobeMusher",
             // Roadmap B15: the Electrolyzer's power and water supply.
             "LiquidPump",
-            "ManualGenerator"
+            "ManualGenerator",
+            // Roadmap B6: warmth against hypothermia (needs its own power link).
+            "SpaceHeater"
         };
 
         private static bool IsAllowlistedBuildingBlueprint(string defId)

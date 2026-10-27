@@ -49,7 +49,7 @@ namespace OniAiProbeMod.Contracts
         internal const string ResearchCompleteId = "oni.qc.research.complete.v1";
         // Completed-prefab counts (buildings.oxygen_diffuser/outhouse/
         // manual_generator/algae_terrarium/electrolyzer/microbe_musher/
-        // farm_tile/liquid_pump) are diagnostic only: the Bridge's rules and the
+        // farm_tile/liquid_pump/space_heater) are diagnostic only: the Bridge's rules and the
         // model loop's colony summary consume them and no command may bind
         // them, so TryResolve deliberately does not know their paths.  Their
         // capture binding is buildings.captured_at (the reader caches for
@@ -241,11 +241,11 @@ namespace OniAiProbeMod.Contracts
             RegexOptions.CultureInvariant);
 
         private static readonly Regex BlueprintCatalogPath = new Regex(
-            @"^blueprints\.catalog\.(Ladder|Wire|MineralDeoxidizer|AlgaeHabitat|Electrolyzer|FarmTile|MicrobeMusher|LiquidConduit|LiquidPump|ManualGenerator)\.(available|prefab_id|is_utility|cancellable|orientation|facade_id|material_tags)$",
+            @"^blueprints\.catalog\.(Ladder|Wire|MineralDeoxidizer|AlgaeHabitat|Electrolyzer|FarmTile|MicrobeMusher|LiquidConduit|LiquidPump|ManualGenerator|SpaceHeater)\.(available|prefab_id|is_utility|cancellable|orientation|facade_id|material_tags)$",
             RegexOptions.CultureInvariant);
 
         private static readonly Regex BlueprintCellPath = new Regex(
-            @"^cells\.by_id\.cell_[0-9]+\.(cell|x|y|world_id|visible|solid|foundation|element_id|mass_kg|damage|object_count|empty_for_blueprint|can_place_ladder|can_place_wire|can_place_mineral_deoxidizer|can_place_algae_habitat|can_place_electrolyzer|can_place_farm_tile|can_place_microbe_musher|can_place_liquid_conduit|can_place_liquid_pump|can_place_manual_generator|nav_floor|nav_floor_below|blueprint_present|blueprint_instance_id|blueprint_prefab_id|blueprint_orientation|blueprint_material_tags|blueprint_in_progress|blueprint_is_utility|blueprint_progress_percent|blueprint_worker_instance_id|blueprint_root_cell|blueprint_footprint_cells|blueprint_priority_class|blueprint_priority_value|empty_fingerprint|fingerprint)$",
+            @"^cells\.by_id\.cell_[0-9]+\.(cell|x|y|world_id|visible|solid|foundation|element_id|mass_kg|damage|object_count|empty_for_blueprint|can_place_ladder|can_place_wire|can_place_mineral_deoxidizer|can_place_algae_habitat|can_place_electrolyzer|can_place_farm_tile|can_place_microbe_musher|can_place_liquid_conduit|can_place_liquid_pump|can_place_manual_generator|can_place_space_heater|nav_floor|nav_floor_below|blueprint_present|blueprint_instance_id|blueprint_prefab_id|blueprint_orientation|blueprint_material_tags|blueprint_in_progress|blueprint_is_utility|blueprint_progress_percent|blueprint_worker_instance_id|blueprint_root_cell|blueprint_footprint_cells|blueprint_priority_class|blueprint_priority_value|empty_fingerprint|fingerprint)$",
             RegexOptions.CultureInvariant);
 
         private static readonly Regex BlueprintInstancePath = new Regex(
@@ -576,6 +576,7 @@ namespace OniAiProbeMod.Contracts
                 case "can_place_liquid_conduit":
                 case "can_place_liquid_pump":
                 case "can_place_manual_generator":
+                case "can_place_space_heater":
                 case "nav_floor":
                 case "nav_floor_below":
                 case "blueprint_present":

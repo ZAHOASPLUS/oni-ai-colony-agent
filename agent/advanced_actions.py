@@ -37,6 +37,8 @@ BUILDING_BLUEPRINT_ALLOWLIST = {
     # pipe.  The pump must stand in liquid (the Probe's candidate cells say so).
     "LiquidPump",
     "ManualGenerator",
+    # Roadmap B6: warmth against hypothermia; powered by its own generator.
+    "SpaceHeater",
 }
 # Utilities are placed as ordered paths and may share a cell with a building:
 # a wire or pipe connects a port only by occupying the port's cell.

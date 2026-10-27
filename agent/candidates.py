@@ -102,6 +102,8 @@ BUILDING_CANDIDATES = (
     # their own kind does (see SUPPLY_BUILDINGS).
     ("ManualGenerator", "manual_generator", "Manual Generator (ManualGenerator, a duplicant runs it to make power)"),
     ("LiquidPump", "liquid_pump", "Liquid Pump (LiquidPump, pumps the liquid it stands in into a pipe)"),
+    # Roadmap B6: offered only while hypothermia is open and none is built.
+    ("SpaceHeater", "space_heater", "Space Heater (SpaceHeater, warms the air around it; needs its own power)"),
     ("Ladder", "ladder", "Ladder"),
 )
 # Supply buildings exist for an Electrolyzer: one of each is enough for the
@@ -237,6 +239,7 @@ BUILDING_COUNT_PATHS = {
     "MicrobeMusher": "buildings.microbe_musher",
     "ManualGenerator": "buildings.manual_generator",
     "LiquidPump": "buildings.liquid_pump",
+    "SpaceHeater": "buildings.space_heater",
 }
 # The Electrolyzer takes water only through a liquid pipe input and needs
 # power (ElectrolyzerConfig: InputConduitType + ConduitConsumer,
@@ -843,6 +846,67 @@ def _temperature_relief_candidates(
     return result
 
 
+def _space_heater_wanted(status: Mapping[str, Mapping[str, Any]], exposure: Mapping[str, Any]) -> bool:
+    """Roadmap B6: one Space Heater while hypothermia is open and none is built.
+
+    One first: whether it lifts the alert, and how far its warmth reaches,
+    is what the live run has to show before a second is worth offering.
+    """
+
+    return "hypothermia" in (exposure.get("alerts") or ()) and status.get("SpaceHeater", {}).get("built") == 0
+
+
+def _unlock_research_candidate(
+    state: Dict[str, Any], building_def_id: str, label: str, notes: List[str]
+) -> Optional[Dict[str, Any]]:
+    """Research for the tech that unlocks one wanted, still-locked building.
+
+    The Probe names the tech (TechItems.GetTechFromItemID) and whether its
+    prerequisites are complete, so no tech tree is hard-coded here.  A tech
+    whose prerequisites are still open is only noted: the executor refuses it.
+    """
+
+    prefix = f"blueprints.catalog.{building_def_id}"
+    statuses = {field_status(state, f"{prefix}.{field}") for field in (
+        "unlocked", "research_tech_id", "research_prerequisites_complete"
+    )}
+    if statuses != {"observed"}:
+        return None
+    if safe_get(state, f"{prefix}.unlocked") is not False:
+        return None
+    tech = safe_get(state, f"{prefix}.research_tech_id")
+    if not isinstance(tech, str) or not tech:
+        return None
+    if safe_get(state, f"{prefix}.research_prerequisites_complete") is not True:
+        notes.append(f"unlock_research_blocked:{building_def_id}:{display_text(tech, 64)}")
+        return None
+    current = _observed(state, "research.current", RESEARCH_CURRENT_CONTRACT_ID)
+    if current == tech:
+        notes.append(f"unlock_research_in_progress:{building_def_id}:{display_text(tech, 64)}")
+        return None
+    try:
+        hint = build_set_research_hint(state, tech=tech)
+    except ValueError:
+        return None
+    verb = "Switch research" if current else "Start research"
+    return _candidate(f"research_{tech}", f"{verb} to {tech}: it unlocks the {label}", hint)
+
+
+def _research_items(
+    state: Dict[str, Any], exposure: Mapping[str, Any], notes: List[str]
+) -> List[Dict[str, Any]]:
+    """The research ladder, led by the unlock a wanted building is waiting for."""
+
+    items: List[Dict[str, Any]] = []
+    if _space_heater_wanted(building_status(state), exposure):
+        unlock = _unlock_research_candidate(state, "SpaceHeater", "Space Heater against hypothermia", notes)
+        if unlock is not None:
+            items.append(unlock)
+    seen = {item["candidate_id"] for item in items}
+    items.extend(item for item in _research_candidates(state) if item["candidate_id"] not in seen)
+    return items
+
+
 def _research_candidates(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     current = _observed(state, "research.current", RESEARCH_CURRENT_CONTRACT_ID)
     if not isinstance(current, str):
@@ -1005,15 +1069,23 @@ def _building_candidate(
 def _supply_building_wanted(
     status: Mapping[str, Mapping[str, Any]], building_def_id: str, electrolyzers: Any
 ) -> bool:
-    """A supply building is offered for a built Electrolyzer, and only the first one."""
+    """A supply building is offered for a built consumer, and only the first one.
+
+    A Liquid Pump serves a built Electrolyzer.  A Manual Generator's output
+    takes one wire, so each powered group needs its own: one for the oxygen
+    supply (a built Electrolyzer) and one for a built Space Heater (roadmap B6).
+    """
 
     built = status.get(building_def_id, {}).get("built")
-    return (
-        isinstance(electrolyzers, int)
-        and not isinstance(electrolyzers, bool)
-        and electrolyzers > 0
-        and built == 0
-    )
+    if type(built) is not int:
+        return False
+    if building_def_id == "ManualGenerator":
+        needed = sum(
+            1 for count in (electrolyzers, status.get("SpaceHeater", {}).get("built"))
+            if type(count) is int and count > 0
+        )
+        return built < needed
+    return type(electrolyzers) is int and electrolyzers > 0 and built == 0
 
 
 def _power_link_waits_for_pump(link: Mapping[str, Any], status: Mapping[str, Mapping[str, Any]]) -> bool:
@@ -1027,7 +1099,8 @@ def _power_link_waits_for_pump(link: Mapping[str, Any], status: Mapping[str, Map
     """
 
     consumers = link.get("consumer_prefab_ids")
-    if not isinstance(consumers, list) or "LiquidPump" in consumers:
+    # A Space Heater's own link has nothing to wait for.
+    if not isinstance(consumers, list) or "Electrolyzer" not in consumers or "LiquidPump" in consumers:
         return False
     pumps = status.get("LiquidPump", {}).get("built")
     return not (type(pumps) is int and pumps > 0)
@@ -1357,11 +1430,11 @@ def generate_candidates(
         if _active_construction_count(snapshot) == 0:
             items.append(_pause_candidate(snapshot))
         # Research needs no pause: the executor only binds research.current.
-        items.extend(_research_candidates(snapshot))
+        items.extend(_research_items(snapshot, exposure, notes))
     else:
         # Advanced actions require a paused game; resume is offered last so a
         # model that wants duplicants to act can still return to play.
-        items.extend(_research_candidates(snapshot))
+        items.extend(_research_items(snapshot, exposure, notes))
         # Supply links are inserted here once known (see below): the priority
         # candidates alone can fill the budget, and a link is what makes an
         # already-built building work.
@@ -1445,6 +1518,8 @@ def generate_candidates(
                 if building_def_id in SUPPLY_BUILDINGS and not _supply_building_wanted(
                     status, building_def_id, electrolyzers
                 ):
+                    continue
+                if building_def_id == "SpaceHeater" and not _space_heater_wanted(status, exposure):
                     continue
                 note = oxygen_note if building_def_id in OXYGEN_BUILDING_DEF_IDS else ""
                 building = _building_candidate(snapshot, building_def_id, prefix, label, note)

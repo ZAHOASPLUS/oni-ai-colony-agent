@@ -176,6 +176,7 @@ _PATH_NATIVE_BOOLEAN_FIELDS = frozenset(
         "can_place_liquid_conduit",
         "can_place_liquid_pump",
         "can_place_manual_generator",
+        "can_place_space_heater",
         "nav_floor",
         "nav_floor_below",
         "blueprint_present",
@@ -448,6 +449,7 @@ _CONTRACTS: Tuple[FieldContract, ...] = (
             "buildings.microbe_musher",
             "buildings.farm_tile",
             "buildings.liquid_pump",
+            "buildings.space_heater",
         ),
         statuses=("observed",),
         semantics=("completed_prefab_instance_count",),
@@ -703,7 +705,7 @@ _CONTRACTS: Tuple[FieldContract, ...] = (
         paths=(),
         path_patterns=(
             r"^blueprints\.catalog\.(Ladder|Wire|MineralDeoxidizer|AlgaeHabitat|Electrolyzer|FarmTile|MicrobeMusher|"
-            r"LiquidConduit|LiquidPump|ManualGenerator)\."
+            r"LiquidConduit|LiquidPump|ManualGenerator|SpaceHeater)\."
             r"(available|prefab_id|is_utility|cancellable|orientation|facade_id|material_tags)$",
         ),
         statuses=("observed",),
@@ -725,7 +727,7 @@ _CONTRACTS: Tuple[FieldContract, ...] = (
             r"object_count|empty_for_blueprint|can_place_ladder|can_place_wire|"
             r"can_place_mineral_deoxidizer|can_place_algae_habitat|"
             r"can_place_electrolyzer|can_place_farm_tile|can_place_microbe_musher|"
-            r"can_place_liquid_conduit|can_place_liquid_pump|can_place_manual_generator|"
+            r"can_place_liquid_conduit|can_place_liquid_pump|can_place_manual_generator|can_place_space_heater|"
             r"nav_floor|nav_floor_below|"
             r"blueprint_present|blueprint_instance_id|blueprint_prefab_id|"
             r"blueprint_orientation|blueprint_material_tags|blueprint_in_progress|"
