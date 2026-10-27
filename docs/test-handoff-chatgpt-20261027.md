@@ -97,6 +97,7 @@ py -3 -B scripts/verify_oni_model_integration.py
   - 出现 `hypothermia` 时，候选集备注里是否有 `temperature_alert:hypothermia:exposed=<n>`，暂停时是否有 `priority_<id>_Dig_<p-1>` 缓解候选；
   - 挖掘候选的摘要是否带温度范围，有告警时过冷的段是否被扣下；
   - 降低 Dig 之后，失温是否消失。
+  - 加热器：目录项 `blueprints.catalog.SpaceHeater` 是否给出 `unlocked`、`research_tech_id`、`research_prerequisites_complete`；有失温时，是否出现 `research_<tech>` 或 `space_heater_*` 候选；加热器建好后，是否出现第二台人力发电机和一条通往加热器的 `power_link_*`。
 
   逐项待确认的风险见 `docs/b6-temperature-20261027.md` 末尾。
 - 每轮结束后按 AGENTS.md 收尾，并核对存档基线（`scripts/save_tree_baseline.py compare`）。
