@@ -77,7 +77,7 @@ py -3 -B scripts/verify_oni_model_integration.py
 
 ## 5. 实盘轮次
 
-按 `docs/roadmap-20261027.md` 的 M1 执行，前提条件：
+按 `docs/roadmap-20261027.md` 的 M1 执行。**第一轮直接照 [live-checklist-m1-round1-20261027.md](live-checklist-m1-round1-20261027.md) 做**：它把下面 B7、B15、B6、B16 的核对项合并成一轮的步骤、通过标准和回报格式，并给出事后重放候选集的只读工具 `scripts/review_live_candidates.py`。前提条件：
 
 - Terra 源存档（`m1-terra-src`）已经建好，并按命名克隆流程准入。
 - 准备分两步，用 `scripts/prepare_autonomous_run.py`（不再用 Phase 2 专用的 `prepare_dsh_autonomous_run.py`）：
