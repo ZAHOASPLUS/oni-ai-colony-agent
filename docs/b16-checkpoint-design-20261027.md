@@ -85,4 +85,4 @@ Phase 2 每次启动游戏都从同一份克隆存档加载，会话起始周期
 - **Bridge 在存档后能否继续发布可信快照**：同一会话里存档哈希变成新检查点后，启动绑定严格模式下的 Bridge 是否仍把快照判为可信。确认存档用的正是这份快照；如果 Bridge 不再发布，状态机会在 120 秒后记为超时失败，停止仍会完成，但不会留下检查点。
 - `SaveColonySummaryData` 写到哪里（见上文“已核实的约束”第 2 条）。
 - `updateSavePointer=true` 会让游戏把“上次存档”指向新检查点，`kplayerprefs.yaml` 因此会变化；收尾还原时要把它考虑在内。
-- `prepare_dsh_autonomous_run.py` 仍按 Phase 2 的目录结构定位克隆（`reports/phase2/clones/<run_id>`）；M1 需要一个以 Terra 克隆为参数的准备脚本。
+- ~~`prepare_dsh_autonomous_run.py` 仍按 Phase 2 的目录结构定位克隆~~ → 已由 `scripts/prepare_autonomous_run.py` 解决（2026-10-27）：克隆清单和 `.sav` 作为参数，`binding --checkpoints` 绑定最新一环；`config` 阶段若发现绑定之后又出现了更新的检查点，会拒绝写出能加载的配置。

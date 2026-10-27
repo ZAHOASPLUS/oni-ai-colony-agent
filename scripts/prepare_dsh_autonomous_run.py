@@ -1,5 +1,9 @@
 """Prepare the autonomous run for the DeepSeek-dedicated test clone.
 
+Phase 2 only (used by ``reset_dsh_run.py``).  New runs use
+``scripts/prepare_autonomous_run.py``, which takes any named clone and writes
+the controller config only once the game's session anchors exist.
+
 Writes the two documents the external control plane owns:
 
 * ``<bridge>/runtime-startup-binding.json`` — the exact 19-field binding the

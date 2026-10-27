@@ -80,6 +80,10 @@ py -3 -B scripts/verify_oni_model_integration.py
 按 `docs/roadmap-20261027.md` 的 M1 执行，前提条件：
 
 - Terra 源存档（`m1-terra-src`）已经建好，并按命名克隆流程准入。
+- 准备分两步，用 `scripts/prepare_autonomous_run.py`（不再用 Phase 2 专用的 `prepare_dsh_autonomous_run.py`）：
+  1. 游戏关闭时：`py -3 -B scripts/prepare_autonomous_run.py binding --clone-manifest <克隆清单> --clone-save <克隆 .sav> [--checkpoints]`。它校验克隆后写启动绑定和 `reports/m1/runs/<run_id>/prepare-run.json`；游戏在运行时会拒绝。
+  2. 启动游戏、载入绑定的存档后：`py -3 -B scripts/prepare_autonomous_run.py config --run-id <run_id>`。它找到 Probe 的 `session_started` 并写出控制器配置，再用控制器自己的 `load_config` 回读；会话锚点不一致时会逐项列出不一致的字段。输出里的 `next` 是写自主策略的完整命令（含当前存档哈希）。
+  失败时输出一行 JSON 的 `error`，退出码 2，不会写半成品配置。
 - 启动控制器用 `scripts/start-controller.ps1`，观察用 `scripts/watch_controller.py`，两者放在不同的命令里。
 - 每轮结束后按 AGENTS.md 收尾，并核对存档基线（`scripts/save_tree_baseline.py compare`）。
 - 进展要跨进程保留：准备时加 `--checkpoints`（配置里会写入 `checkpoints: true`），游戏的加载指针用 `scripts/set_oni_load_save.py --latest-checkpoint <克隆清单> <克隆 .sav>` 设置。停止时控制器会自动存出下一环检查点，状态文档里的 `checkpoint` 字段会给出结果（`verified` 或 `failed` 及原因）。第一次带检查点的实盘测试要专门核对 `docs/b16-checkpoint-design-20261027.md` 末尾列出的待确认风险。
