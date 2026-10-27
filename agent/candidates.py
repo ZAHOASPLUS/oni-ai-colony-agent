@@ -110,6 +110,8 @@ BUILDING_CANDIDATES = (
 # first one (a Manual Generator makes 400 W; Electrolyzer 120 W plus Liquid
 # Pump 240 W fit), and a second would only be one more idle building.
 SUPPLY_BUILDINGS = ("ManualGenerator", "LiquidPump")
+# Placed ahead of the other placements (see generate_candidates).
+URGENT_PLACEMENTS = frozenset(SUPPLY_BUILDINGS + ("SpaceHeater",))
 SUPPLY_LINK_LABELS = {
     "power": ("Wire", "power"),
     "liquid": ("Liquid Pipe", "water"),
@@ -877,6 +879,13 @@ def _unlock_research_candidate(
     tech = safe_get(state, f"{prefix}.research_tech_id")
     if not isinstance(tech, str) or not tech:
         return None
+    # A finished tech that still leaves the building locked (for example one
+    # the game does not offer in this world) is refused by the executor, so
+    # it is only noted.
+    complete = _observed(state, "research.complete", RESEARCH_COMPLETE_CONTRACT_ID)
+    if isinstance(complete, list) and tech in complete:
+        notes.append(f"unlock_research_complete_still_locked:{building_def_id}:{display_text(tech, 64)}")
+        return None
     if safe_get(state, f"{prefix}.research_prerequisites_complete") is not True:
         notes.append(f"unlock_research_blocked:{building_def_id}:{display_text(tech, 64)}")
         return None
@@ -1504,6 +1513,11 @@ def generate_candidates(
             # so the model knows a supply building (or a route) is missing.
             links = _supply_link_candidates(snapshot, notes)
             items[link_slot:link_slot] = links
+            # Supply buildings and the Space Heater answer something already
+            # wrong (an idle Electrolyzer, an open hypothermia alert), so they
+            # go right after the links: appended last, the priority candidates
+            # pushed them past the budget and the model never saw them.
+            urgent_slot = link_slot + len(links)
             status = building_status(snapshot)
             electrolyzers = status.get("Electrolyzer", {}).get("built")
             if "Electrolyzer" in idle and not links:
@@ -1523,7 +1537,12 @@ def generate_candidates(
                     continue
                 note = oxygen_note if building_def_id in OXYGEN_BUILDING_DEF_IDS else ""
                 building = _building_candidate(snapshot, building_def_id, prefix, label, note)
-                if building is not None:
+                if building is None:
+                    continue
+                if building_def_id in URGENT_PLACEMENTS:
+                    items.insert(urgent_slot, building)
+                    urgent_slot += 1
+                else:
                     items.append(building)
         else:
             # Unbuilt placements are queued, so no new placement is offered; the

@@ -123,6 +123,28 @@ class SpaceHeaterTests(unittest.TestCase):
         result = self.generate(current)
         self.assertIn(f"unlock_research_in_progress:SpaceHeater:{TECH}", result["notes"])
 
+    def test_urgent_placements_survive_the_budget(self) -> None:
+        # Review fix: appended last, the heater and the supply buildings fell
+        # past the 16-item budget behind the priority candidates.
+        def fake(snapshot, building_def_id, prefix, label, note=""):
+            return {
+                "candidate_id": f"{prefix}_1", "summary": label, "action": "place_building_blueprint",
+                "risk": "low", "hint": {"action": "place_building_blueprint"}, "contract_hash": prefix,
+            }
+
+        with mock.patch.object(C, "_building_candidate", side_effect=fake):
+            ids = [item["candidate_id"] for item in self.generate(heater_state(electrolyzers=1))["items"]]
+        for urgent in ("space_heater_1", "manual_generator_1", "liquid_pump_1"):
+            self.assertIn(urgent, ids)
+            self.assertLess(ids.index(urgent), ids.index("priority_80_LifeSupport_4"))
+        self.assertEqual(ids[-2:], ["resume_game", "wait"])
+
+    def test_a_finished_tech_that_leaves_it_locked_is_only_noted(self) -> None:
+        # Review fix: the executor refuses research that is already complete.
+        result = self.generate(heater_state(unlock=(False, "LiquidPiping", True)))
+        self.assertIn("unlock_research_complete_still_locked:SpaceHeater:LiquidPiping", result["notes"])
+        self.assertNotIn("research_LiquidPiping", [item["candidate_id"] for item in result["items"]])
+
     def test_each_powered_group_gets_its_own_generator(self) -> None:
         def wanted(**counts):
             status = {name: {"built": value} for name, value in counts.items()}
