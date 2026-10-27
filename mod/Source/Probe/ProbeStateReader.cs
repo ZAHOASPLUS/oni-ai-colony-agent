@@ -840,13 +840,15 @@ namespace OniAiProbeMod.Probe
                         result.Clear();
                         return result;
                     }
-                    result[key] = new Dictionary<string, object>
+                    Dictionary<string, object> entry = new Dictionary<string, object>
                     {
                         { "instance_id", prefab.InstanceID },
                         { "name", identity.GetProperName() },
                         { "world_id", identityWorldId },
                         { "chore_priorities", priorities }
                     };
+                    AddDuplicantTemperature(identity, entry);
+                    result[key] = entry;
                     scanned++;
                 }
 
@@ -1175,8 +1177,66 @@ namespace OniAiProbeMod.Probe
                 { "designation_kind", designationKind },
                 { "designation_in_progress", designationInProgress },
                 { "safe_mark_candidate", safeMarkCandidate },
-                { "fingerprint", fingerprint }
+                { "fingerprint", fingerprint },
+                // Diagnostic (roadmap B6): it changes every tick, so it is kept
+                // out of the fingerprint and of every command contract.
+                { "temperature_c", CellTemperatureC(cell) }
             };
+        }
+
+        // Roadmap B6: the temperature picture behind a hypothermia or
+        // hyperthermia alert.  The alert itself is per world; this says which
+        // duplicant has it and how cold or hot their surroundings are.  A failed
+        // read leaves nulls and never fails the priority read it rides on.
+        private static void AddDuplicantTemperature(MinionIdentity identity, Dictionary<string, object> entry)
+        {
+            entry["temperature_state"] = null;
+            entry["body_temperature_c"] = null;
+            entry["cell"] = null;
+            entry["cell_temperature_c"] = null;
+            try
+            {
+                TemperatureMonitor.Instance monitor = identity.GetSMI<TemperatureMonitor.Instance>();
+                if (monitor != null)
+                {
+                    entry["temperature_state"] = monitor.IsHypothermic() ? "hypothermic" :
+                        monitor.IsHyperthermic() ? "hyperthermic" : "normal";
+                }
+                PrimaryElement body = identity.GetComponent<PrimaryElement>();
+                if (body != null && IsFiniteKelvin(body.Temperature))
+                {
+                    entry["body_temperature_c"] = Math.Round(body.Temperature - 273.15, 1);
+                }
+                int cell = Grid.PosToCell(identity);
+                if (Grid.IsValidCell(cell))
+                {
+                    entry["cell"] = cell;
+                    entry["cell_temperature_c"] = CellTemperatureC(cell);
+                }
+            }
+            catch
+            {
+                entry["temperature_state"] = null;
+                entry["body_temperature_c"] = null;
+                entry["cell"] = null;
+                entry["cell_temperature_c"] = null;
+            }
+        }
+
+        // Null for vacuum: an empty cell has no meaningful temperature.
+        private static object CellTemperatureC(int cell)
+        {
+            if (!Grid.IsValidCell(cell) || Grid.Mass[cell] <= 0f)
+            {
+                return null;
+            }
+            float kelvin = Grid.Temperature[cell];
+            return IsFiniteKelvin(kelvin) ? (object)Math.Round(kelvin - 273.15, 1) : null;
+        }
+
+        private static bool IsFiniteKelvin(float kelvin)
+        {
+            return !float.IsNaN(kelvin) && !float.IsInfinity(kelvin) && kelvin > 0f;
         }
 
         private static string DigDesignationKind(Diggable designation)
@@ -3835,6 +3895,40 @@ namespace OniAiProbeMod.Probe
             };
             AddDuplicantPriorityQuality(quality, duplicants, duplicantDetailsStatus, duplicantDetailsSource);
             AddDigCellQuality(quality, dig, digStatus, digSource);
+            // Roadmap B6, diagnostic only: candidates read these to explain and
+            // steer, and every command still binds its own contract fields.
+            if (string.Equals(duplicantDetailsStatus, "observed", StringComparison.Ordinal))
+            {
+                AddNestedObjectQuality(
+                    quality,
+                    duplicants,
+                    "by_instance_id",
+                    "duplicants.by_instance_id.",
+                    new[] { "temperature_state", "body_temperature_c", "cell", "cell_temperature_c" },
+                    "observed",
+                    duplicantDetailsSource + "+TemperatureMonitor+PrimaryElement.Temperature+Grid.Temperature",
+                    "duplicant_temperature_field",
+                    "field_native",
+                    "active_world_live_duplicant",
+                    "complete",
+                    null);
+            }
+            if (string.Equals(digStatus, "observed", StringComparison.Ordinal))
+            {
+                AddNestedObjectQuality(
+                    quality,
+                    dig,
+                    "by_cell",
+                    "designations.dig.by_cell.",
+                    new[] { "temperature_c" },
+                    "observed",
+                    digSource + "+Grid.Temperature",
+                    "dig_cell_temperature",
+                    "degC",
+                    "active_world_tracked_cells",
+                    "complete_for_tracked_cell",
+                    null);
+            }
             AddBlueprintQuality(quality, blueprintState, blueprintStatus, blueprintSource);
             return quality;
         }

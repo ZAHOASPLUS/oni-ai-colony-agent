@@ -647,9 +647,30 @@ def _dig_runs(state: Dict[str, Any]) -> List[List[int]]:
     return runs
 
 
-def _dig_candidate(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _dig_candidate(
+    state: Dict[str, Any], exposure: Optional[Mapping[str, Any]] = None
+) -> Optional[Dict[str, Any]]:
     # Longest horizontal run of safe candidates (ties: lowest row, then x).
     runs = sorted(_dig_runs(state), key=lambda run: -len(run))
+    # Roadmap B6: while a temperature alert is open, digging into the coldest
+    # (or hottest) material is what keeps duplicants exposed, so extreme runs
+    # are withheld and the mildest run goes first.  A run whose temperature is
+    # not observed is kept, after the measured ones: an older Probe publishes none.
+    alert = (exposure or {}).get("dig_steering")
+    if alert is not None:
+        cold = alert == "hypothermia"
+        steered = []
+        for run in runs:
+            temperatures = _dig_run_temperatures(state, run)
+            if temperatures is None:
+                steered.append((0, 0.0, run))
+                continue
+            extreme = min(temperatures) if cold else max(temperatures)
+            if (extreme < DIG_COLD_LIMIT_C) if cold else (extreme > DIG_HOT_LIMIT_C):
+                continue
+            # Mildest first: warmest coldest-cell for cold, coolest hottest-cell for heat.
+            steered.append((1, -extreme if cold else extreme, run))
+        runs = [run for _, _, run in sorted(steered, key=lambda item: (item[0] == 0, item[1]))]
     for run in runs:
         try:
             hint = build_mark_dig_hint(state, cells=run)
@@ -657,12 +678,165 @@ def _dig_candidate(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             continue
         first = safe_get(state, f"designations.dig.by_cell.cell_{run[0]}") or {}
         element = display_text(first.get("element_id"), 40)
+        temperatures = _dig_run_temperatures(state, run)
+        climate = ""
+        if temperatures is not None:
+            climate = f" ({min(temperatures):g} to {max(temperatures):g} °C)"
         return _candidate(
             f"dig_{run[0]}_{len(run)}",
-            f"Mark {len(run)} {element} cell(s) for digging starting at x={first.get('x')}, y={first.get('y')}",
+            f"Mark {len(run)} {element} cell(s) for digging starting at x={first.get('x')}, y={first.get('y')}{climate}",
             hint,
         )
     return None
+
+
+# Roadmap B6: temperature observation and the mapping from a temperature alert
+# to candidates.  The game raises ``hypothermia`` / ``hyperthermia`` per
+# duplicant; the Probe now also publishes which duplicant, their body and cell
+# temperatures, and every dig candidate cell's temperature (all diagnostic: no
+# command binds them).  The limits are a first heuristic to check live.
+TEMPERATURE_ALERT_STATES = {"hypothermia": "hypothermic", "hyperthermia": "hyperthermic"}
+DIG_COLD_LIMIT_C = -20.0
+DIG_HOT_LIMIT_C = 60.0
+# The chore group that walks duplicants into unexplored, untempered material.
+TEMPERATURE_RELIEF_GROUP = "Dig"
+MAX_TEMPERATURE_RELIEF_CANDIDATES = 2
+
+
+def _observed_number(
+    state: Mapping[str, Any], path: str, statuses: Sequence[str] = ("observed",)
+) -> Optional[float]:
+    if field_status(state, path) not in statuses:
+        return None
+    value = safe_get(state, path)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def _dig_run_temperatures(state: Mapping[str, Any], run: Sequence[int]) -> Optional[List[float]]:
+    values = [_observed_number(state, f"designations.dig.by_cell.cell_{cell}.temperature_c") for cell in run]
+    if not values or any(value is None for value in values):
+        return None
+    return [value for value in values if value is not None]
+
+
+def temperature_exposure(state: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Which temperature alerts are open and which duplicant has each.
+
+    ``None`` means not observed; an empty list means observed and empty.
+    """
+
+    snapshot = dict(state) if isinstance(state, Mapping) else {}
+    alerts = _observed(snapshot, "alerts", ALERTS_CANONICAL_CONTRACT_ID)
+    open_alerts = (
+        sorted(alert for alert in alerts if alert in TEMPERATURE_ALERT_STATES)
+        if isinstance(alerts, list) else None
+    )
+    exposure: Dict[str, Any] = {
+        "alerts": open_alerts,
+        # The world scan is a rolling window, so an estimated extreme is kept.
+        "world_material_min_c": _observed_number(
+            snapshot, "temperature.active_world_material_min_c", ("observed", "estimated")
+        ),
+        "world_material_max_c": _observed_number(
+            snapshot, "temperature.active_world_material_max_c", ("observed", "estimated")
+        ),
+        "duplicants": None,
+        "dig_steering": None,
+    }
+    by_instance = safe_get(snapshot, "duplicants.by_instance_id")
+    if isinstance(by_instance, Mapping):
+        exposed: List[Dict[str, Any]] = []
+        observed_any = False
+        for key, entry in sorted(by_instance.items()):
+            if not isinstance(entry, Mapping):
+                continue
+            prefix = f"duplicants.by_instance_id.{key}"
+            if field_status(snapshot, f"{prefix}.temperature_state") != "observed":
+                continue
+            state_value = entry.get("temperature_state")
+            if state_value not in ("normal", "hypothermic", "hyperthermic"):
+                continue
+            observed_any = True
+            if state_value == "normal":
+                continue
+            exposed.append({
+                "instance_id": entry.get("instance_id"),
+                "name": display_text(entry.get("name")),
+                "temperature_state": state_value,
+                "body_temperature_c": _observed_number(snapshot, f"{prefix}.body_temperature_c"),
+                "cell_temperature_c": _observed_number(snapshot, f"{prefix}.cell_temperature_c"),
+            })
+        if observed_any:
+            exposure["duplicants"] = exposed
+    # Cold wins over heat when both are open: the cold-start map is where this
+    # was observed (Phase 2: world material down to -86.5 °C).
+    if open_alerts:
+        exposure["dig_steering"] = "hypothermia" if "hypothermia" in open_alerts else "hyperthermia"
+    return exposure
+
+
+def _temperature_notes(exposure: Mapping[str, Any]) -> List[str]:
+    notes: List[str] = []
+    for alert in exposure.get("alerts") or ():
+        duplicants = exposure.get("duplicants")
+        if duplicants is None:
+            notes.append(f"temperature_alert:{alert}:exposed_unobserved")
+            continue
+        wanted = TEMPERATURE_ALERT_STATES[alert]
+        count = sum(1 for entry in duplicants if entry.get("temperature_state") == wanted)
+        notes.append(f"temperature_alert:{alert}:exposed={count}")
+    return notes
+
+
+def _temperature_relief_candidates(
+    state: Dict[str, Any], exposure: Mapping[str, Any]
+) -> List[Dict[str, Any]]:
+    """Lower the Dig priority of a duplicant who has an open temperature alert.
+
+    The smallest move the action catalog has: less digging keeps the duplicant
+    in the tempered base instead of at the cold (or hot) dig face, while the
+    alert clears once they recover.  Built by the ordinary priority builder, so
+    the command binds the current priority under its own contract.
+    """
+
+    result: List[Dict[str, Any]] = []
+    open_alerts = exposure.get("alerts") or ()
+    for entry in exposure.get("duplicants") or ():
+        if len(result) >= MAX_TEMPERATURE_RELIEF_CANDIDATES:
+            break
+        alert = next(
+            (name for name, wanted in TEMPERATURE_ALERT_STATES.items()
+             if wanted == entry.get("temperature_state") and name in open_alerts),
+            None,
+        )
+        instance_id = entry.get("instance_id")
+        if alert is None or type(instance_id) is not int or instance_id <= 0:
+            continue
+        current = safe_get(
+            state, f"duplicants.by_instance_id.id_{instance_id}.chore_priorities.{TEMPERATURE_RELIEF_GROUP}"
+        )
+        if type(current) is not int or not 0 < current <= 5:
+            continue
+        try:
+            hint = build_duplicant_priority_hint(
+                state, instance_id=instance_id, chore_group=TEMPERATURE_RELIEF_GROUP, priority=current - 1
+            )
+        except ValueError:
+            continue
+        detail = [entry["temperature_state"]]
+        if entry.get("body_temperature_c") is not None:
+            detail.append(f"body {entry['body_temperature_c']:g} °C")
+        if entry.get("cell_temperature_c") is not None:
+            detail.append(f"surroundings {entry['cell_temperature_c']:g} °C")
+        result.append(_candidate(
+            f"priority_{instance_id}_{TEMPERATURE_RELIEF_GROUP}_{current - 1}",
+            f"Lower {entry['name']}'s {TEMPERATURE_RELIEF_GROUP} priority from {current} to {current - 1}"
+            f" to keep them away from the dig face ({', '.join(detail)})",
+            hint,
+        ))
+    return result
 
 
 def _research_candidates(state: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1141,6 +1315,8 @@ def generate_candidates(
     notes: List[str] = []
     snapshot = dict(state) if isinstance(state, Mapping) else {}
     paused = _observed(snapshot, "game.paused", GAME_PAUSED_CONTRACT_ID)
+    exposure = temperature_exposure(snapshot)
+    notes.extend(_temperature_notes(exposure))
     if not isinstance(paused, bool):
         blockers.append("game_paused_unobserved")
     elif not paused:
@@ -1161,11 +1337,20 @@ def generate_candidates(
         # Supply links are inserted here once known (see below): the priority
         # candidates alone can fill the budget, and a link is what makes an
         # already-built building work.
+        # Roadmap B6: the relief for an open temperature alert goes ahead of
+        # the generic priority changes, which can fill the budget on their own.
+        relief = _temperature_relief_candidates(snapshot, exposure)
+        items.extend(relief)
         link_slot = len(items)
+        relief_ids = {item["candidate_id"] for item in relief}
         items.extend(
-            _autonomous_priority_candidates(snapshot) if autonomous else _priority_candidates(snapshot)
+            item
+            for item in (
+                _autonomous_priority_candidates(snapshot) if autonomous else _priority_candidates(snapshot)
+            )
+            if item["candidate_id"] not in relief_ids
         )
-        dig = _dig_candidate(snapshot)
+        dig = _dig_candidate(snapshot, exposure)
         if dig is not None:
             items.append(dig)
         oxygen_note = _oxygen_note(oxygen_balance(snapshot))

@@ -48,6 +48,7 @@ from agent.candidates import (
     electrolyzer_supply_offered,
     generate_candidates,
     oxygen_balance,
+    temperature_exposure,
 )
 
 
@@ -408,6 +409,11 @@ def colony_summary(state: Mapping[str, Any]) -> Dict[str, Any]:
         # Built and working counts per placeable building, so the model sees an
         # idle building it already has instead of placing another (B14).
         "buildings": building_status(snapshot),
+        # Roadmap B6: open temperature alerts, who has them and how cold or hot
+        # their surroundings are, beside the world's material extremes.
+        "temperature": {
+            key: value for key, value in temperature_exposure(snapshot).items() if key != "dig_steering"
+        },
     }
 
 
