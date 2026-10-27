@@ -262,3 +262,51 @@ def _select(
         "root_save_sha256": root["save_sha256"],
         "root_manifest_sha256": root["manifest_sha256"],
     }
+
+
+def loader_path_id_upper(path: pathlib.Path) -> str:
+    """The Probe/startup-binding path id: sha256 of the full resolved path, upper-cased.
+
+    Named-clone manifests hash ``path.lower()``; the runtime startup contract
+    hashes the upper-cased path (see ``prepare_dsh_autonomous_run.loader_path_id``
+    and ``oni_autonomous.load_config``).
+    """
+
+    text = str(pathlib.Path(path).expanduser().resolve()).rstrip("\\/").upper()
+    return _digest(text.encode("utf-8"))
+
+
+def loader_target(clone_manifest: pathlib.Path, clone_save: pathlib.Path) -> Dict[str, Any]:
+    """What a launch should load: the newest intact link (the clone when none)."""
+
+    latest = select_latest_checkpoint(clone_manifest, clone_save)
+    save = pathlib.Path(latest["save_path"])
+    return {
+        "index": latest["index"],
+        "save_path": save,
+        "save_sha256": latest["save_sha256"],
+        "save_length": save.stat().st_size,
+        "path_id_upper": loader_path_id_upper(save),
+        "chain": latest["chain"],
+    }
+
+
+def match_loader_anchors(
+    clone_manifest: pathlib.Path,
+    clone_save: pathlib.Path,
+    *,
+    loader_save_sha256: str,
+    loader_path_id_upper_value: str,
+) -> Dict[str, Any]:
+    """Accept the external loader anchors only for the newest link of the chain.
+
+    Loading the clone or an older checkpoint while a newer one exists would
+    silently drop the progress the newer checkpoint holds, so it is refused.
+    """
+
+    target = loader_target(clone_manifest, clone_save)
+    if target["save_sha256"] != loader_save_sha256 or target["path_id_upper"] != loader_path_id_upper_value:
+        raise CheckpointChainError(
+            f"The loader anchors are not the newest link of the chain (index {target['index']})."
+        )
+    return target

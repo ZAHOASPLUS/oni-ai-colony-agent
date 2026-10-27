@@ -14,7 +14,13 @@ Only anchors that can be computed truthfully from this machine are computed;
 the remaining evidence anchors are explicit placeholders recorded as such.
 
 Usage:
-    python -B scripts/prepare_dsh_autonomous_run.py [--run-id ID] [--stem NAME]
+    python -B scripts/prepare_dsh_autonomous_run.py [--run-id ID] [--stem NAME] [--checkpoints]
+
+With ``--checkpoints`` the binding requests the newest verified link of the
+clone's checkpoint chain (the clone itself while there is none; see
+``agent/checkpoint_chain.py``) and the config sets ``checkpoints: true``, so a
+stop saves the next link.  Point the game at the same file with
+``scripts/set_oni_load_save.py --latest-checkpoint``.
 """
 
 from __future__ import annotations
@@ -100,6 +106,8 @@ def main() -> int:
     parser.add_argument("--run-id", default="dsh-20261025-r01")
     parser.add_argument("--stem", default="oni-dsh-20261025")
     parser.add_argument("--controller-id", default=CONTROLLER_ID)
+    parser.add_argument("--checkpoints", action="store_true",
+                        help="load the newest checkpoint of the clone and save the next one on stop")
     parser.add_argument("--goal", default=(
         "Keep the DeepSeek-dedicated test colony alive and progressing with conservative, "
         "reversible actions: oxygen, food, water, sanitation, power, temperature, work "
@@ -122,6 +130,14 @@ def main() -> int:
         return 2
 
     report: dict = {"schema": "oni.phase2.prepare-run.v1", "run_id": args.run_id}
+    loader_save = clone_save
+    if args.checkpoints:
+        sys.path.insert(0, str(ROOT))
+        from agent.checkpoint_chain import loader_target  # noqa: E402
+
+        target = loader_target(manifest, clone_save)
+        loader_save = pathlib.Path(target["save_path"])
+        report["checkpoint"] = {"index": target["index"], "chain": target["chain"], "save": str(loader_save)}
 
     # --- binding document -------------------------------------------------
     now = dt.datetime.now(dt.timezone.utc).astimezone()
@@ -146,9 +162,9 @@ def main() -> int:
             "dll": sha256_file(DEV_MOD),
             "files": sorted(p.name for p in DEV_MOD.parent.iterdir()),
         }),
-        "requested_loader_path_id_upper": loader_path_id(clone_save),
-        "requested_loader_save_sha256": sha256_file(clone_save),
-        "requested_loader_save_length": clone_save.stat().st_size,
+        "requested_loader_path_id_upper": loader_path_id(loader_save),
+        "requested_loader_save_sha256": sha256_file(loader_save),
+        "requested_loader_save_length": loader_save.stat().st_size,
         "created_at": now.isoformat(timespec="microseconds"),
     }
     binding["document_hash"] = canonical_hash(binding)
@@ -214,6 +230,7 @@ def main() -> int:
         "poll_seconds": 5.0,
         "model_deadline_seconds": 120.0,
         "secrets_dir": None,
+        "checkpoints": True if args.checkpoints else None,
     }
     config = {key: value for key, value in config.items() if value is not None}
     config_path = ROOT / "reports" / "phase2" / "runs" / args.run_id / "autonomous-controller-config.v1.json"

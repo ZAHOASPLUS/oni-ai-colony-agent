@@ -11,8 +11,11 @@ Config schema oni.autonomous-controller-config.v1 requires bridge_dir,
 clone_manifest, clone_manifest_sha256, clone_save, clone_preview, run_id,
 controller_id, session_id, world_id, and startup_expectations (all nine external
 startup anchors). Paths must be absolute. Optional fields are goal,
-poll_seconds, model_deadline_seconds, secrets_dir and round_command_limit
-(a positive action bound, unlimited when absent). The clone manifest must
+poll_seconds, model_deadline_seconds, secrets_dir, round_command_limit
+(a positive action bound, unlimited when absent) and checkpoints (boolean):
+with checkpoints the run must load the newest verified link of the clone's
+checkpoint chain, and a stop saves the next link once custody is quiescent
+and the policy is sealed (scripts/stop_checkpoint.py). The clone manifest must
 be the versioned named-test-clone manifest, whose exact save and PNG identities
 are verified. Main owns preparing the game, policy and trusted Bridge outputs.
 """
@@ -40,6 +43,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from agent.action_policy import action_policy_hash, action_policy_is_valid
 from agent.action_outcomes import command_intent_hash
 from agent.canonical_hash import canonical_bytes, loads_strict
+from agent.checkpoint_chain import CheckpointChainError, match_loader_anchors
 from agent.clone_launch_guard import validate_clone_launch
 from agent.command_custody import approval_recovery_blockers, lifecycle_custody, lifecycle_recovery_blockers, read_stable_bytes, validation_control_blockers
 from agent.command_queue import COMMAND_DIRS, _is_unresolved_outcome_unknown, has_operator_resolution
@@ -62,6 +66,7 @@ from bridge.oni_bridge import (
     watch,
     write_outputs,
 )
+from scripts.stop_checkpoint import StopCheckpoint
 
 CONFIG_SCHEMA = "oni.autonomous-controller-config.v1"
 STATUS_SCHEMA = "oni.autonomous-controller-status.v1"
@@ -109,7 +114,7 @@ def load_config(path: pathlib.Path) -> Dict[str, Any]:
         "schema", "bridge_dir", "clone_manifest", "clone_manifest_sha256", "clone_save", "clone_preview",
         "run_id", "controller_id", "session_id", "world_id", "startup_expectations",
     }
-    optional = {"goal", "poll_seconds", "model_deadline_seconds", "secrets_dir", "round_command_limit"}
+    optional = {"goal", "poll_seconds", "model_deadline_seconds", "secrets_dir", "round_command_limit", "checkpoints"}
     if not required <= set(config) or set(config) - required - optional or config.get("schema") != CONFIG_SCHEMA:
         raise ValueError("controller config has an invalid exact schema/field set")
     for name in ("bridge_dir", "clone_manifest", "clone_save", "clone_preview"):
@@ -142,9 +147,30 @@ def load_config(path: pathlib.Path) -> Dict[str, Any]:
     # Keep both contracts explicit instead of comparing different digests.
     loader_path_text = str(config["clone_save"].expanduser().resolve()).rstrip("\\/").upper()
     loader_path_id_upper = "sha256:" + hashlib.sha256(loader_path_text.encode("utf-8")).hexdigest()
-    if clone["clone_save_sha256"] != anchors["loader_save_sha256"] or loader_path_id_upper != anchors["loader_path_id_upper"]:
-        raise ValueError("configured clone does not match the external loader anchors")
-    config["save_id_hash"] = clone["clone_save_sha256"]
+    if "checkpoints" in config and type(config["checkpoints"]) is not bool:
+        raise ValueError("checkpoints must be a boolean when supplied")
+    config["checkpoints"] = bool(config.get("checkpoints", False))
+    if config["checkpoints"]:
+        # With checkpoints the run continues from the newest verified link of
+        # the clone's chain (the clone itself while there is none); an older
+        # link would silently drop progress, so only the newest is admitted.
+        try:
+            target = match_loader_anchors(
+                config["clone_manifest"], config["clone_save"],
+                loader_save_sha256=anchors["loader_save_sha256"],
+                loader_path_id_upper_value=anchors["loader_path_id_upper"],
+            )
+        except CheckpointChainError as exc:
+            raise ValueError(f"configured clone does not match the external loader anchors: {exc}") from exc
+        config["active_save"] = target["save_path"]
+        config["checkpoint_index"] = target["index"]
+        config["save_id_hash"] = target["save_sha256"]
+    else:
+        if clone["clone_save_sha256"] != anchors["loader_save_sha256"] or loader_path_id_upper != anchors["loader_path_id_upper"]:
+            raise ValueError("configured clone does not match the external loader anchors")
+        config["active_save"] = config["clone_save"]
+        config["checkpoint_index"] = 0
+        config["save_id_hash"] = clone["clone_save_sha256"]
     config["clone_identity"] = {key: clone[key] for key in ("manifest_sha256", "clone_save_sha256", "clone_preview_sha256", "clone_save_path_id", "clone_preview_path_id")}
     config["clone_identity"]["clone_save_path_id_upper"] = loader_path_id_upper
     goal = config.get("goal", "Keep the colony alive with conservative, reversible actions.")
@@ -549,20 +575,39 @@ def start_controller(config: Mapping[str, Any]) -> int:
         for signum in previous_handlers:
             signal.signal(signum, request_stop)
 
+        checkpoint = (
+            StopCheckpoint(
+                bridge_dir=root,
+                clone_manifest=config["clone_manifest"],
+                clone_save=config["clone_save"],
+                run_id=config["run_id"],
+                expected_mod_version=config["startup_expectations"]["mod_version"],
+            )
+            if config.get("checkpoints")
+            else None
+        )
+
         def stop_requested() -> bool:
             nonlocal interrupted, progress_signature, progress_at
             if interrupted:
                 _request_state(config, "stopped")
                 interrupted = False
             with lifecycle_custody(root):
-                policy, _, control = _bound_inputs(config)
+                policy, latest_state, control = _bound_inputs(config)
                 if control is None:
                     raise ValueError("running controller lost its authority control record")
                 queue = _queue_view(root)
                 requested = control["desired_state"]
                 safe = queue["quiescent"]
+                checkpointing = False
                 if requested == "stopped" and safe:
                     _seal_stopped_policy(config, policy)
+                    # The Mod saves only while the action policy is disabled and
+                    # unbound, i.e. after the seal; the Bridge must keep running
+                    # until a later snapshot confirms the save, so the stop
+                    # completes only when the checkpoint has finished either way.
+                    if checkpoint is not None:
+                        checkpointing = checkpoint.step(latest_state) == "pending"
                 elif requested != "running" and safe and policy.get("actions_enabled") is True:
                     disabled = dict(policy)
                     disabled["actions_enabled"] = False
@@ -572,15 +617,20 @@ def start_controller(config: Mapping[str, Any]) -> int:
                 status = controller_status(config)
                 status.pop("controller_runtime", None)
                 status["controller_pid"] = os.getpid()
-                status["phase"] = "stopped" if requested == "stopped" and safe else status["phase"]
+                if requested == "stopped" and safe:
+                    status["phase"] = "checkpointing" if checkpointing else "stopped"
+                if checkpoint is not None:
+                    status["checkpoint"] = dict(checkpoint.record)
                 write_autonomous_document(root / STATUS_NAME, status)
                 progress = {key: status[key] for key in ("phase", "desired_state", "current_objective", "last_action", "result", "blockers")}
+                if checkpoint is not None:
+                    progress["checkpoint"] = status["checkpoint"]
                 signature = canonical_bytes(progress)
                 current = time.monotonic()
                 if signature != progress_signature or current - progress_at >= 30.0:
                     print(json.dumps(progress, ensure_ascii=False, allow_nan=False), flush=True)
                     progress_signature, progress_at = signature, current
-                return requested == "stopped" and safe
+                return requested == "stopped" and safe and not checkpointing
 
         try:
             print(json.dumps({"phase": "controller_started", "run_id": config["run_id"], "controller_id": config["controller_id"], "controller_pid": os.getpid(), "scope": "foreground watch of the existing admitted run"}, ensure_ascii=False), flush=True)

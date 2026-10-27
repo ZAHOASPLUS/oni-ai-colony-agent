@@ -9,6 +9,11 @@ Usage:
     python -B scripts/set_oni_load_save.py --save "<path to .sav>"
     python -B scripts/set_oni_load_save.py --restore "<backup path>"
     python -B scripts/set_oni_load_save.py --show
+    python -B scripts/set_oni_load_save.py --latest-checkpoint "<clone manifest>" "<clone .sav>"
+
+``--latest-checkpoint`` points the game at the newest verified link of the
+clone's checkpoint chain (the clone itself while there is none) and refuses a
+broken chain (``agent/checkpoint_chain.py``).
 """
 
 from __future__ import annotations
@@ -103,9 +108,23 @@ def main() -> int:
     group.add_argument("--save")
     group.add_argument("--restore")
     group.add_argument("--show", action="store_true")
+    group.add_argument("--latest-checkpoint", nargs=2, metavar=("CLONE_MANIFEST", "CLONE_SAVE"))
     args = parser.parse_args()
     if args.show:
         return show()
+    if args.latest_checkpoint:
+        root = pathlib.Path(__file__).resolve().parents[1]
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from agent.checkpoint_chain import CheckpointChainError, loader_target  # noqa: E402
+
+        try:
+            target = loader_target(pathlib.Path(args.latest_checkpoint[0]), pathlib.Path(args.latest_checkpoint[1]))
+        except CheckpointChainError as exc:
+            print(f"checkpoint chain refused: {exc}")
+            return 4
+        print(json.dumps({"checkpoint_index": target["index"], "chain": target["chain"]}))
+        return set_value(pathlib.Path(target["save_path"]))
     if args.restore:
         return restore(pathlib.Path(args.restore))
     return set_value(pathlib.Path(args.save))
