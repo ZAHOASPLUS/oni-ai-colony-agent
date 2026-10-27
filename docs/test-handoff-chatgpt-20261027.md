@@ -85,6 +85,7 @@ py -3 -B scripts/verify_oni_model_integration.py
   2. 启动游戏、载入绑定的存档后：`py -3 -B scripts/prepare_autonomous_run.py config --run-id <run_id>`。它找到 Probe 的 `session_started` 并写出控制器配置，再用控制器自己的 `load_config` 回读；会话锚点不一致时会逐项列出不一致的字段。输出里的 `next` 是写自主策略的完整命令（含当前存档哈希）。
   失败时输出一行 JSON 的 `error`，退出码 2，不会写半成品配置。
 - 启动控制器用 `scripts/start-controller.ps1`，观察用 `scripts/watch_controller.py`，两者放在不同的命令里。
+- 暂停/恢复由控制器的节奏规则决定（B7），不再由模型选择。实盘时核对 `model-loop.json`：`pause_cadence` 显示当前是运行还是暂停、已运行多少周期或暂停中已做几项改动；规则发出的命令在 `last_event` 中为 `rule_choice`，命令证据的 `model` 是 `rule:pause-cadence.v1`。如果游戏长时间停在暂停状态，先看 `pause_cadence.resume_offered`：为 false 表示有紧急告警，这是预期行为。
 - 每轮结束后按 AGENTS.md 收尾，并核对存档基线（`scripts/save_tree_baseline.py compare`）。
 - 进展要跨进程保留：准备时加 `--checkpoints`（配置里会写入 `checkpoints: true`），游戏的加载指针用 `scripts/set_oni_load_save.py --latest-checkpoint <克隆清单> <克隆 .sav>` 设置。停止时控制器会自动存出下一环检查点，状态文档里的 `checkpoint` 字段会给出结果（`verified` 或 `failed` 及原因）。第一次带检查点的实盘测试要专门核对 `docs/b16-checkpoint-design-20261027.md` 末尾列出的待确认风险。
 

@@ -137,6 +137,17 @@ MAX_REQUESTS_PER_HOUR = 30
 # placement that can never be built must not lock the pause out forever, because
 # the cancel that clears it is itself a paused-only action.
 CONSTRUCTION_RUN_HOLD_SECONDS = 150.0
+# Pause cadence (roadmap B7): in autonomous mode pausing and resuming are rule
+# decisions, not model calls.  19 of the 32 commands Phase 2 published were
+# ``set_paused`` (59 %), each costing a model call and a command round trip.
+# The game runs for at least ``RUN_WINDOW_CYCLES`` of game time, then the rule
+# pauses; the model makes the paused-only changes, and the rule resumes once the
+# model answers ``wait``, has made ``MAX_PAUSED_ACTIONS`` changes, or has nothing
+# left to change.  The rule goes through the same candidate, publication and
+# authorization path as a model choice; its evidence names it as the "model".
+PAUSE_CADENCE_RULE = "rule:pause-cadence.v1"
+RUN_WINDOW_CYCLES = 0.25
+MAX_PAUSED_ACTIONS = 3
 SAME_SET_RECHECK_SECONDS = 300.0
 DECISION_TTL_SECONDS = 120.0
 FAILURE_BACKOFF_SECONDS = (60.0, 120.0, 300.0)
@@ -285,6 +296,8 @@ class _Request:
     done: threading.Event = dataclasses.field(default_factory=threading.Event)
     result: Optional[Dict[str, Any]] = None
     abandoned: bool = False
+    # Asked while the game was paused: a ``wait`` answer then means "resume".
+    paused: bool = False
 
 
 def choice_response_schema(candidate_ids: Sequence[str]) -> Dict[str, Any]:
@@ -560,17 +573,32 @@ def build_choice_payload(
     }
 
 
-def build_choice_prompt_text(payload: Mapping[str, Any]) -> str:
+# Rules 1-4 of the choice prompt.  Without the pause cadence the model owns
+# pause and resume; with it (autonomous mode, roadmap B7) the controller does,
+# and ``wait`` while paused is how the model hands the game back.
+_MODEL_PAUSE_RULES = (
+    "1. The candidate list is generated from the colony's current pause state, so it is sometimes short. While the game is running, only pause_game and wait are offered; while it is paused, the colony's own work is frozen and only resume_game starts it again.",
+    "2. Building, digging, duplicant priorities and research can only be CHANGED while the game is paused. So when the colony needs a change (low oxygen, falling food, idle duplicants, an unbuilt blueprint) and only pause_game is offered, choose pause_game: the next candidate list will contain the change you need.",
+    "3. A placed blueprint, a new priority or new research does NOTHING while the game stays paused. After you have made a change, choose resume_game so duplicants actually perform it. Never choose pause_game again while the game is already paused and pending work exists.",
+    "4. Choose wait only when the colony is genuinely fine and nothing needs changing, and never twice in a row while the same problem is still open.",
+)
+_CADENCE_RULES = (
+    "1. The controller pauses and resumes the game itself: it lets the game run for a while, then pauses it so you can make changes. While the game is running you can only change research or wait.",
+    "2. Building, digging and duplicant priorities are offered only while the game is paused. Make the change the colony needs most first; you may make up to "
+    f"{MAX_PAUSED_ACTIONS} changes per pause.",
+    "3. A placed blueprint, a new priority or new research does NOTHING until the game runs. When this pause needs no further change, choose wait: the controller then resumes the game so duplicants carry the changes out.",
+    "4. Do not choose wait while a candidate addresses an open problem that previous choices have not changed yet.",
+)
+
+
+def build_choice_prompt_text(payload: Mapping[str, Any], *, pause_cadence: bool = False) -> str:
     # The rules block deliberately contains no blank line: the JSON payload must
     # stay the first content after the single blank line that follows the
     # instruction, which is how the payload is recovered from a recorded prompt.
     rules = "\n".join(
         (
             "Rules for choosing:",
-            "1. The candidate list is generated from the colony's current pause state, so it is sometimes short. While the game is running, only pause_game and wait are offered; while it is paused, the colony's own work is frozen and only resume_game starts it again.",
-            "2. Building, digging, duplicant priorities and research can only be CHANGED while the game is paused. So when the colony needs a change (low oxygen, falling food, idle duplicants, an unbuilt blueprint) and only pause_game is offered, choose pause_game: the next candidate list will contain the change you need.",
-            "3. A placed blueprint, a new priority or new research does NOTHING while the game stays paused. After you have made a change, choose resume_game so duplicants actually perform it. Never choose pause_game again while the game is already paused and pending work exists.",
-            "4. Choose wait only when the colony is genuinely fine and nothing needs changing, and never twice in a row while the same problem is still open.",
+            *(_CADENCE_RULES if pause_cadence else _MODEL_PAUSE_RULES),
             "5. Prefer the change that addresses the most urgent observed problem first: breathable air, then food, then water and sanitation, then power and temperature, then work priorities, research, building and production.",
             "6. If an alert is open or a store is falling and the previous choices did not change it, the colony is stuck: prefer any candidate that changes the game state over wait or a repeat of the same action.",
             "--- end of rules ---",
@@ -770,6 +798,11 @@ class ModelLoop:
         # which can only delay a cancel, never hasten one.
         self._blueprint_session: Optional[str] = None
         self._blueprint_first_seen: Dict[str, Optional[float]] = {}
+        # Pause cadence state (see PAUSE_CADENCE_RULE), per Probe session.
+        self._cadence_session: Optional[str] = None
+        self._run_started_cycles: Optional[float] = None
+        self._paused_actions = 0
+        self._paused_wait = False
         self.autonomous = bool(autonomous)
         self._autonomous_identity = dict(autonomous_identity or {})
         if round_command_limit is not None and (not self.autonomous or type(round_command_limit) is not int or round_command_limit <= 0):
@@ -834,13 +867,20 @@ class ModelLoop:
                 self._hold_construction_run(latest, candidate_set, current)
 
         self._harvest(current)
+        if not blockers and self._decision is None and self._request is None:
+            rule = self._pause_cadence(latest, candidate_set, current)
+            if rule is not None:
+                self._decision = rule
         published: Optional[Dict[str, Any]] = None
         if self._decision is not None:
             if current - self._decision["decided_monotonic"] > DECISION_TTL_SECONDS:
                 self._event("decision_expired", candidate_id=self._decision["candidate"]["candidate_id"])
                 self._decision = None
             elif not blockers:
+                deciding = self._decision
                 published = self._publish(root, latest, frame, policy, candidate_set)
+                if published is not None and not deciding.get("rule") and safe_get(latest or {}, "game.paused") is True:
+                    self._paused_actions += 1
         if not blockers and published is None and self._decision is None:
             self._submit(latest, candidate_set, outcomes, advice, current)
 
@@ -969,6 +1009,116 @@ class ModelLoop:
             CONSTRUCTION_RUN_HOLD_SECONDS - held_for, 1
         )
         candidate_set["construction_run_waiting"] = waiting
+
+    def _pause_cadence(
+        self,
+        latest: Optional[Mapping[str, Any]],
+        candidate_set: Dict[str, Any],
+        current: float,
+    ) -> Optional[Dict[str, Any]]:
+        """Take pause and resume away from the model; see ``PAUSE_CADENCE_RULE``.
+
+        Returns a rule decision when the cadence says to pause or resume now.
+        Either way ``pause_game`` and ``resume_game`` leave the model's list;
+        the full list stays in ``catalog_items`` for publication.  Without an
+        observed game time the running game keeps offering the pause to the
+        model, as before, because the run window cannot be measured.
+        """
+
+        if not self.autonomous:
+            return None
+        items = candidate_set.get("items")
+        if not isinstance(items, list):
+            return None
+        state = latest if isinstance(latest, Mapping) else {}
+        session = state.get("session_id")
+        if session != self._cadence_session:
+            self._cadence_session = session if isinstance(session, str) else None
+            self._run_started_cycles = None
+            self._paused_actions = 0
+            self._paused_wait = False
+        by_id = {str(item.get("candidate_id")): item for item in items if isinstance(item, Mapping)}
+        paused = safe_get(state, "game.paused")
+        if paused is False:
+            self._paused_actions = 0
+            self._paused_wait = False
+            value = state.get("game_time_cycles")
+            if not (
+                field_status(state, "game_time_cycles") == "observed"
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+            ):
+                self._run_started_cycles = None
+                return None
+            if self._run_started_cycles is None or value < self._run_started_cycles:
+                self._run_started_cycles = float(value)
+            ran = float(value) - self._run_started_cycles
+            candidate_set["catalog_items"] = list(items)
+            candidate_set["items"] = [item for item in items if item.get("candidate_id") != "pause_game"]
+            candidate_set["pause_cadence"] = {
+                "state": "running", "ran_cycles": round(ran, 3), "window_cycles": RUN_WINDOW_CYCLES,
+            }
+            if "pause_game" in by_id and ran >= RUN_WINDOW_CYCLES:
+                return self._rule_decision(
+                    candidate_set, by_id["pause_game"],
+                    f"the game ran {ran:.2f} cycles (window {RUN_WINDOW_CYCLES}); pause so the model can act",
+                    current,
+                )
+            return None
+        if paused is not True:
+            return None
+        self._run_started_cycles = None
+        resume = by_id.get("resume_game")
+        candidate_set["catalog_items"] = list(items)
+        remaining = [item for item in items if item.get("candidate_id") != "resume_game"]
+        candidate_set["items"] = remaining
+        candidate_set["pause_cadence"] = {
+            "state": "paused", "actions": self._paused_actions, "max_actions": MAX_PAUSED_ACTIONS,
+            "model_waited": self._paused_wait, "resume_offered": resume is not None,
+        }
+        if resume is None:
+            # A genuine emergency refuses the resume; the model keeps acting.
+            return None
+        notes = list(candidate_set.get("notes") or [])
+        notes.append("pause_cadence:choosing_wait_resumes_the_game")
+        candidate_set["notes"] = notes
+        if self._paused_wait:
+            reason = "the model chose wait while paused"
+        elif self._paused_actions >= MAX_PAUSED_ACTIONS:
+            reason = f"the model made {self._paused_actions} changes while paused"
+        elif not any(item.get("candidate_id") != WAIT_CANDIDATE_ID for item in remaining):
+            reason = "nothing is left to change while paused"
+        else:
+            return None
+        return self._rule_decision(candidate_set, resume, reason + "; resume so duplicants carry it out", current)
+
+    def _rule_decision(
+        self, candidate_set: Mapping[str, Any], candidate: Mapping[str, Any], reason: str, current: float
+    ) -> Dict[str, Any]:
+        self._request_counter += 1
+        basis = json.dumps(
+            {
+                "rule": PAUSE_CADENCE_RULE,
+                "candidate_id": candidate["candidate_id"],
+                "candidate_set_hash": candidate_set.get("candidate_set_hash"),
+                "reason": reason,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self._event("rule_choice", rule=PAUSE_CADENCE_RULE, candidate_id=candidate["candidate_id"], reason=reason)
+        return {
+            "request_id": f"rule-{int(time.time())}-{self._request_counter}",
+            "candidate_set_hash": str(candidate_set.get("candidate_set_hash")),
+            "candidate": dict(candidate),
+            "reason": reason[:MAX_REASON_CHARS],
+            "model": PAUSE_CADENCE_RULE,
+            "prompt_hash": _sha256_text(basis),
+            "response_hash": _sha256_text(str(candidate["candidate_id"])),
+            "decided_monotonic": current,
+            "rule": PAUSE_CADENCE_RULE,
+        }
 
     def _proposal_blocked_only_by_own_pending(
         self, root: pathlib.Path, propose: Mapping[str, Any]
@@ -1130,6 +1280,8 @@ class ModelLoop:
         self._event("model_choice", candidate_id=candidate_id, reason=choice.get("reason"), **details)
         self._last_choice = self._last_event
         if candidate_id == WAIT_CANDIDATE_ID:
+            if request.paused:
+                self._paused_wait = True
             return
         self._decision = {
             "request_id": request.request_id,
@@ -1189,7 +1341,7 @@ class ModelLoop:
             autonomous=self.autonomous,
             notes=candidate_set.get("notes") or (),
         )
-        prompt_text = build_choice_prompt_text(payload)
+        prompt_text = build_choice_prompt_text(payload, pause_cadence=candidate_set.get("pause_cadence") is not None)
         if estimate_tokens(prompt_text) > MAX_PROMPT_TOKENS:
             self._next_request_at = current + FAILURE_BACKOFF_SECONDS[-1]
             self._event("prompt_budget_exceeded", estimated_tokens=estimate_tokens(prompt_text))
@@ -1204,6 +1356,7 @@ class ModelLoop:
             submitted_at=now().isoformat(timespec="seconds"),
             started=current,
             deadline=current + self._deadline_seconds,
+            paused=safe_get(latest or {}, "game.paused") is True,
         )
         self._request = request
         self._request_starts.append(current)
@@ -1284,7 +1437,9 @@ class ModelLoop:
         decision = self._decision
         assert decision is not None
         chosen = decision["candidate"]
-        current = {item["candidate_id"]: item for item in candidate_set.get("items") or []}
+        # A rule decision names a candidate the cadence withholds from the model.
+        pool = candidate_set.get("catalog_items") if decision.get("rule") else candidate_set.get("items")
+        current = {item["candidate_id"]: item for item in pool or []}
         match = current.get(chosen["candidate_id"])
         if (
             match is None
@@ -1682,6 +1837,7 @@ class ModelLoop:
                 "frame_id": frame.get("frame_id"),
             },
             "candidate_set_hash": candidate_set.get("candidate_set_hash"),
+            "pause_cadence": candidate_set.get("pause_cadence"),
             "candidates": [
                 {key: item.get(key) for key in ("candidate_id", "summary", "action", "risk", "contract_hash")}
                 for item in candidate_set.get("items") or []
