@@ -1,6 +1,6 @@
 # B16 设计：让克隆进展跨进程延续
 
-日期：2026-10-27 Asia/Tokyo。状态：**设计已定（D4 选 b）；清单链与选择逻辑已离线实现（见 `agent/checkpoint_chain.py`），存档接入与实盘验证未做**。路线图条目：[roadmap-20261027.md](roadmap-20261027.md) 的 B16。
+日期：2026-10-27 Asia/Tokyo。状态：**设计已定（D4 选 b）；清单链、选择逻辑、停止时存档和从最新检查点加载均已离线实现并自测（2026-10-27）；实盘验证未做**。路线图条目：[roadmap-20261027.md](roadmap-20261027.md) 的 B16。
 
 ## 问题
 
@@ -69,3 +69,20 @@ Phase 2 每次启动游戏都从同一份克隆存档加载，会话起始周期
 | ID | 决策 | 默认建议 |
 |---|---|---|
 | D4 | 检查点没有游戏生成的 `.png`：复制父克隆的 `.png` 作为占位（a），还是修订规则，以清单链作为身份证明（b） | (b)：占位图会让人误以为它是这个存档的截图，清单链能证明的东西更多 **→ 用户选择 (b)** |
+
+## 实现记录（2026-10-27，离线）
+
+| 部分 | 位置 | 说明 |
+|---|---|---|
+| 清单链与最新检查点选择 | `agent/checkpoint_chain.py` | `select_latest_checkpoint`、`build_checkpoint_manifest`、`publish_checkpoint_manifest`；新增 `loader_target`、`match_loader_anchors`、`loader_path_id_upper` |
+| 停止时存档 | `scripts/stop_checkpoint.py`，由 `scripts/oni_autonomous.py` 的 `stop_requested` 驱动 | 已停止、队列静止、策略封存之后，发出 `save_checkpoint` 控制，目标是 `<stem>-ckpt-<n+1>.sav`；每轮 Bridge 迭代推进一步，不阻塞；结果确认、再看到一份更晚的可信快照之后，才发布清单并结束停止；被拒、失败或超时（120 s）都只记录，不重试，停止照常完成 |
+| 只接受最新一环 | `oni_autonomous.load_config` 的可选字段 `checkpoints: true` | 加载锚点必须是链上最新的一环（没有检查点时就是克隆本身）；加载克隆或较旧的检查点都会被拒绝；不带该字段时行为不变 |
+| 准备与加载指针 | `prepare_dsh_autonomous_run.py --checkpoints`、`set_oni_load_save.py --latest-checkpoint MANIFEST SAVE` | 启动绑定和游戏的 `SaveFilenameKey/` 都指向最新一环 |
+| 测试 | `scripts/test_checkpoint_chain.py`（16）、`scripts/test_stop_checkpoint.py`（12） | 用假 Mod 跑完整流程；检查点 1 之后再存检查点 2；被拒、超时、策略未封存、存档 dirty、目标已存在；加载锚点 |
+
+尚待实盘确认的风险：
+
+- **Bridge 在存档后能否继续发布可信快照**：同一会话里存档哈希变成新检查点后，启动绑定严格模式下的 Bridge 是否仍把快照判为可信。确认存档用的正是这份快照；如果 Bridge 不再发布，状态机会在 120 秒后记为超时失败，停止仍会完成，但不会留下检查点。
+- `SaveColonySummaryData` 写到哪里（见上文“已核实的约束”第 2 条）。
+- `updateSavePointer=true` 会让游戏把“上次存档”指向新检查点，`kplayerprefs.yaml` 因此会变化；收尾还原时要把它考虑在内。
+- `prepare_dsh_autonomous_run.py` 仍按 Phase 2 的目录结构定位克隆（`reports/phase2/clones/<run_id>`）；M1 需要一个以 Terra 克隆为参数的准备脚本。

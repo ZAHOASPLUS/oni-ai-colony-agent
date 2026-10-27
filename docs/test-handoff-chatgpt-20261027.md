@@ -82,6 +82,7 @@ py -3 -B scripts/verify_oni_model_integration.py
 - Terra 源存档（`m1-terra-src`）已经建好，并按命名克隆流程准入。
 - 启动控制器用 `scripts/start-controller.ps1`，观察用 `scripts/watch_controller.py`，两者放在不同的命令里。
 - 每轮结束后按 AGENTS.md 收尾，并核对存档基线（`scripts/save_tree_baseline.py compare`）。
+- 进展要跨进程保留：准备时加 `--checkpoints`（配置里会写入 `checkpoints: true`），游戏的加载指针用 `scripts/set_oni_load_save.py --latest-checkpoint <克隆清单> <克隆 .sav>` 设置。停止时控制器会自动存出下一环检查点，状态文档里的 `checkpoint` 字段会给出结果（`verified` 或 `failed` 及原因）。第一次带检查点的实盘测试要专门核对 `docs/b16-checkpoint-design-20261027.md` 末尾列出的待确认风险。
 
 ## 6. 最终验证切回 DeepSeek
 
