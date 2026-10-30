@@ -1,0 +1,459 @@
+{
+  "schema": "oni.tools.v1",
+  "tools": [
+    {
+      "name": "get_lifecycle",
+      "description": "Where the game is: main_menu, loading or in_game, and which save is loaded. Works without a loaded colony.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "load_save",
+      "description": "Load a test clone from the main menu. Only saves whose file and folder both start with oni- are accepted.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute path of the .sav file."
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_status",
+      "description": "The colony at a glance: time and speed, worlds and their coordinate bounds, every duplicant (position, current chore, stress, health, breath, calories, air, status), food, breathable gas, power, the game's own alerts, current research, and pending blueprints and dig marks.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "world": {
+            "type": "integer",
+            "description": "World id from worlds[]. Default: the active world."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_map",
+      "description": "An area of the map as text, one character per cell and one grid per layer, each with its legend. The top row is the highest y; x and y are game cell coordinates and rulers are included. Unrevealed cells are '?'. Areas above 64x48 are downsampled, and cells_per_char says by how much, so omit x, y, w and h for a thumbnail of the whole world.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "integer",
+            "description": "Left edge. Default: the world's left edge."
+          },
+          "y": {
+            "type": "integer",
+            "description": "Bottom edge. Default: the world's bottom edge."
+          },
+          "w": {
+            "type": "integer",
+            "description": "Width in cells. Default: to the world's right edge."
+          },
+          "h": {
+            "type": "integer",
+            "description": "Height in cells. Default: to the world's top edge."
+          },
+          "layers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "terrain",
+                "buildings",
+                "utilities",
+                "gas",
+                "liquid",
+                "temperature",
+                "designations"
+              ]
+            },
+            "description": "Default: terrain and buildings."
+          },
+          "world": {
+            "type": "integer",
+            "description": "World id. Default: the active world."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "inspect",
+      "description": "One cell in detail: element, mass, temperature, germs, every building there (id, operational state, the game's status lines such as missing power, stored contents) and loose items.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "integer"
+          },
+          "y": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "x",
+          "y"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_buildable",
+      "description": "Buildings by build category. Unlocked ones list size, placement rule, materials with what the colony has, power use or output, and pipe and power ports (x, y offsets from the building's origin). Locked ones list the tech that unlocks them.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "description": "One build category, such as base, oxygen, power, food, plumbing, hvac. Default: all."
+          },
+          "include_locked": {
+            "type": "boolean",
+            "description": "Default: true."
+          },
+          "world": {
+            "type": "integer",
+            "description": "World whose stock is counted. Default: the active world."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_research",
+      "description": "Research: the current tech and queue, a missing research building if any, finished techs, and details (cost, progress, prerequisites, unlocks) of the techs that can be researched now.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "open",
+              "all"
+            ],
+            "description": "open: techs available now (default). all: the whole tree."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_events",
+      "description": "What changed since the last look: cycles, alerts raised and cleared, buildings completed and removed, duplicants lost or arrived, research completed. Pass the next_since from the previous call; missed says how many events aged out.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "integer",
+            "description": "Return events after this sequence number. Default: 0."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Default: 100."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "build",
+      "description": "Place a blueprint of any unlocked building; duplicants then construct it. (x, y) is the building's origin: its bottom row, centre column, rounded left for even widths, and get_buildable's port offsets are relative to it. A refusal returns the game's reason; a place inside solid rock is allowed and is dug out first. The id returned is the blueprint's: the finished building gets a new one, reported by get_events. For wires, pipes and rails use build_path.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "def_id": {
+            "type": "string",
+            "description": "Building id from get_buildable."
+          },
+          "x": {
+            "type": "integer"
+          },
+          "y": {
+            "type": "integer"
+          },
+          "rotation": {
+            "type": "string",
+            "enum": [
+              "Neutral",
+              "R90",
+              "R180",
+              "R270",
+              "FlipH",
+              "FlipV"
+            ],
+            "description": "Default: Neutral. get_buildable's rotations field says what a building allows."
+          },
+          "materials": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "One element per ingredient, in the order get_buildable lists them. Default: whichever valid element the colony has most of."
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9,
+            "description": "Default: 5."
+          }
+        },
+        "required": [
+          "def_id",
+          "x",
+          "y"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "build_path",
+      "description": "Lay a wire, pipe or rail along a path of neighbouring cells. To branch from an existing line, make an existing cell of that line part of the path: only a shared cell connects, so being adjacent is not enough. All or nothing: on a refusal nothing is placed.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "def_id": {
+            "type": "string",
+            "description": "A building id whose get_buildable entry has utility: true."
+          },
+          "cells": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              },
+              "minItems": 2,
+              "maxItems": 2
+            },
+            "description": "[x, y] pairs, each one step up, down, left or right of the one before."
+          },
+          "materials": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "One element per ingredient, in the order get_buildable lists them. Default: whichever valid element the colony has most of."
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9,
+            "description": "Default: 5."
+          }
+        },
+        "required": [
+          "def_id",
+          "cells"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "dig",
+      "description": "Mark a rectangle for digging. Reports how many cells were marked and why others were skipped.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "integer",
+            "description": "Left edge."
+          },
+          "y": {
+            "type": "integer",
+            "description": "Bottom edge."
+          },
+          "w": {
+            "type": "integer",
+            "description": "Width in cells. Default: 1."
+          },
+          "h": {
+            "type": "integer",
+            "description": "Height in cells. Default: 1."
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9,
+            "description": "Default: 5."
+          }
+        },
+        "required": [
+          "x",
+          "y"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "deconstruct",
+      "description": "Mark buildings for deconstruction, by building id or by rectangle. The printing pod is protected.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "Building id from inspect. Use this or x and y."
+          },
+          "x": {
+            "type": "integer",
+            "description": "Left edge."
+          },
+          "y": {
+            "type": "integer",
+            "description": "Bottom edge."
+          },
+          "w": {
+            "type": "integer",
+            "description": "Width in cells. Default: 1."
+          },
+          "h": {
+            "type": "integer",
+            "description": "Height in cells. Default: 1."
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9,
+            "description": "Default: 5."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "cancel",
+      "description": "Remove dig marks, blueprints and deconstruction marks in a rectangle.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "integer",
+            "description": "Left edge."
+          },
+          "y": {
+            "type": "integer",
+            "description": "Bottom edge."
+          },
+          "w": {
+            "type": "integer",
+            "description": "Width in cells. Default: 1."
+          },
+          "h": {
+            "type": "integer",
+            "description": "Height in cells. Default: 1."
+          }
+        },
+        "required": [
+          "x",
+          "y"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_priority",
+      "description": "Set the priority (1-9) of a building or errand, by id or by rectangle.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "Building id from inspect. Use this or x and y."
+          },
+          "x": {
+            "type": "integer",
+            "description": "Left edge."
+          },
+          "y": {
+            "type": "integer",
+            "description": "Bottom edge."
+          },
+          "w": {
+            "type": "integer",
+            "description": "Width in cells. Default: 1."
+          },
+          "h": {
+            "type": "integer",
+            "description": "Height in cells. Default: 1."
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9
+          }
+        },
+        "required": [
+          "priority"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_research",
+      "description": "Research a tech, replacing the current queue. Unfinished prerequisites are queued first, and the response shows the resulting queue.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tech": {
+            "type": "string",
+            "description": "Tech id from get_research."
+          },
+          "require_ready": {
+            "type": "boolean",
+            "description": "Refuse instead of queueing prerequisites. Default: false."
+          }
+        },
+        "required": [
+          "tech"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_speed",
+      "description": "0 pauses; 1, 2 and 3 run the game at the three speeds. Pause before planning a complicated layout.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "speed": {
+            "type": "integer",
+            "enum": [
+              0,
+              1,
+              2,
+              3
+            ]
+          }
+        },
+        "required": [
+          "speed"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "save_checkpoint",
+      "description": "Save to a new checkpoint file next to the loaded save. Existing saves are never overwritten.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "note": {
+            "type": "string",
+            "description": "Why this point is worth keeping."
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  ]
+}

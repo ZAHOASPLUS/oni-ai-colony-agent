@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "oni": {
+      "command": "python",
+      "args": ["tools/oni_tools.py", "mcp"]
+    }
+  }
+}
