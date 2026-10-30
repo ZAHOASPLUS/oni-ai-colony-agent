@@ -35,10 +35,22 @@ if str(ROOT) not in sys.path:
 from agent import llm_planner  # noqa: E402
 from agent.model_loop import structured_output_unsupported  # noqa: E402
 
+# Every name the planner reads, not just the prefixes: COCKPIT_API_KEY in the
+# developer environment overrode the secrets file under test and the failing
+# assertion printed the real key (M1 round 1 preflight, 2026-10-30).
+CONFIG_ENVIRONMENT_NAMES = frozenset(
+    llm_planner._KEY_ENVIRONMENT_NAMES
+    + llm_planner._BASE_URL_ENVIRONMENT_NAMES
+    + llm_planner._MODEL_ENVIRONMENT_NAMES
+    + llm_planner._WIRE_API_ENVIRONMENT_NAMES
+    + llm_planner._PROVIDER_ENVIRONMENT_NAMES
+    + llm_planner._REQUEST_TIMEOUT_ENVIRONMENT_NAMES
+)
 CLEAN_ENV = {
     name: value
     for name, value in os.environ.items()
-    if not name.startswith(("OPENAI_", "ONI_AI_", "CLINE_", "NEWAPI_", "DEEPSEEK_"))
+    if not name.startswith(("OPENAI_", "ONI_AI_", "CLINE_", "NEWAPI_", "DEEPSEEK_", "COCKPIT_"))
+    and name not in CONFIG_ENVIRONMENT_NAMES
 }
 
 # A trimmed but shape-faithful Cline-pass answer (probe_shapes.py, 2026-10-25).
