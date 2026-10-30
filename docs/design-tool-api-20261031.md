@@ -56,8 +56,9 @@
 
 ## 3. Mod 内的 HTTP 服务
 
-- 用 `System.Net.HttpListener` 监听 `http://127.0.0.1:<port>/`，端口写在 `ai-bridge/api.json` 里。**风险**：ONI 自带的 Mono 如果不支持 `HttpListener`，就退回到用 `TcpListener` 实现一个最小的 HTTP/1.1 服务（只支持 POST + JSON）。
-- 线程模型：监听线程只负责收请求，把请求放进队列；游戏主线程在 `Game.Update` 的补丁里每帧取出最多 N 个请求执行，再把结果交回监听线程。读操作通常在 1 帧内完成，写操作执行完就返回结果。
+- 用 `TcpListener` 实现一个最小的 HTTP/1.1 服务（只支持 `POST /call` + JSON），监听 `127.0.0.1` 上的随机端口，端口写在 `ai-bridge/api.json` 里。没有用 `HttpListener`：`TcpListener` 不依赖 Mono 的实现，整条路径能用 `tools/ApiServerHarness` 在游戏外验证。
+- **API 模式是显式开启的**：启动脚本在拉起游戏前写 `ai-bridge/autoload.json`。Mod 读到后立即删除，超过 5 分钟的文件会被拒绝。没有这个文件时不开端口、不改任何行为，用户的普通游戏不受影响。自动存档保护、时间线保护、对话框和开场动画跳过都由这个入口开启。
+- 线程模型：监听线程只负责收请求，把请求放进队列；常驻的 `ApiHost`（从 `Mod.OnLoad` 活到进程退出，主菜单也在）每帧取出最多 16 个请求，在主线程执行。排队超过 20 秒的请求会被放弃且**绝不执行**；已经开始执行的请求一定等到结果。
 - 接口统一为 `POST /call`，请求体是 `{"tool": "...", "args": {...}}`，返回 `{"ok": bool, "result": ..., "error": {"code", "message", "hint"}}`。
 - 鉴权：启动时生成随机令牌写入 `ai-bridge/api.json`（只有本机用户可读），请求必须带上这个令牌。
 - 没有载入存档（还在主菜单）时，只允许调用生命周期类工具。
@@ -71,7 +72,7 @@
 | 工具 | 返回 |
 |---|---|
 | `get_status` | 周期、当天时刻、速度/是否暂停；每个复制人的姓名、位置、当前任务、压力、健康、呼吸、卡路里、体温；殖民地的氧气、食物（千卡与可维持天数）、电力（发电/用电/电池）；告警；当前研究与进度；在建蓝图数 |
-| `get_map(x, y, w, h, layers)` | 文字网格，每格一个字符，附图例。可选的层：`terrain`（元素类别）、`buildings`、`gas`（氧气/二氧化碳/污染氧/真空）、`liquid`、`temperature`（分档）、`designations`（挖掘/建造标记）。单次最多 64×48 格。整个小行星的缩略图用 `w, h` 超限时自动降采样 |
+| `get_map(x, y, w, h, layers)` | 文字网格，每格一个字符，附图例。可选的层：`terrain`（元素）、`buildings`、`utilities`（电线和各种管道）、`gas`（氧气/二氧化碳/污染氧/真空）、`liquid`、`temperature`（分档）、`designations`（挖掘/建造标记）。单次最多 64×48 格。整个小行星的缩略图用 `w, h` 超限时自动降采样 |
 | `inspect(x, y)` / `inspect_building(id)` | 格子里的元素、质量、温度、气压，以及其中的建筑和物品；建筑的状态项（如“缺电”“没有管道输入”）、存储内容、可配置项 |
 | `list_buildings(filter)` | 建筑实例列表：id、种类、位置、是否运转、不运转的原因 |
 | `get_buildable(category?)` | 已解锁、可以建的建筑：尺寸、需要的材料和数量、耗电/产电、是否需要管道或电线、所属分类；未解锁的建筑给出它需要的科技 |
@@ -155,16 +156,42 @@ DeepSeek 用的是**同一份技能**：Python 循环把 `SKILL.md` 作为系统
 
 | 步骤 | 内容 | 完成标准 |
 |---|---|---|
-| P1 | Mod HTTP 服务 + 查询工具（`get_status`、`get_map`、`inspect`、`get_buildable`、`get_research`、`get_events`）+ `oni_tools` MCP 包装 + 自动载入 | 启动游戏后不碰鼠标就进入克隆存档，Claude 能通过 MCP 看到殖民地和地图 |
-| P2 | 操作工具（`build`、`build_path`、`dig`、`deconstruct`、`cancel`、`set_research`、`set_priority`、`set_speed`、`save_checkpoint`）+ 游戏端错误原因 + 审计日志 | Claude 手动调用工具，在克隆存档上建好厕所、挖出一个房间、开始研究 |
+| P1（已完成） | Mod HTTP 服务 + 查询工具（`get_status`、`get_map`、`inspect`、`get_buildable`、`get_research`、`get_events`）+ `oni_tools` MCP 包装 + 自动载入 | 启动游戏后不碰鼠标就进入克隆存档，Claude 能通过 MCP 看到殖民地和地图 |
+| P2（已完成） | 操作工具（`build`、`build_path`、`dig`、`deconstruct`、`cancel`、`set_research`、`set_priority`、`set_speed`、`save_checkpoint`）+ 游戏端错误原因 + 审计日志 | Claude 手动调用工具，在克隆存档上建好厕所、挖出一个房间、开始研究 |
 | P3 | `oni-player` 技能 v1，Claude 实时玩 10 个周期 | 不需要人插手，10 个周期内没有减员；整理出失败原因清单 |
 | P4 | 移除旧系统 | 第 8 节右栏全部删除，剩下的测试通过 |
 | P5 | DeepSeek 循环（同一份 schema 和技能） | DeepSeek 实时玩 10 个周期 |
 | P6 | 迭代到 S1；再选使命做 S2 | 第 7 节标准 |
 
+### 实机验证结果（P1 + P2，2026-10-31）
+
+两轮实机运行，证据在 `reports/api/p1-r02/`、`p1-r03/`，都在克隆 `oni-m1-terra-r01` 上进行。
+
+| 完成标准 | 结果 |
+|---|---|
+| P1：不碰鼠标进入克隆存档 | 通过：启动后约 26 秒到 `in_game`，两轮都成功，开场动画和模组差异对话框都没有拦住流程 |
+| P1：能看到殖民地和地图 | 通过：8 个读取工具都有真实数据，单次约 15–30 毫秒；通过 MCP 通道实测过 |
+| P2：挖出房间、建好厕所、开始研究 | 通过：6×3 房间挖完，`Outhouse` 建成，研究设为 `FarmingTech` |
+
+其他已确认的行为：
+- 复制人收到挖掘和建造后立刻响应，优先级生效；夜里睡觉时蓝图会等到天亮。
+- `build_path` 的连接是真实的：发电机和电池接在同一条线上，`circuits` 为 1，电池开始充电，复制人自己去手摇发电。
+- 取消、打印舱保护、材料不足、未解锁、路径不相邻等拒绝路径都返回了能照着改的原因。
+- `save_checkpoint` 写出 `ckpt-002`，游戏继续运行，载入指针不变；`SaveLoader.Save` 也写了 `.png`，修正了 D4 里“不写预览图”的说法。
+- 两轮结束后，已有的 350 个存档和预览文件全部未变，只新增 `ckpt-002` 的两个文件。
+
+这一轮暂时用 `tools/oni_tools.py call` 和 MCP 脚本调用工具。Claude 要在新会话里才能直接看到 `.mcp.json` 注册的 `oni` 工具。
+
+已知的待办：
+- `save_checkpoint` 还不发布检查点清单，`api_session.py start` 也还不能从检查点启动。这要在 P3 之前补上，否则每次启动都回到克隆的起点。
+- `building_completed` 事件里混有地图自带的建筑（`TilePOI` 等），它们在开局后陆续生成，不是复制人建的。
+- 研究站要 400 kg 金属，所以这一轮研究只设置了目标，没有实际产生进度。
+- `build` 不支持替换已有的地砖；`build_path` 不处理跨管线的桥接。
+- 第 4 节里的 `list_buildings`、`get_resources`、`find`、`get_progress`、`set_chore_priority`、`set_schedule`、`configure` 不在 P1/P2 的完成标准内，还没有实现。
+
 ## 10. 风险与未知
 
-1. **`HttpListener` 在 ONI 的 Mono 下能不能用**：P1 第一步先验证，不行就用 `TcpListener` 自己实现。
+1. **HTTP 服务**：已改用 `TcpListener`，这条风险取消。
 2. **地图表示**：一个字符表示一格，信息是否足够，token 是否太多（64×48 ≈ 3k 字符）。P1 拿 Claude 实际试，必要时改成分层加摘要的形式。
 3. **实时节奏**：Claude 一轮约 10–30 秒，一个游戏周期在 1 倍速下是 600 秒，理论上够用。如果跟不上，就改为回合制（工具不变，只是技能里约定先暂停再操作）。
 4. **长时间运行**：Claude Code 会话会进行上下文压缩，靠笔记文件和检查点延续。
