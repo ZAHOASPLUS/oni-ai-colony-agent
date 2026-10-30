@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using OniAiProbeMod.Api;
 using OniAiProbeMod.Commands;
 using UnityEngine;
 
@@ -148,7 +149,8 @@ namespace OniAiProbeMod.Probe
                 }
             }
 
-            if (Time.unscaledTime < nextSnapshotAt)
+            // The tool API reads on demand; nobody consumes the pushed snapshot.
+            if (ApiMode.Enabled || Time.unscaledTime < nextSnapshotAt)
             {
                 return;
             }

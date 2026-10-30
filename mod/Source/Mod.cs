@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using HarmonyLib;
 using KMod;
+using OniAiProbeMod.Api;
 using OniAiProbeMod.Patches;
 using OniAiProbeMod.Probe;
 using UnityEngine;
@@ -18,16 +19,18 @@ namespace OniAiProbeMod
 
             ProbeWriter.Initialize();
             StartupBinding.Initialize(ProbeWriter.BridgeDirectory);
-            if (StartupBinding.WasAccepted)
+            ApiMode.Initialize(ProbeWriter.BridgeDirectory);
+            if (StartupBinding.WasAccepted || ApiMode.Enabled)
             {
+                string reason = ApiMode.Enabled ? "api_mode" : "startup_binding_accepted";
                 // P0-1: a validation process must never run ONI's autosave
                 // rotation, which deletes the user's own colony autosaves.
-                AutosaveGuard.Activate("startup_binding_accepted");
+                AutosaveGuard.Activate(reason);
                 Debug.Log(LogPrefix + " Autosave disabled for this validation process");
                 // A timelapse screenshot queued for a world that is no longer
                 // loaded wedges the simulation clock, which an autonomous run
                 // depends on.
-                TimelapseGuard.Activate("startup_binding_accepted");
+                TimelapseGuard.Activate(reason);
                 Debug.Log(LogPrefix + " Timelapse screenshot queue disabled for this validation process");
             }
             ProbeSession.InitializeProcess();
@@ -38,6 +41,10 @@ namespace OniAiProbeMod
 
             LifecyclePatches.Install(harmony);
             base.OnLoad(harmony);
+            if (ApiMode.Enabled)
+            {
+                ApiHost.Launch(ProbeWriter.BridgeDirectory);
+            }
         }
     }
 }

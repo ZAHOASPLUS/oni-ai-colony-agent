@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
+using OniAiProbeMod.Api;
 using OniAiProbeMod.Probe;
 using UnityEngine;
 
@@ -38,6 +39,46 @@ namespace OniAiProbeMod.Patches
             PatchTimelapseSuppression(harmony);
             PatchPauseLedger(harmony);
             PatchModDialogSuppression(harmony);
+            PatchIntroShortSkip(harmony);
+        }
+
+        // The main menu plays an intro short once per release, and a player has
+        // to click through it.  The prefix leaves the "already played" preference
+        // alone, so a later normal launch still shows it.
+        private static void PatchIntroShortSkip(Harmony harmony)
+        {
+            if (!ApiMode.Enabled)
+            {
+                return;
+            }
+            try
+            {
+                MethodInfo target = AccessTools.Method(typeof(MainMenuIntroShort), "OnSpawn");
+                if (target == null)
+                {
+                    ProbeWriter.WriteError("patch_intro_short_skip", "MainMenuIntroShort.OnSpawn was not found.");
+                    return;
+                }
+
+                harmony.Patch(
+                    target,
+                    prefix: new HarmonyMethod(AccessTools.Method(typeof(LifecyclePatches), nameof(OnIntroShortSpawn))));
+                ProbeWriter.WriteEvent("probe_patch_registered", new Dictionary<string, object>
+                {
+                    { "target", "MainMenuIntroShort.OnSpawn" },
+                    { "patch", "intro_short_skip" }
+                });
+            }
+            catch (Exception ex)
+            {
+                ProbeWriter.WriteError("patch_intro_short_skip", ex);
+            }
+        }
+
+        private static bool OnIntroShortSpawn(MainMenuIntroShort __instance)
+        {
+            __instance.gameObject.SetActive(false);
+            return false;
         }
 
         // A timelapse screenshot queued for a world that is no longer loaded never
@@ -100,7 +141,7 @@ namespace OniAiProbeMod.Patches
         // and normal play is not patched at all.
         private static void PatchModDialogSuppression(Harmony harmony)
         {
-            if (!StartupBinding.WasAccepted)
+            if (!StartupBinding.WasAccepted && !ApiMode.Enabled)
             {
                 return;
             }
