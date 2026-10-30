@@ -267,11 +267,19 @@ def _seal_stopped_policy(config: Mapping[str, Any], policy: Mapping[str, Any]) -
     write_autonomous_document(config["bridge_dir"] / "action-policy.json", disabled)
 
 
-def _bound_inputs(config: Mapping[str, Any]) -> tuple[Dict[str, Any], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+def _bound_inputs(
+    config: Mapping[str, Any], *, ignore_foreign_latest: bool = False
+) -> tuple[Dict[str, Any], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     root = config["bridge_dir"]
     policy = _object(root / "action-policy.json")
     assert policy is not None
     latest = _object(root / "latest_state.json", required=False)
+    if ignore_foreign_latest and latest is not None and latest.get("session_id") != config["session_id"]:
+        # Before the start bootstrap, latest_state.json may still be the last
+        # observation of an earlier run (another session).  It is neither this
+        # run's evidence nor a reason to refuse; the bootstrap replaces it and
+        # the full identity check then runs against this run's own snapshot.
+        latest = None
     if policy.get("schema") == "oni.action-policy.v1":
         terminal_control = _object(root / AUTONOMOUS_CONTROL_NAME, required=False)
         terminal_control = _validate_terminal_policy(config, policy, terminal_control)
@@ -548,7 +556,7 @@ def _bootstrap_observation(config: Mapping[str, Any]) -> None:
 
 def start_controller(config: Mapping[str, Any]) -> int:
     root = config["bridge_dir"]
-    _, latest, _ = _bound_inputs(config)
+    _, latest, _ = _bound_inputs(config, ignore_foreign_latest=True)
     if _observation_is_untrusted(latest):
         _bootstrap_observation(config)
         _, latest, _ = _bound_inputs(config)
