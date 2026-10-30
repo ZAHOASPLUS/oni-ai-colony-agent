@@ -222,7 +222,9 @@ namespace OniAiProbeMod.Probe
                     lastFailure = "type_missing:" + TimelapserTypeName;
                     return null;
                 }
+#pragma warning disable CS0618 // The sorted result is not needed, but this call is the one proven live.
                 UnityEngine.Object[] found = UnityEngine.Object.FindObjectsOfType(timelapserType);
+#pragma warning restore CS0618
                 if (found != null && found.Length > 0 && found[0] is Component component)
                 {
                     cachedTimelapser = component;
