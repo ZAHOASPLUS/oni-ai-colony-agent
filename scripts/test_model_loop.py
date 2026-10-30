@@ -227,7 +227,7 @@ class ModelLoopTests(unittest.TestCase):
         first = self.tick(loop)
         self.assertEqual(first["phase"], "awaiting_model")
         self.assertEqual([c["candidate_id"] for c in first["candidates"]],
-                         ["research_ImprovedOxygen", "research_LiquidPiping", "priority_102_Dig_2",
+                         ["research_LiquidPiping", "research_PowerRegulation", "priority_102_Dig_2",
                           "priority_101_Build_3", "dig_5000_3", "oxygen_diffuser_9100", "algae_terrarium_9200",
                           "ladder_9000", "resume_game", "wait"])
         self.assertTrue(loop.join_request(5))
@@ -503,21 +503,33 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(self.ids(self.state(paused=True), allowed=("set_paused",)), ["resume_game", "wait"])
 
     def test_research_candidates_skip_the_current_tech_in_both_pause_states(self):
-        # The fixture researches FarmingTech, so the ladder offers the next two tier-1 techs.
+        # The fixture researches FarmingTech with nothing finished, so the ladder
+        # offers the next two techs whose prerequisites are met: Air Systems
+        # waits for Plumbing (game tech tree).
         self.assertEqual(
             self.ids(self.state(paused=False), allowed=("set_paused", "set_research")),
-            ["pause_game", "research_ImprovedOxygen", "research_LiquidPiping", "wait"],
+            ["pause_game", "research_LiquidPiping", "research_PowerRegulation", "wait"],
         )
         self.assertEqual(
             self.ids(self.state(paused=True), allowed=("set_research",)),
-            ["research_ImprovedOxygen", "research_LiquidPiping", "wait"],
+            ["research_LiquidPiping", "research_PowerRegulation", "wait"],
+        )
+
+    def test_research_candidates_wait_for_their_prerequisites(self):
+        # M1 round 1: Air Systems offered before Plumbing was quarantined.
+        state = self.state(paused=False)
+        state["research"]["complete"] = ["LiquidPiping"]
+        self.assertEqual(
+            self.ids(state, allowed=("set_research",)),
+            ["research_ImprovedOxygen", "research_PowerRegulation", "wait"],
         )
 
     def test_research_candidates_skip_finished_techs_reported_by_the_probe(self):
-        # ImprovedOxygen, LiquidPiping and PowerRegulation are finished and
-        # FarmingTech is current, so only the last ladder entry remains.
+        # ImprovedOxygen, Jobs, LiquidPiping and PowerRegulation are finished and
+        # FarmingTech is current, so only the last ladder entry remains (its
+        # prerequisite Jobs is finished).
         state = self.state(paused=False)
-        state["research"]["complete"] = ["ImprovedOxygen", "LiquidPiping", "PowerRegulation"]
+        state["research"]["complete"] = ["ImprovedOxygen", "Jobs", "LiquidPiping", "PowerRegulation"]
         state["quality"]["research.complete"] = contract_quality_fixture(RESEARCH_COMPLETE_CONTRACT_ID)
         self.assertEqual(self.ids(state, allowed=("set_research",)), ["research_BasicRefinement", "wait"])
 
@@ -538,10 +550,10 @@ class CandidateTests(unittest.TestCase):
 
     def test_research_candidate_binds_the_observed_current_selection(self):
         items = candidates.generate_candidates(self.state(paused=False), allowed_actions=("set_research",))["items"]
-        hint = next(item for item in items if item["candidate_id"] == "research_ImprovedOxygen")["hint"]
-        self.assertEqual(hint["args"], {"tech": "ImprovedOxygen"})
+        hint = next(item for item in items if item["candidate_id"] == "research_LiquidPiping")["hint"]
+        self.assertEqual(hint["args"], {"tech": "LiquidPiping"})
         self.assertEqual([(c["path"], c["value"]) for c in hint["preconditions"]], [("research.current", "FarmingTech")])
-        self.assertEqual([(c["path"], c["value"]) for c in hint["expected_effects"]], [("research.current", "ImprovedOxygen")])
+        self.assertEqual([(c["path"], c["value"]) for c in hint["expected_effects"]], [("research.current", "LiquidPiping")])
 
     def test_building_candidates_prefer_oxygen_buildings_and_exist_only_while_paused(self):
         running = self.ids(self.state(paused=False), allowed=ALL_CANDIDATE_ACTIONS)
@@ -641,7 +653,7 @@ class CandidateTests(unittest.TestCase):
     def test_full_paused_set_keeps_resume_and_wait_within_the_cap(self):
         ids = self.ids(self.state(paused=True), allowed=ALL_CANDIDATE_ACTIONS)
         self.assertEqual(ids, [
-            "research_ImprovedOxygen", "research_LiquidPiping", "priority_102_Dig_2", "priority_101_Build_3",
+            "research_LiquidPiping", "research_PowerRegulation", "priority_102_Dig_2", "priority_101_Build_3",
             "dig_5000_3", "oxygen_diffuser_9100", "algae_terrarium_9200", "ladder_9000", "resume_game", "wait",
         ])
         self.assertLessEqual(len(ids), candidates.MAX_CANDIDATES)

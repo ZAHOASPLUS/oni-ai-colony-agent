@@ -73,12 +73,20 @@ MAX_AUTONOMOUS_CANDIDATES = 16
 PRIORITY_GROUPS = ("LifeSupport", "Hauling", "Farming", "Dig", "Build")
 MAX_PRIORITY_CANDIDATES = 2
 MAX_DIG_RUN_CELLS = 4
-# Tier-1 technologies (no prerequisites) in the order an oxygen-starved early
-# colony needs them.  Entries in an observed research.complete set are skipped;
-# when that set is unobserved (older Probe) every entry is offered, a finished
-# tech is refused by the executor ("already researched") and that refusal
-# reaches the model as outcome feedback.
+# Early technologies in the order an oxygen-starved colony needs them.  Entries
+# in an observed research.complete set are skipped, and so are entries whose
+# prerequisites that set does not hold yet; when the set is unobserved (older
+# Probe) every entry is offered, the executor refuses a finished or blocked tech
+# and that refusal reaches the model as outcome feedback.
 RESEARCH_LADDER = ("ImprovedOxygen", "LiquidPiping", "FarmingTech", "PowerRegulation", "BasicRefinement")
+# Prerequisites from the game's own tech tree (the TechTree graphml embedded in
+# resources.assets, identical in the base and Spaced Out graphs, build 744825).
+# M1 round 1 (2026-10-30): a fresh colony was offered Air Systems before
+# Plumbing and the executor quarantined it ("unfinished prerequisites").
+RESEARCH_PREREQUISITES = {
+    "ImprovedOxygen": ("LiquidPiping",),
+    "BasicRefinement": ("Jobs",),
+}
 RESEARCH_SUMMARIES = {
     "ImprovedOxygen": "Air Systems: unlocks the Electrolyzer, which makes oxygen from water",
     # Roadmap B15: the Electrolyzer takes water only through a pipe.
@@ -924,10 +932,13 @@ def _research_candidates(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     # source) is ignored rather than trusted: the fallback only offers more
     # candidates, each still checked by the executor.
     complete = _observed(state, "research.complete", RESEARCH_COMPLETE_CONTRACT_ID)
-    finished = set(complete) if isinstance(complete, list) else set()
+    observed = isinstance(complete, list)
+    finished = set(complete) if observed else set()
     result: List[Dict[str, Any]] = []
     for tech in RESEARCH_LADDER:
         if tech == current or tech in finished:
+            continue
+        if observed and not finished.issuperset(RESEARCH_PREREQUISITES.get(tech, ())):
             continue
         try:
             hint = build_set_research_hint(state, tech=tech)
