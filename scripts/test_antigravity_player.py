@@ -269,6 +269,15 @@ class AntigravitySessionTests(unittest.TestCase):
         self.assertEqual([(dupe["id"], dupe["name"]) for dupe in result["duplicants"]], [(101, "Marie"), (105, "Marie")])
         self.assertEqual(result["colony"]["food_report_kcal"], food)
 
+    def test_compact_status_keeps_each_duplicants_status_and_body_temperature(self) -> None:
+        dupe = {"x": 40, "y": 120, "id": 101, "name": "Marie", "kcal": 410.0, "body_c": 38.6,
+                "status": ["Starving", "Scalding"], "air": "Oxygen 1.2 kg"}
+        raw = {"ok": True, "result": {"duplicants": [dupe]}}
+        kept = compact_observation("get_status", raw)["result"]["duplicants"][0]
+        self.assertEqual(kept["status"], ["Starving", "Scalding"])
+        self.assertEqual(kept["body_c"], 38.6)
+        self.assertNotIn("temperature_c", kept)
+
     def test_shared_name_refusal_reaches_the_player_whole(self) -> None:
         refusal = {
             "ok": False,

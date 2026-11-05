@@ -15,6 +15,8 @@ namespace OniAiProbeMod.Api
         private const double KcalPerDuplicantCycle = 1000.0;
         // The game counts food in calories; players read kcal.
         private const float CaloriesPerKcal = 1000f;
+        // The game's energy report counts joules.
+        private const float JoulesPerKj = 1000f;
         private const int StatusItemsPerDuplicant = 6;
 
         private static readonly FieldInfo NotificationsField =
@@ -238,7 +240,7 @@ namespace OniAiProbeMod.Api
                 { "food_report_kcal", ReadReport(ReportManager.ReportType.CaloriesCreated, CaloriesPerKcal) },
                 { "breathable_kg", ApiValues.Number(ReadBreathableKg(world), 0) },
                 { "oxygen_report_kg", ReadReport(ReportManager.ReportType.OxygenCreated) },
-                { "power_report_kj", ReadReport(ReportManager.ReportType.EnergyCreated) },
+                { "power_report_kj", ReadReport(ReportManager.ReportType.EnergyCreated, JoulesPerKj) },
                 { "power", ReadPower() }
             };
         }

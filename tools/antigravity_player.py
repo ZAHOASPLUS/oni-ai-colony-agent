@@ -397,7 +397,7 @@ def compact_observation(tool_name: str, outcome: Mapping[str, Any]) -> Dict[str,
         dupes = [
             {
                 key: dupe.get(key)
-                for key in ("id", "name", "x", "y", "chore", "health", "breath_pct", "kcal", "stress_pct", "morale", "temperature_c")
+                for key in ("id", "name", "x", "y", "chore", "health", "breath_pct", "kcal", "stress_pct", "morale", "body_c", "status")
                 if key in dupe
             }
             for dupe in raw.get("duplicants", [])
