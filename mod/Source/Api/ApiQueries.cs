@@ -162,8 +162,11 @@ namespace OniAiProbeMod.Api
                 case "geyser":
                     found = FindGeysers(world);
                     break;
+                case "critter":
+                    found = ApiCritters.Find(world, query);
+                    break;
                 default:
-                    throw new ApiException("invalid_argument", "kind must be element, item, building, plant or geyser.");
+                    throw new ApiException("invalid_argument", "kind must be element, item, building, plant, geyser or critter.");
             }
 
             return new Dictionary<string, object>

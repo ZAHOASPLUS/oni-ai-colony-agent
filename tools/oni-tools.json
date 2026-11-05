@@ -504,7 +504,7 @@
     },
     {
       "name": "find",
-      "description": "The nearest things of a kind, among revealed cells: an element such as Algae, a loose or stored item, a building, a harvestable plant, or a revealed geyser. Answers with up to five, and the total. A geyser lists its id (for configure study), studied, and before study study_requested and studying; once studied kg_per_cycle_active, average_kg_per_cycle (over eruptions, pauses and dormancy, the figure for a water or gas budget), eruption_cycles, pause_cycles, active_cycles, dormant_cycles, dormant_now and phase_cycles_left.",
+      "description": "The nearest things of a kind, among revealed cells: an element such as Algae, a loose or stored item, a building, a harvestable plant, a revealed geyser, or a live critter in a revealed cell. Answers with up to five, and the total. A geyser lists its id (for configure study), studied, and before study study_requested and studying; once studied kg_per_cycle_active, average_kg_per_cycle (over eruptions, pauses and dormancy, the figure for a water or gas budget), eruption_cycles, pause_cycles, active_cycles, dormant_cycles, dormant_now and phase_cycles_left. A critter lists id, critter (prefab, the query matches it, such as Drecko or Hatch), name, wild, age_cycles, max_age_cycles, wildness_pct, happiness, capturable, marked_for_capture and room (the room type it is in).",
       "parameters": {
         "type": "object",
         "properties": {
@@ -515,7 +515,8 @@
               "item",
               "building",
               "plant",
-              "geyser"
+              "geyser",
+              "critter"
             ]
           },
           "query": {
@@ -667,13 +668,13 @@
     },
     {
       "name": "configure",
-      "description": "Set up a finished building. recipe with count queues a recipe on a fabricator such as a MicrobeMusher; count -1 repeats forever and 0 clears it. seed plants in a planter or farm tile. storage_filter sets what a storage building accepts, replacing the old list. assigned_duplicant assigns individual furniture through the game's normal assignment rules. MassageTable stress thresholds control when massage starts and stops. study true sends a duplicant to analyse a geyser (false cancels; the id comes from find kind geyser). smart_battery_low_pct and smart_battery_high_pct set a BatterySmart's automation range. inspect lists recipes, seeds, filters, assignment (kind, id, name), massage thresholds and smart battery thresholds.",
+      "description": "Set up a finished building. recipe with count queues a recipe on a fabricator such as a MicrobeMusher; count -1 repeats forever and 0 clears it. seed plants in a planter or farm tile. storage_filter sets what a storage building accepts, replacing the old list. assigned_duplicant assigns individual furniture through the game's normal assignment rules. MassageTable stress thresholds control when massage starts and stops. capture true marks a critter for wrangling (false clears it), critter_limit sets a Critter Drop-Off's limit. study true sends a duplicant to analyse a geyser (false cancels; the id comes from find kind geyser). smart_battery_low_pct and smart_battery_high_pct set a BatterySmart's automation range. inspect lists recipes, seeds, filters, assignment (kind, id, name), massage thresholds and smart battery thresholds.",
       "parameters": {
         "type": "object",
         "properties": {
           "id": {
             "type": "integer",
-            "description": "Finished building id from list_buildings or inspect, or a geyser id from find."
+            "description": "Finished building id from list_buildings or inspect, a geyser id from find, or a critter id from find kind critter."
           },
           "recipe": {
             "type": "string"
@@ -751,6 +752,16 @@
           "study": {
             "type": "boolean",
             "description": "Geysers and other analysable objects: true asks for the game's analysis errand, false cancels the request. Setting what is already set changes nothing. Returns requested, not_requested or already_studied."
+          },
+          "capture": {
+            "type": "boolean",
+            "description": "Critters: true marks it for the game's Wrangle errand (needs a duplicant with the ranching skill), false clears the mark. Refused as cannot_capture when the critter cannot be wrangled. Returns marked or not_marked."
+          },
+          "critter_limit": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 20,
+            "description": "Critter Drop-Off only: how many critters its room should hold; duplicants deliver wrangled critters of the filtered species (storage_filter) until the room has this many. inspect reads critter_limit and critters_in_room."
           }
         },
         "required": [
