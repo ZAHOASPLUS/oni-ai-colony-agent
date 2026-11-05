@@ -147,9 +147,41 @@ namespace OniAiProbeMod.Api
                 entry["body_c"] = AmountValue(amounts.Temperature, go, kelvin: true);
                 entry["air"] = DescribeAir(Grid.CellAbove(cell));
                 entry["status"] = ReadStatusItems(go, StatusItemsPerDuplicant);
+                entry["suit"] = ReadSuit(identity);
                 duplicants.Add(entry);
             }
             return duplicants;
+        }
+
+        /// <summary>
+        /// The suit or mask a duplicant wears (the Suit equipment slot), or null.
+        /// Durability and oxygen are what the item's own tooltip shows.
+        /// </summary>
+        private static object ReadSuit(MinionIdentity identity)
+        {
+            Equipment equipment = identity.GetEquipment();
+            AssignableSlotInstance slot = equipment == null ? null : equipment.GetSlot(Db.Get().AssignableSlots.Suit);
+            Assignable worn = slot?.assignable;
+            if (worn == null || !equipment.IsEquipped(worn.GetComponent<Equippable>()))
+            {
+                return null;
+            }
+            Dictionary<string, object> suit = new Dictionary<string, object>
+            {
+                { "item", worn.GetComponent<KPrefabID>().PrefabTag.Name }
+            };
+            Durability durability = worn.GetComponent<Durability>();
+            if (durability != null)
+            {
+                suit["durability_pct"] = ApiValues.Number(durability.GetDurability() * 100f, 0);
+            }
+            SuitTank tank = worn.GetComponent<SuitTank>();
+            if (tank != null)
+            {
+                suit["oxygen_pct"] = ApiValues.Number(tank.PercentFull() * 100f, 0);
+                suit["oxygen_low"] = tank.IsLowOxygen();
+            }
+            return suit;
         }
 
         /// <summary>What moves stress right now, in percent per cycle.</summary>
