@@ -306,12 +306,7 @@ namespace OniAiProbeMod.Api
                 entry["geyser"] = type.id;
                 entry["element"] = type.element.ToString();
                 entry["temperature_c"] = ApiValues.Number(type.temperature - 273.15f, 1);
-                Studyable study = geyser.GetComponent<Studyable>();
-                entry["studied"] = study != null && study.Studied;
-                if (study != null && study.Studied)
-                {
-                    entry["kg_per_cycle_active"] = ApiValues.Number(geyser.configuration.GetMassPerCycle(), 1);
-                }
+                ApiGeysers.Describe(geyser, entry);
                 found.Add(entry);
             }
             return found;

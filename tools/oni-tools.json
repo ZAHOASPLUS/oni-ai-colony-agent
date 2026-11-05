@@ -504,7 +504,7 @@
     },
     {
       "name": "find",
-      "description": "The nearest things of a kind, among revealed cells: an element such as Algae, a loose or stored item, a building, a harvestable plant, or a revealed geyser. Answers with up to five, and the total.",
+      "description": "The nearest things of a kind, among revealed cells: an element such as Algae, a loose or stored item, a building, a harvestable plant, or a revealed geyser. Answers with up to five, and the total. A geyser lists its id (for configure study), studied, and before study study_requested and studying; once studied kg_per_cycle_active, average_kg_per_cycle (over eruptions, pauses and dormancy, the figure for a water or gas budget), eruption_cycles, pause_cycles, active_cycles, dormant_cycles, dormant_now and phase_cycles_left.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -667,13 +667,13 @@
     },
     {
       "name": "configure",
-      "description": "Set up a finished building. recipe with count queues a recipe on a fabricator such as a MicrobeMusher; count -1 repeats forever and 0 clears it. seed plants in a planter or farm tile. storage_filter sets what a storage building accepts, replacing the old list. assigned_duplicant assigns individual furniture through the game's normal assignment rules. MassageTable stress thresholds control when massage starts and stops. smart_battery_low_pct and smart_battery_high_pct set a BatterySmart's automation range. inspect lists recipes, seeds, filters, assignment (kind, id, name), massage thresholds and smart battery thresholds.",
+      "description": "Set up a finished building. recipe with count queues a recipe on a fabricator such as a MicrobeMusher; count -1 repeats forever and 0 clears it. seed plants in a planter or farm tile. storage_filter sets what a storage building accepts, replacing the old list. assigned_duplicant assigns individual furniture through the game's normal assignment rules. MassageTable stress thresholds control when massage starts and stops. study true sends a duplicant to analyse a geyser (false cancels; the id comes from find kind geyser). smart_battery_low_pct and smart_battery_high_pct set a BatterySmart's automation range. inspect lists recipes, seeds, filters, assignment (kind, id, name), massage thresholds and smart battery thresholds.",
       "parameters": {
         "type": "object",
         "properties": {
           "id": {
             "type": "integer",
-            "description": "Finished building id from list_buildings or inspect."
+            "description": "Finished building id from list_buildings or inspect, or a geyser id from find."
           },
           "recipe": {
             "type": "string"
@@ -747,6 +747,10 @@
             "minimum": 0,
             "maximum": 100,
             "description": "BatterySmart only: its automation output turns red (off) when the charge rises to this percentage. Omitted retains its current value. Must be at least smart_battery_low_pct; give both to change the range together."
+          },
+          "study": {
+            "type": "boolean",
+            "description": "Geysers and other analysable objects: true asks for the game's analysis errand, false cancels the request. Setting what is already set changes nothing. Returns requested, not_requested or already_studied."
           }
         },
         "required": [
