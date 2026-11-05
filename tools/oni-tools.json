@@ -668,7 +668,7 @@
     },
     {
       "name": "configure",
-      "description": "Set up a finished building. recipe with count queues a recipe on a fabricator such as a MicrobeMusher; count -1 repeats forever and 0 clears it. seed plants in a planter or farm tile. storage_filter sets what a storage building accepts, replacing the old list. assigned_duplicant assigns individual furniture through the game's normal assignment rules. MassageTable stress thresholds control when massage starts and stops. request_suit true makes a suit or oxygen mask dock request and keep a suit (false: hold none; a new dock does neither until set). capture true marks a critter for wrangling (false clears it), critter_limit sets a Critter Drop-Off's limit. study true sends a duplicant to analyse a geyser (false cancels; the id comes from find kind geyser). smart_battery_low_pct and smart_battery_high_pct set a BatterySmart's automation range. inspect lists recipes, seeds, filters, assignment (kind, id, name), massage thresholds and smart battery thresholds.",
+      "description": "Set up a finished building. recipe with count queues a recipe on a fabricator such as a MicrobeMusher; count -1 repeats forever and 0 clears it. seed plants in a planter or farm tile. storage_filter sets what a storage building accepts, replacing the old list. assigned_duplicant assigns individual furniture through the game's normal assignment rules. MassageTable stress thresholds control when massage starts and stops. warp_action start or cancel drives a Teleporter Transmitter (WarpPortal) whose traveller was chosen with assigned_duplicant. request_suit true makes a suit or oxygen mask dock request and keep a suit (false: hold none; a new dock does neither until set). capture true marks a critter for wrangling (false clears it), critter_limit sets a Critter Drop-Off's limit. study true sends a duplicant to analyse a geyser (false cancels; the id comes from find kind geyser). smart_battery_low_pct and smart_battery_high_pct set a BatterySmart's automation range. inspect lists recipes, seeds, filters, assignment (kind, id, name), massage thresholds and smart battery thresholds.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -766,6 +766,14 @@
           "request_suit": {
             "type": "boolean",
             "description": "Suit Dock, Oxygen Mask Dock, Jet Suit Dock, Lead Suit Dock: true is the side screen's 'request suit', false its 'no suit'. inspect reads suit_configured, suit_requested, stored_suit and, with a suit in it, suit_oxygen_pct and suit_fully_charged."
+          },
+          "warp_action": {
+            "type": "string",
+            "enum": [
+              "start",
+              "cancel"
+            ],
+            "description": "WarpPortal only, with the side screen's guards: start is refused as not_ready until the assigned duplicant waits inside (inspect warp_ready); cancel releases the assignment and is refused as cannot_cancel while warping or recharging. inspect reads warp_ready, warping and warp_recharging."
           }
         },
         "required": [
