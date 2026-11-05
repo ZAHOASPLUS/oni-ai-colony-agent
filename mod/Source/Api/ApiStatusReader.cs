@@ -42,7 +42,37 @@ namespace OniAiProbeMod.Api
                         { "count", alert.Count }
                     }).ToList() },
                 { "research", ReadResearch() },
-                { "work", ReadWork(world.id) }
+                { "work", ReadWork(world.id) },
+                { "printables_waiting", Immigration.Instance.ImmigrantsAvailable },
+                { "schedules", ReadSchedules() }
+            };
+        }
+
+        private static object ReadSchedules()
+        {
+            return ScheduleManager.Instance.GetSchedules().Select(schedule => (object)new Dictionary<string, object>
+            {
+                { "blocks", ApiPlayTools.Describe(schedule) },
+                { "current_block", schedule.GetCurrentBlockIdx() }
+            }).ToList();
+        }
+
+        /// <summary>One row of get_progress: the numbers the stage goal is judged on.</summary>
+        internal static Dictionary<string, object> ReadProgressRow()
+        {
+            WorldContainer world = ClusterManager.Instance.activeWorld;
+            int duplicants = Components.LiveMinionIdentities.Items.Count(identity => identity != null);
+            double foodKcal = ReadFoodKcal(world);
+            return new Dictionary<string, object>
+            {
+                { "cycle", GameClock.Instance.GetCycle() + 1 },
+                { "duplicants", duplicants },
+                { "food_kcal", System.Math.Round(foodKcal, 0) },
+                { "food_days", duplicants == 0 ? 0.0 : System.Math.Round(foodKcal / (KcalPerDuplicantCycle * duplicants), 1) },
+                { "breathable_kg", ApiValues.Number(ReadBreathableKg(world), 0) },
+                { "oxygen_report_kg", ReadReport(ReportManager.ReportType.OxygenCreated) },
+                { "power", ReadPower() },
+                { "alerts", ReadAlerts().Count(alert => alert.Severity != "minor") }
             };
         }
 
@@ -103,6 +133,9 @@ namespace OniAiProbeMod.Api
                 entry["world"] = identity.GetMyWorldId();
                 entry["chore"] = chore?.choreType?.Id;
                 entry["stress_pct"] = AmountValue(amounts.Stress, go);
+                entry["stress_causes"] = StressCauses(amounts.Stress, go);
+                entry["morale"] = AttributeValue(Db.Get().Attributes.QualityOfLife, go);
+                entry["morale_expected"] = AttributeValue(Db.Get().Attributes.QualityOfLifeExpectation, go);
                 entry["health"] = AmountValue(amounts.HitPoints, go);
                 entry["breath_pct"] = AmountValue(amounts.Breath, go);
                 entry["kcal"] = Kcal(amounts.Calories, go);
@@ -112,6 +145,37 @@ namespace OniAiProbeMod.Api
                 duplicants.Add(entry);
             }
             return duplicants;
+        }
+
+        /// <summary>What moves stress right now, in percent per cycle.</summary>
+        private static List<object> StressCauses(Amount stress, GameObject go)
+        {
+            List<object> causes = new List<object>();
+            AmountInstance instance = stress.Lookup(go);
+            if (instance == null)
+            {
+                return causes;
+            }
+            ArrayRef<AttributeModifier> modifiers = instance.deltaAttribute.Modifiers;
+            for (int i = 0; i != modifiers.Count; i++)
+            {
+                AttributeModifier modifier = modifiers[i];
+                if (modifier.Value != 0f)
+                {
+                    causes.Add(new Dictionary<string, object>
+                    {
+                        ["what"] = modifier.GetDescription(),
+                        ["per_cycle"] = System.Math.Round(modifier.Value * 600f, 1),
+                    });
+                }
+            }
+            return causes;
+        }
+
+        private static object AttributeValue(Klei.AI.Attribute attribute, GameObject go)
+        {
+            AttributeInstance instance = attribute.Lookup(go);
+            return instance == null ? null : (object)ApiValues.Number(instance.GetTotalValue(), 1);
         }
 
         private static object AmountValue(Amount amount, GameObject go, bool kelvin = false)
@@ -142,6 +206,8 @@ namespace OniAiProbeMod.Api
                 : element.id + " " + System.Math.Round(Grid.Mass[cell], 2) + " kg";
         }
 
+        private const int UnreachableLimit = 12;
+
         internal static List<object> ReadStatusItems(GameObject go, int limit)
         {
             List<object> names = new List<object>();
@@ -154,7 +220,7 @@ namespace OniAiProbeMod.Api
             IEnumerator<StatusItemGroup.Entry> items = group.GetEnumerator();
             while (items.MoveNext() && names.Count < limit)
             {
-                names.Add(items.Current.GetName());
+                names.Add(STRINGS.UI.StripLinkFormatting(items.Current.GetName()));
             }
             return names;
         }
@@ -175,26 +241,49 @@ namespace OniAiProbeMod.Api
 
         private static double ReadFoodKcal(WorldContainer world)
         {
-            ICollection<Pickupable> food = world.worldInventory.GetPickupables(GameTags.Edible);
-            if (food == null)
-            {
-                return 0.0;
-            }
+            HashSet<GameObject> seen = new HashSet<GameObject>();
             double total = 0.0;
-            foreach (Pickupable pickupable in food)
+            ICollection<Pickupable> food = world.worldInventory.GetPickupables(GameTags.Edible);
+            if (food != null)
             {
-                if (pickupable == null || pickupable.KPrefabID.HasTag(GameTags.StoredPrivate))
+                foreach (Pickupable pickupable in food)
+                {
+                    AddFood(pickupable == null ? null : pickupable.gameObject, seen, ref total);
+                }
+            }
+
+            // WorldInventory does not enumerate food held in private Storage
+            // components such as a RationBox. Include those items explicitly.
+            foreach (BuildingComplete building in Components.BuildingCompletes.Items)
+            {
+                if (building == null || building.GetMyWorldId() != world.id)
                 {
                     continue;
                 }
-                Edible edible = pickupable.GetComponent<Edible>();
-                if (edible != null && edible.Calories > 0f && !float.IsInfinity(edible.Calories))
+                foreach (Storage storage in building.GetComponents<Storage>())
                 {
-                    // Edible.Calories is in calories; players read kcal.
-                    total += edible.Calories / 1000.0;
+                    foreach (GameObject item in storage.items)
+                    {
+                        AddFood(item, seen, ref total);
+                    }
                 }
             }
             return total;
+        }
+
+        private static void AddFood(GameObject item, HashSet<GameObject> seen, ref double total)
+        {
+            if (item == null || !seen.Add(item))
+            {
+                return;
+            }
+            Edible edible = item.GetComponent<Edible>();
+            if (edible != null && edible.Calories > 0f &&
+                !float.IsNaN(edible.Calories) && !float.IsInfinity(edible.Calories))
+            {
+                // Edible.Calories is in calories; players read kcal.
+                total += edible.Calories / 1000.0;
+            }
         }
 
         private static float ReadBreathableKg(WorldContainer world)
@@ -296,12 +385,20 @@ namespace OniAiProbeMod.Api
 
         private static object ReadWork(int worldId)
         {
+            Database.BuildingStatusItems statusItems = Db.Get().BuildingStatusItems;
+            List<object> unreachable = new List<object>();
             int blueprints = 0;
             foreach (Prioritizable item in Components.Prioritizables.Items)
             {
                 if (item != null && item.GetMyWorldId() == worldId && item.GetComponent<Constructable>() != null)
                 {
                     blueprints++;
+                    KSelectable selectable = item.GetComponent<KSelectable>();
+                    if (selectable.HasStatusItem(statusItems.ConstructionUnreachable) ||
+                        selectable.HasStatusItem(statusItems.ConstructableDigUnreachable))
+                    {
+                        NoteUnreachable(unreachable, item);
+                    }
                 }
             }
             int digs = 0;
@@ -310,13 +407,28 @@ namespace OniAiProbeMod.Api
                 if (diggable != null && diggable.GetMyWorldId() == worldId)
                 {
                     digs++;
+                    if (diggable.GetComponent<KSelectable>().HasStatusItem(statusItems.DigUnreachable))
+                    {
+                        NoteUnreachable(unreachable, diggable);
+                    }
                 }
             }
             return new Dictionary<string, object>
             {
                 { "blueprints", blueprints },
-                { "dig_marks", digs }
+                { "dig_marks", digs },
+                { "unreachable", unreachable }
             };
+        }
+
+        private static void NoteUnreachable(List<object> unreachable, KMonoBehaviour target)
+        {
+            if (unreachable.Count < UnreachableLimit)
+            {
+                Dictionary<string, object> entry = ApiValues.Xy(Grid.PosToCell(target));
+                entry["what"] = target.PrefabID().Name;
+                unreachable.Add(entry);
+            }
         }
 
         /// <summary>The problems the game itself is showing the player, grouped by title.</summary>

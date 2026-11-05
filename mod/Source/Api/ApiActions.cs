@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using Newtonsoft.Json.Linq;
+using OniAiProbeMod.Patches;
 using UnityEngine;
 
 namespace OniAiProbeMod.Api
@@ -22,6 +23,10 @@ namespace OniAiProbeMod.Api
         private const int LayerCount = (int)ObjectLayer.NumLayers;
         private const string DefaultFacade = "DEFAULT_FACADE";
 
+        private const int TestSpeed = 4;
+        private const int TestTimeScale = 10;
+        private const int NormalTopTimeScale = 3;
+        private const int MaxTimeScale = 60;
         private static readonly Regex CheckpointSuffix = new Regex("-ckpt-[0-9]{3}$", RegexOptions.CultureInvariant);
 
         internal static object Build(JObject args)
@@ -62,13 +67,17 @@ namespace OniAiProbeMod.Api
         internal static object BuildPath(JObject args)
         {
             BuildingDef def = ReadBuildableDef(args);
-            if (!def.isUtility)
+            if (!def.isUtility && (def.WidthInCells != 1 || def.HeightInCells != 1))
             {
                 throw new ApiException("wrong_tool", def.PrefabID + " is not laid along a path.", "Use build.");
             }
             List<int> cells = ReadPath(args);
             List<Tag> materials = ReadMaterials(args, def);
             int priority = ReadPriority(args);
+            if (!def.isUtility)
+            {
+                return BuildLine(def, cells, materials, priority);
+            }
 
             IUtilityNetworkMgr manager = def.BuildingComplete.GetComponent<IHaveUtilityNetworkMgr>()?.GetNetworkManager();
             if (manager == null)
@@ -144,6 +153,52 @@ namespace OniAiProbeMod.Api
                 { "placed", created.Count },
                 { "joined_existing", cells.Count - created.Count },
                 { "materials", materials.Select(material => material.Name).ToList() }
+            };
+        }
+
+        // Ladders and tiles: no network to join, so one blueprint per cell.
+        private static object BuildLine(BuildingDef def, List<int> cells, List<Tag> materials, int priority)
+        {
+            List<int> open = new List<int>();
+            foreach (int cell in cells)
+            {
+                GameObject present = Grid.Objects[cell, (int)def.ObjectLayer];
+                if (present != null && present.PrefabID().Name.StartsWith(def.PrefabID, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                string failure;
+                if (!def.IsValidPlaceLocation(null, cell, Orientation.Neutral, false, out failure, true))
+                {
+                    throw new ApiException(
+                        "invalid_placement",
+                        def.PrefabID + " cannot go at " + Describe(cell) + ": " + failure,
+                        "Nothing was placed. Check the path with get_map.");
+                }
+                open.Add(cell);
+            }
+
+            List<GameObject> created = new List<GameObject>();
+            try
+            {
+                foreach (int cell in open)
+                {
+                    GameObject blueprint = Place(def, cell, Orientation.Neutral, materials);
+                    created.Add(blueprint);
+                    SetPriority(blueprint, priority);
+                }
+            }
+            catch (ApiException)
+            {
+                Cancel(created);
+                throw;
+            }
+            return new Dictionary<string, object>
+            {
+                { "def", def.PrefabID },
+                { "cells", cells.Count },
+                { "placed", created.Count },
+                { "materials", materials.Select(tag => tag.Name).ToList() }
             };
         }
 
@@ -328,10 +383,11 @@ namespace OniAiProbeMod.Api
         internal static object SetSpeed(JObject args)
         {
             int speed = ApiArgs.Int(args, "speed", -1);
-            if (speed < 0 || speed > 3)
+            if (speed < 0 || speed > TestSpeed)
             {
-                throw new ApiException("invalid_argument", "speed must be 0 (pause), 1, 2 or 3.");
+                throw new ApiException("invalid_argument", "speed must be 0 (pause), 1, 2, 3 or 4 (10x, for long tests).");
             }
+            int timeScale = ReadTimeScale(args, speed);
 
             SpeedControlScreen control = SpeedControlScreen.Instance;
             if (speed == 0)
@@ -343,7 +399,11 @@ namespace OniAiProbeMod.Api
             }
             else
             {
-                control.SetSpeed(speed - 1);
+                // Speed 4 is the game's own debug speed: its top setting at ten times,
+                // or at time_scale when one is given.
+                control.ultraSpeed = speed == TestSpeed ? timeScale : NormalTopTimeScale;
+                control.SetSpeed(0);
+                control.SetSpeed(Math.Min(speed, 3) - 1);
                 if (control.IsPaused)
                 {
                     control.Unpause(false);
@@ -360,8 +420,36 @@ namespace OniAiProbeMod.Api
             return new Dictionary<string, object>
             {
                 { "paused", control.IsPaused },
-                { "speed", control.GetSpeed() + 1 }
+                { "speed", speed == 0 ? control.GetSpeed() + 1 : speed },
+                { "time_scale", Time.timeScale }
             };
+        }
+
+        private static int ReadTimeScale(JObject args, int speed)
+        {
+            int timeScale = ApiArgs.Int(args, "time_scale", -1);
+            if (timeScale == -1)
+            {
+                return TestTimeScale;
+            }
+            if (speed != TestSpeed)
+            {
+                throw new ApiException("invalid_argument", "time_scale only goes with speed 4.");
+            }
+            if (timeScale <= NormalTopTimeScale || timeScale > MaxTimeScale)
+            {
+                throw new ApiException(
+                    "invalid_argument",
+                    "time_scale must be from " + (NormalTopTimeScale + 1) + " to " + MaxTimeScale + ".");
+            }
+            if (timeScale > TestTimeScale && !SimFrameLimitPatch.IsInstalled)
+            {
+                throw new ApiException(
+                    "speed_limit_in_place",
+                    "The game's limit per frame could not be lifted, so a time_scale above " + TestTimeScale + " would not take effect.",
+                    "Use time_scale " + TestTimeScale + " or lower.");
+            }
+            return timeScale;
         }
 
         // A new file next to the active save, never an existing one, and the game
@@ -414,6 +502,7 @@ namespace OniAiProbeMod.Api
             {
                 throw new ApiException("invalid_placement", "The game placed no " + def.PrefabID + " at " + Describe(cell) + ".");
             }
+            ApiEvents.ExpectBuilding(def.PrefabID, cell);
             return blueprint;
         }
 
@@ -428,7 +517,7 @@ namespace OniAiProbeMod.Api
             }
         }
 
-        private static void SetPriority(GameObject target, int level)
+        internal static void SetPriority(GameObject target, int level)
         {
             Prioritizable prioritizable = target.GetComponent<Prioritizable>();
             if (prioritizable != null)
@@ -561,7 +650,7 @@ namespace OniAiProbeMod.Api
             return orientation;
         }
 
-        private static int ReadPriority(JObject args)
+        internal static int ReadPriority(JObject args)
         {
             int level = ApiArgs.Int(args, "priority", DefaultPriority);
             if (level < 1 || level > 9)
@@ -582,7 +671,7 @@ namespace OniAiProbeMod.Api
             return ApiValues.CheckedCell(x, y);
         }
 
-        private static List<int> ReadArea(JObject args)
+        internal static List<int> ReadArea(JObject args)
         {
             int cell = ReadCell(args);
             int width = ApiArgs.Int(args, "w", 1);
@@ -643,13 +732,7 @@ namespace OniAiProbeMod.Api
             HashSet<GameObject> targets = new HashSet<GameObject>();
             if (args["id"] != null)
             {
-                int id = ApiArgs.Int(args, "id", 0);
-                KPrefabID prefab = KPrefabIDTracker.Get().GetInstance(id);
-                if (prefab == null)
-                {
-                    throw new ApiException("unknown_target", "Nothing has id " + id + ".", "inspect gives building ids.");
-                }
-                targets.Add(prefab.gameObject);
+                targets.Add(FindById(ApiArgs.Int(args, "id", 0)));
                 return targets;
             }
             foreach (int cell in ReadArea(args))
@@ -657,6 +740,19 @@ namespace OniAiProbeMod.Api
                 AddCellObjects(cell, targets);
             }
             return targets;
+        }
+
+        internal static GameObject FindById(int id)
+        {
+            KPrefabID prefab = KPrefabIDTracker.Get().GetInstance(id);
+            if (prefab == null)
+            {
+                throw new ApiException(
+                    "unknown_target",
+                    "Nothing has id " + id + ".",
+                    "A finished building has a new id, different from its blueprint's: use list_buildings or inspect.");
+            }
+            return prefab.gameObject;
         }
 
         private static void AddCellObjects(int cell, HashSet<GameObject> targets)
@@ -725,7 +821,7 @@ namespace OniAiProbeMod.Api
                     line["result"] = response["result"];
                 }
                 File.AppendAllText(
-                    Path.Combine(Probe.ProbeWriter.BridgeDirectory, FileName),
+                    Path.Combine(ApiLog.BridgeDirectory, FileName),
                     line.ToString(Newtonsoft.Json.Formatting.None) + "\n");
             }
             catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)

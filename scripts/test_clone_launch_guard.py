@@ -24,7 +24,6 @@ from agent.clone_launch_guard import (
     build_queue_probe,
     validate_clone_launch,
 )
-from agent.command_custody import CommandCustodyConflict
 
 
 def digest(path: pathlib.Path) -> str:
@@ -262,7 +261,7 @@ class CloneLaunchGuardTests(unittest.TestCase):
     def test_stable_read_failure_is_fail_closed(self) -> None:
         with mock.patch(
             "agent.clone_launch_guard.read_stable_bytes",
-            side_effect=CommandCustodyConflict("changed during read"),
+            side_effect=OSError("changed during read"),
         ):
             with self.assertRaisesRegex(CloneLaunchGuardError, "unreadable"):
                 self.call()

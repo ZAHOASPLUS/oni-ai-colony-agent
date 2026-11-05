@@ -79,6 +79,18 @@ class CheckpointChainTests(unittest.TestCase):
                 run_id="m1-terra-r01", session_id="session-test", game_time_cycles=9.0,
             )
 
+    def test_a_run_that_saved_twice_seals_both_oldest_first(self):
+        first = K.checkpoint_paths(self.save, 1)
+        second = K.checkpoint_paths(self.save, 2)
+        first["save"].write_bytes(oni_save_bytes(body=b"cycle-8"))
+        second["save"].write_bytes(oni_save_bytes(body=b"cycle-9"))
+        for index, paths in ((1, first), (2, second)):
+            K.publish_checkpoint_manifest(paths["manifest"], K.build_checkpoint_manifest(
+                clone_manifest=self.manifest, clone_save=self.save, index=index,
+                run_id="m1-terra-r01", session_id="session-test", game_time_cycles=9.0,
+            ))
+        self.assertEqual(self.latest()["chain"], [0, 1, 2])
+
     def test_changed_checkpoint_bytes_break_the_chain(self):
         self.add(1, b"cycle-8")
         K.checkpoint_paths(self.save, 1)["save"].write_bytes(oni_save_bytes(body=b"edited"))

@@ -68,7 +68,7 @@ namespace OniAiProbeMod.Api
                 Debug.LogWarning(Mod.LogPrefix + " Could not delete " + AutoloadFileName + ": " + ex.Message);
             }
 
-            ProbeWriter.WriteEvent("api_mode", new Dictionary<string, object>
+            ApiLog.Event("api_mode", new Dictionary<string, object>
             {
                 { "enabled", Enabled },
                 { "refusal", refusal },

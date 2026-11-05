@@ -58,9 +58,7 @@ These rules apply to every Codex task working in this workspace.
 - Keep large logs in evidence files. Return paths, hashes, counts, timestamps, and small relevant excerpts rather than injecting raw logs into the conversation.
 - Before declaring a run complete, verify normal exit, original save hashes, restored Mod/config state, empty command queues, and the absence of leftover helper processes.
 
-## Process lifetime (learned the hard way, twice)
+## Process lifetime
 
-- Start the long-lived processes — the ONI game and the controller (which is also the Bridge) — in their own **short** command, and never in a command that also runs a polling loop.
-- A polling command that exceeds its timeout becomes a background job; cancelling that job terminates its whole process tree. On 2026-10-25 (round 19) and again on 2026-10-26 (round 27) this killed a healthy controller mid-run: the controller then exited with `status: ok` and an empty stderr, which reads like a clean shutdown rather than a kill.
-- Use `scripts/start-controller.ps1 -Config <file> -LogDir <dir>` to start the controller (it returns in well under a second and writes a start record) and `python scripts/watch_controller.py` (read-only, at most 30 s per run) to watch it. Do not start it with `Start-Process -RedirectStandardOutput`: the child inherits the caller's output pipe, and a caller capturing the output waits until the controller exits (verified 2026-10-27). On Windows `os.kill(pid, 0)` terminates the process; it is not a liveness probe.
-- Watch runs belong in a separate command. Verified 2026-10-26: after starting the controller in a short command, cancelling an unrelated watch job left the controller running (PID 15000) and publishing.
+- Start the game in its own short command with `python scripts/api_session.py start`, and never in a command that also runs a polling loop. A polling command that exceeds its timeout becomes a background job, and cancelling that job terminates its whole process tree.
+- On Windows `os.kill(pid, 0)` terminates the process; it is not a liveness probe.

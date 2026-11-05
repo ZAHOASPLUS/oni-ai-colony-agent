@@ -16,19 +16,39 @@ namespace OniAiProbeMod.Api
         private const int Capacity = 2000;
         private const int DefaultLimit = 100;
         private const float TickSeconds = 1f;
+        private const float LowBreathPercent = 60f;
 
         private static readonly Queue<Dictionary<string, object>> Buffer = new Queue<Dictionary<string, object>>();
         private static long nextSequence = 1;
         private static float nextTickAt;
         private static Baseline previous;
+        // Buildings the player ordered.  Map features spawn as an area is revealed
+        // and must not read as finished work.
+        private static readonly HashSet<string> Ordered = new HashSet<string>(StringComparer.Ordinal);
+
+        internal static List<Dictionary<string, object>> CycleLog { get; } = new List<Dictionary<string, object>>();
+
+        internal static int DuplicantsLost { get; private set; }
 
         private sealed class Baseline
         {
             internal int Cycle;
             internal Dictionary<string, string> Alerts = new Dictionary<string, string>(StringComparer.Ordinal);
             internal Dictionary<int, string> Buildings = new Dictionary<int, string>();
+            internal Dictionary<int, int> BuildingCells = new Dictionary<int, int>();
             internal Dictionary<int, string> Duplicants = new Dictionary<int, string>();
             internal HashSet<string> Techs = new HashSet<string>(StringComparer.Ordinal);
+            internal HashSet<string> LowBreath = new HashSet<string>(StringComparer.Ordinal);
+        }
+
+        internal static void ExpectBuilding(string def, int cell)
+        {
+            Ordered.Add(OrderKey(def, cell));
+        }
+
+        private static string OrderKey(string def, int cell)
+        {
+            return def + "@" + cell;
         }
 
         internal static void Add(string type, Dictionary<string, object> fields = null)
@@ -73,6 +93,10 @@ namespace OniAiProbeMod.Api
             try
             {
                 Baseline current = Observe();
+                if (current.Duplicants.Count == 0 || current.Buildings.Count == 0)
+                {
+                    return;  // The world is still loading; this is no baseline.
+                }
                 if (previous == null)
                 {
                     Add("session_started", new Dictionary<string, object> { { "save", SaveLoader.GetActiveSaveFilePath() } });
@@ -86,7 +110,7 @@ namespace OniAiProbeMod.Api
             catch (Exception ex)
             {
                 // Events are a convenience; get_status still tells the truth.
-                Probe.ProbeWriter.WriteError("api_events", ex);
+                ApiLog.Error("api_events", ex);
             }
         }
 
@@ -124,6 +148,7 @@ namespace OniAiProbeMod.Api
                 {
                     KPrefabID prefab = building.GetComponent<KPrefabID>();
                     state.Buildings[prefab.InstanceID] = prefab.PrefabTag.Name;
+                    state.BuildingCells[prefab.InstanceID] = Grid.PosToCell(building);
                 }
             }
             foreach (MinionIdentity identity in Components.LiveMinionIdentities.Items)
@@ -131,6 +156,10 @@ namespace OniAiProbeMod.Api
                 if (identity != null)
                 {
                     state.Duplicants[identity.GetComponent<KPrefabID>().InstanceID] = identity.GetProperName();
+                    if (Db.Get().Amounts.Breath.Lookup(identity.gameObject).value < LowBreathPercent)
+                    {
+                        state.LowBreath.Add(identity.GetProperName());
+                    }
                 }
             }
             foreach (Tech tech in Db.Get().Techs.resources)
@@ -148,6 +177,7 @@ namespace OniAiProbeMod.Api
             if (after.Cycle != before.Cycle)
             {
                 Add("cycle_started", new Dictionary<string, object> { { "number", after.Cycle } });
+                CycleLog.Add(ApiStatusReader.ReadProgressRow());
             }
             foreach (KeyValuePair<string, string> alert in after.Alerts)
             {
@@ -166,7 +196,8 @@ namespace OniAiProbeMod.Api
             }
             foreach (KeyValuePair<int, string> building in after.Buildings)
             {
-                if (!before.Buildings.ContainsKey(building.Key))
+                if (!before.Buildings.ContainsKey(building.Key) &&
+                    Ordered.Remove(OrderKey(building.Value, after.BuildingCells[building.Key])))
                 {
                     Add("building_completed", new Dictionary<string, object>
                     {
@@ -191,6 +222,7 @@ namespace OniAiProbeMod.Api
                 if (!after.Duplicants.ContainsKey(duplicant.Key))
                 {
                     Add("duplicant_lost", new Dictionary<string, object> { { "name", duplicant.Value } });
+                    DuplicantsLost++;
                 }
             }
             foreach (KeyValuePair<int, string> duplicant in after.Duplicants)
@@ -199,6 +231,10 @@ namespace OniAiProbeMod.Api
                 {
                     Add("duplicant_arrived", new Dictionary<string, object> { { "name", duplicant.Value } });
                 }
+            }
+            foreach (string name in after.LowBreath.Where(duplicant => !before.LowBreath.Contains(duplicant)))
+            {
+                Add("duplicant_low_breath", new Dictionary<string, object> { { "name", name } });
             }
             foreach (string tech in after.Techs.Where(id => !before.Techs.Contains(id)))
             {

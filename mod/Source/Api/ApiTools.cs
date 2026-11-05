@@ -53,6 +53,10 @@ namespace OniAiProbeMod.Api
             { "get_buildable", new Tool(ApiCatalogReader.ReadBuildable, true) },
             { "get_research", new Tool(ApiCatalogReader.ReadResearch, true) },
             { "get_events", new Tool(ApiEvents.Read, true) },
+            { "list_buildings", new Tool(ApiQueries.ListBuildings, true) },
+            { "get_resources", new Tool(ApiQueries.ReadResources, true) },
+            { "find", new Tool(ApiQueries.Find, true) },
+            { "get_progress", new Tool(ApiQueries.ReadProgress, true) },
             { "build", new Tool(ApiActions.Build, true, true) },
             { "build_path", new Tool(ApiActions.BuildPath, true, true) },
             { "dig", new Tool(ApiActions.Dig, true, true) },
@@ -61,6 +65,17 @@ namespace OniAiProbeMod.Api
             { "set_priority", new Tool(ApiActions.SetPriorityTool, true, true) },
             { "set_research", new Tool(ApiActions.SetResearch, true, true) },
             { "set_speed", new Tool(ApiActions.SetSpeed, true, true) },
+            { "harvest", new Tool(ApiPlayTools.Harvest, true, true) },
+            { "sweep", new Tool(ApiPlayTools.Sweep, true, true) },
+            { "mop", new Tool(ApiPlayTools.Mop, true, true) },
+            { "configure", new Tool(ApiPlayTools.Configure, true, true) },
+            { "set_chore_priority", new Tool(ApiPlayTools.SetChorePriority, true, true) },
+            { "set_schedule", new Tool(ApiPlayTools.SetSchedule, true, true) },
+            { "get_skills", new Tool(ApiSkills.Read, true) },
+            { "learn_skill", new Tool(ApiSkills.Learn, true, true) },
+            { "get_printables", new Tool(ApiPrintables.Read, true) },
+            { "choose_printable", new Tool(ApiPrintables.Choose, true, true) },
+            { "reject_printables", new Tool(ApiPrintables.Reject, true, true) },
             { "save_checkpoint", new Tool(ApiActions.SaveCheckpoint, true, true) }
         };
 
@@ -113,7 +128,7 @@ namespace OniAiProbeMod.Api
             catch (Exception ex)
             {
                 // Never let a tool's failure reach the game's update loop.
-                ProbeWriter.WriteError("api_" + name, ex);
+                ApiLog.Error("api_" + name, ex);
                 return ApiResult.Failure("internal_error", ex.GetType().Name + ": " + ex.Message);
             }
         }
@@ -232,9 +247,11 @@ namespace OniAiProbeMod.Api
         internal const string Loading = "loading";
         internal const string InGame = "in_game";
 
+        internal static bool SessionActive { get; set; }
+
         internal static string State()
         {
-            if (Game.Instance != null && SpeedControlScreen.Instance != null && ProbeSession.IsSaveSessionActive)
+            if (Game.Instance != null && SpeedControlScreen.Instance != null && SessionActive)
             {
                 return InGame;
             }

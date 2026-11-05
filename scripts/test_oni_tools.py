@@ -29,13 +29,30 @@ class SchemaTests(unittest.TestCase):
     def test_schema_and_mod_name_the_same_tools(self) -> None:
         source = (REPO_ROOT / "mod" / "Source" / "Api" / "ApiTools.cs").read_text(encoding="utf-8")
         in_mod = set(re.findall(r'\{ "(\w+)", new Tool\(', source))
-        self.assertEqual({tool["name"] for tool in oni_tools.load_tools()}, in_mod)
+        names = {tool["name"] for tool in oni_tools.load_tools()}
+        self.assertEqual(names - {"wait"}, in_mod)
 
     def test_openai_form_carries_every_tool(self) -> None:
         tools = oni_tools.openai_tools()
         self.assertEqual(len(tools), len(oni_tools.load_tools()))
         self.assertTrue(all(item["type"] == "function" for item in tools))
         self.assertTrue(all(item["function"]["parameters"]["type"] == "object" for item in tools))
+
+
+class WaitTests(unittest.TestCase):
+    def test_returns_early_when_a_duplicant_is_lost(self) -> None:
+        replies = [
+            {"ok": True, "result": {"events": [{"seq": 5, "type": "cycle_started"}], "next_since": 5}},
+            {"ok": True, "result": {"events": [{"seq": 6, "type": "duplicant_lost"}], "next_since": 6}},
+        ]
+        with mock.patch.object(oni_tools, "call_mod", side_effect=replies), mock.patch.object(oni_tools.time, "sleep"):
+            outcome = oni_tools.call("wait", {"seconds": 30, "since": 4})
+        self.assertEqual(outcome["result"]["next_since"], 6)
+        self.assertEqual(len(outcome["result"]["events"]), 2)
+
+    def test_passes_on_a_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as bridge, mock.patch.dict(os.environ, {"ONI_AI_BRIDGE_DIR": bridge}):
+            self.assertEqual(oni_tools.call("wait", {"seconds": 1})["error"]["code"], "game_unavailable")
 
 
 class McpTests(unittest.TestCase):

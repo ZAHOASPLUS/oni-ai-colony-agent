@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
 """Start and stop one tool-API game session, without mouse or keyboard.
 
-    python scripts/api_session.py start --manifest M --save S --run-dir D
+    python scripts/api_session.py start --manifest M --save S --run-dir D [--resume | --checkpoint N]
     python scripts/api_session.py stop --run-dir D
+    python scripts/api_session.py seal --manifest M --save S --run-dir D
 
 ``start`` checks the clone against its manifest, keeps a copy of the game's
 preferences (loading a save moves the game's "last save" pointer), writes the
 autoload request and asks Steam to launch the game.  It returns at once, so the
-game is never a child of a long-lived command.  ``stop`` closes the game the way
-the window's close button does and puts the preferences back.
+game is never a child of a long-lived command.  With ``--resume`` it loads the
+newest intact link of the clone's checkpoint chain instead of the clone, and
+with ``--checkpoint N`` it rolls back to link N of that chain.
+
+``stop`` closes the game the way the window's close button does, puts the
+preferences back, moves the run's audit log into the run directory and seals the
+checkpoints the run saved: a checkpoint joins the chain only through its
+manifest.  ``seal`` does that last step alone, for a run that ended without
+``stop``.
 """
 
 from __future__ import annotations
@@ -23,6 +31,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -33,6 +42,13 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from agent.checkpoint_chain import (  # noqa: E402
+    CheckpointChainError,
+    build_checkpoint_manifest,
+    checkpoint_paths,
+    publish_checkpoint_manifest,
+    select_latest_checkpoint,
+)
 from agent.clone_launch_guard import (  # noqa: E402
     CloneLaunchGuardError,
     build_process_probe,
@@ -43,6 +59,8 @@ GAME_PROCESS = "OxygenNotIncluded.exe"
 STEAM_LAUNCH_URL = "steam://rungameid/457140"
 WM_CLOSE = 0x0010
 STOP_TIMEOUT_SECONDS = 25.0
+AUDIT_FILE = "api-audit.jsonl"
+CHECKPOINT_STEM = re.compile(r"-ckpt-(?P<index>[0-9]{3})$")
 
 
 def oni_root() -> pathlib.Path:
@@ -88,6 +106,14 @@ def start(args: argparse.Namespace) -> Dict[str, Any]:
         process_probe=build_process_probe((GAME_PROCESS,)),
     )
 
+    target = save
+    if args.resume or args.checkpoint is not None:
+        target = select_latest_checkpoint(pathlib.Path(args.manifest), save)["save_path"]
+    if args.checkpoint is not None:
+        target = checkpoint_paths(save, args.checkpoint)["save"]
+        if not target.is_file():
+            raise CheckpointChainError(f"Checkpoint {args.checkpoint} is not in the chain.")
+
     run_dir.mkdir(parents=True, exist_ok=True)
     prefs = root / "kplayerprefs.yaml"
     prefs_backup = run_dir / "kplayerprefs.before.yaml"
@@ -96,6 +122,8 @@ def start(args: argparse.Namespace) -> Dict[str, Any]:
         "schema": "oni.api-session.v1",
         "started_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "save": str(save),
+        "loaded": str(target),
+        "manifest": str(pathlib.Path(args.manifest).resolve()),
         "preflight": preflight,
         "kplayerprefs_sha256": sha256(prefs),
         "installed_dll_sha256": sha256(root / "mods" / "Dev" / "oni-ai-colony-agent" / "OniAiProbeMod.dll"),
@@ -105,7 +133,7 @@ def start(args: argparse.Namespace) -> Dict[str, Any]:
         bridge / "autoload.json",
         {
             "schema": "oni.api-autoload.v1",
-            "save": str(save),
+            "save": str(target),
             "created_utc": session["started_utc"],
         },
     )
@@ -158,6 +186,9 @@ def stop(args: argparse.Namespace) -> Dict[str, Any]:
     prefs = root / "kplayerprefs.yaml"
     shutil.copy2(run_dir / "kplayerprefs.before.yaml", prefs)
     bridge = root / "ai-bridge"
+    if (bridge / AUDIT_FILE).exists():
+        os.replace(bridge / AUDIT_FILE, run_dir / AUDIT_FILE)
+    sealed = seal_checkpoints(pathlib.Path(session["manifest"]), pathlib.Path(session["save"]), run_dir)
     report = {
         "schema": "oni.api-session-end.v1",
         "stopped_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -165,9 +196,52 @@ def stop(args: argparse.Namespace) -> Dict[str, Any]:
         "save_unchanged": sha256(pathlib.Path(session["save"])) == session["preflight"]["clone_save_sha256"],
         "api_file_left": (bridge / "api.json").exists(),
         "autoload_left": (bridge / "autoload.json").exists(),
+        "checkpoints_sealed": sealed,
     }
     write_json_atomic(run_dir / "session-end.json", report)
     return report
+
+
+def seal_checkpoints(manifest: pathlib.Path, clone_save: pathlib.Path, run_dir: pathlib.Path) -> List[str]:
+    """Publish a manifest for each checkpoint this run saved, oldest first."""
+    audit = run_dir / AUDIT_FILE
+    if not audit.exists():
+        return []
+
+    saved: Dict[int, float] = {}
+    for line in audit.read_text(encoding="utf-8").splitlines():
+        entry = json.loads(line)
+        if entry.get("tool") != "save_checkpoint" or not entry.get("ok"):
+            continue
+        path = pathlib.Path(str(entry["result"]["path"]))
+        match = CHECKPOINT_STEM.search(path.stem)
+        if match is None or path.parent != clone_save.parent or not path.stem.startswith(clone_save.stem + "-ckpt-"):
+            raise CheckpointChainError(f"The audit log names a foreign checkpoint: {path}")
+        saved[int(match["index"])] = float(entry["cycle"])
+
+    sealed: List[str] = []
+    for index in sorted(saved):
+        paths = checkpoint_paths(clone_save, index)
+        if paths["manifest"].exists():
+            continue
+        publish_checkpoint_manifest(
+            paths["manifest"],
+            build_checkpoint_manifest(
+                clone_manifest=manifest,
+                clone_save=clone_save,
+                index=index,
+                run_id=run_dir.name,
+                session_id=run_dir.name,
+                game_time_cycles=saved[index],
+            ),
+        )
+        sealed.append(paths["save"].name)
+    return sealed
+
+
+def seal(args: argparse.Namespace) -> Dict[str, Any]:
+    sealed = seal_checkpoints(pathlib.Path(args.manifest), pathlib.Path(args.save).resolve(), pathlib.Path(args.run_dir).resolve())
+    return {"checkpoints_sealed": sealed}
 
 
 def main(argv: List[str]) -> int:
@@ -177,12 +251,18 @@ def main(argv: List[str]) -> int:
     start_parser.add_argument("--manifest", required=True)
     start_parser.add_argument("--save", required=True)
     start_parser.add_argument("--run-dir", required=True)
+    start_parser.add_argument("--resume", action="store_true")
+    start_parser.add_argument("--checkpoint", type=int)
     stop_parser = commands.add_parser("stop")
     stop_parser.add_argument("--run-dir", required=True)
+    seal_parser = commands.add_parser("seal")
+    seal_parser.add_argument("--manifest", required=True)
+    seal_parser.add_argument("--save", required=True)
+    seal_parser.add_argument("--run-dir", required=True)
     args = parser.parse_args(argv)
     try:
-        result = start(args) if args.command == "start" else stop(args)
-    except (CloneLaunchGuardError, OSError, ValueError, KeyError) as exc:
+        result = {"start": start, "stop": stop, "seal": seal}[args.command](args)
+    except (CloneLaunchGuardError, CheckpointChainError, OSError, ValueError, KeyError) as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(result, ensure_ascii=False, indent=2))

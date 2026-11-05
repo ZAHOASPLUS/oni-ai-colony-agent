@@ -11,7 +11,7 @@ namespace OniAiProbeMod.Api
 {
     /// <summary>
     /// Runs tool calls on the game's main thread.  It lives from Mod.OnLoad to
-    /// process exit, unlike ProbeRunner, because the main menu needs it too.
+    /// process exit, because the main menu needs it too.
     /// </summary>
     public sealed class ApiHost : MonoBehaviour
     {
@@ -35,7 +35,7 @@ namespace OniAiProbeMod.Api
             DontDestroyOnLoad(host);
             host.AddComponent<ApiHost>();
 
-            ProbeWriter.WriteEvent("api_started", new Dictionary<string, object>
+            ApiLog.Event("api_started", new Dictionary<string, object>
             {
                 { "port", server.Port }
             });
@@ -57,10 +57,29 @@ namespace OniAiProbeMod.Api
             File.Move(pending, apiFilePath);
         }
 
+        // Something (the options screen, another mod) can turn autosave back on
+        // during a session; a stuck timelapse queue freezes the simulation clock.
+        private static void EnforceGuards()
+        {
+            int? overwrittenInterval = AutosaveGuard.Tick(Time.unscaledTime);
+            if (overwrittenInterval.HasValue)
+            {
+                ApiLog.Event("autosave_guard_enforced", new Dictionary<string, object>
+                {
+                    { "overwritten_interval", overwrittenInterval.Value }
+                });
+            }
+            TimelapseGuard.Tick(Time.unscaledTime);
+        }
+
         private void Update()
         {
             ApiEvents.Tick(Time.unscaledTime);
             AutoloadWhenMenuIsReady();
+            if (ApiLifecycle.SessionActive)
+            {
+                EnforceGuards();
+            }
 
             for (int i = 0; i < MaxCallsPerFrame; i++)
             {
@@ -93,7 +112,7 @@ namespace OniAiProbeMod.Api
             }
             catch (Exception ex)
             {
-                ProbeWriter.WriteError("api_autoload", ex);
+                ApiLog.Error("api_autoload", ex);
                 ApiEvents.Add("autoload_failed", new Dictionary<string, object> { { "message", ex.Message } });
             }
         }

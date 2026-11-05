@@ -200,8 +200,9 @@ def _select(
     """Walk the chain; ``pending_index`` admits only the save being described.
 
     While its manifest is being built, checkpoint ``pending_index`` exists as a
-    save without a manifest.  That one file, at the end of the chain, is left
-    out; every other incomplete link still raises.
+    save without a manifest, and a run that saved again has later saves waiting
+    the same way.  Those files, at the end of the chain, are left out; every
+    other incomplete link still raises.
     """
 
     root = _root(clone_manifest, clone_save)
@@ -217,9 +218,11 @@ def _select(
     if found and sorted(found) != list(range(1, max(found) + 1)):
         raise CheckpointChainError("The checkpoint chain has a gap.")
     if pending_index is not None and pending_index in found:
-        if pending_index != max(found) or set(found[pending_index]) != {"save"}:
+        waiting = [index for index in found if index >= pending_index]
+        if any(set(found[index]) != {"save"} for index in waiting):
             raise CheckpointChainError(f"Checkpoint {pending_index} is not a new save at the end of the chain.")
-        del found[pending_index]
+        for index in waiting:
+            del found[index]
 
     current = root
     chain: List[int] = [0]

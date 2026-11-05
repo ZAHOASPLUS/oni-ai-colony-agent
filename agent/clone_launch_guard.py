@@ -20,19 +20,27 @@ import struct
 import subprocess
 from typing import Any, Callable, Dict, Iterable, Mapping
 
-from agent.command_custody import CommandCustodyError, read_stable_bytes
 
 
 class CloneLaunchGuardError(RuntimeError):
     pass
 
 
+def read_stable_bytes(path: pathlib.Path) -> bytes:
+    """The file's bytes, refused if it changed while being read."""
+    before = path.stat()
+    payload = path.read_bytes()
+    after = path.stat()
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise OSError(f"{path} changed during read")
+    return payload
+
+
 def _read(path: pathlib.Path) -> bytes:
     try:
-        payload, _, _ = read_stable_bytes(path, label="clone file")
-    except (CommandCustodyError, OSError) as exc:
+        return read_stable_bytes(path)
+    except OSError as exc:
         raise CloneLaunchGuardError("Clone file changed or is unreadable.") from exc
-    return payload
 
 
 def _digest(payload: bytes) -> str:
@@ -128,9 +136,8 @@ def _regular_file(path: pathlib.Path, label: str) -> pathlib.Path:
 
 def _load_manifest(path: pathlib.Path) -> Dict[str, Any]:
     try:
-        payload, _, _ = read_stable_bytes(path, label="clone manifest")
-        value = json.loads(payload.decode("utf-8-sig"))
-    except (CommandCustodyError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+        value = json.loads(read_stable_bytes(path).decode("utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise CloneLaunchGuardError("The clone manifest is unreadable.") from exc
     if not isinstance(value, dict) or value.get("schema") != "oni.named-test-clone.v1":
         raise CloneLaunchGuardError("The clone manifest schema is invalid.")

@@ -18,12 +18,15 @@ import os
 import pathlib
 import socket
 import sys
+import time
 from typing import Any, Dict, List, Mapping, Optional, TextIO
 
 SCHEMA_PATH = pathlib.Path(__file__).resolve().with_name("oni-tools.json")
 MCP_PROTOCOL_VERSION = "2025-06-18"
 # Longer than the Mod's main-thread timeout, so the Mod's answer always arrives.
 CALL_TIMEOUT_SECONDS = 30.0
+WAIT_LIMIT_SECONDS = 60.0
+WAIT_POLL_SECONDS = 2.0
 
 
 def bridge_dir() -> pathlib.Path:
@@ -35,6 +38,22 @@ def bridge_dir() -> pathlib.Path:
 
 def load_tools() -> List[Dict[str, Any]]:
     return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))["tools"]
+
+
+def _unknown_arguments(tool: str, args: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """Refuse a misspelled argument: the Mod would read it as simply absent."""
+    schema = next((entry for entry in load_tools() if entry["name"] == tool), None)
+    if schema is None:
+        return None
+    known = schema["parameters"].get("properties", {})
+    unknown = sorted(name for name in args if name not in known)
+    if not unknown:
+        return None
+    return _failure(
+        "invalid_argument",
+        f"{tool} has no argument {', '.join(unknown)}.",
+        f"It takes: {', '.join(known) or 'nothing'}.",
+    )
 
 
 def openai_tools() -> List[Dict[str, Any]]:
@@ -58,8 +77,54 @@ def _failure(code: str, message: str, hint: Optional[str] = None) -> Dict[str, A
     return {"ok": False, "error": error}
 
 
+def _needs_attention(event: Mapping[str, Any]) -> bool:
+    if event.get("type") in ("duplicant_lost", "duplicant_low_breath"):
+        return True
+    return event.get("type") == "alert_raised" and event.get("severity") in ("critical", "bad")
+
+
+def wait(args: Mapping[str, Any]) -> Dict[str, Any]:
+    """Let the game run, and come back early if something needs the player."""
+    seconds = min(max(float(args.get("seconds", 10)), 0.0), WAIT_LIMIT_SECONDS)
+    since = int(args.get("since", 0))
+    deadline = time.monotonic() + seconds
+    events: List[Dict[str, Any]] = []
+    backlog = True  # Events already waiting are news, but no reason to cut this wait short.
+    while True:
+        outcome = call_mod("get_events", {"since": since})
+        if not outcome.get("ok"):
+            return outcome
+        arrived = outcome["result"]["events"]
+        events += arrived
+        since = outcome["result"]["next_since"]
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or (not backlog and any(_needs_attention(event) for event in arrived)):
+            break
+        if outcome["result"].get("more"):
+            continue
+        backlog = False
+        time.sleep(min(WAIT_POLL_SECONDS, remaining))
+    return {
+        "ok": True,
+        "result": {
+            "waited_seconds": round(seconds - max(deadline - time.monotonic(), 0.0), 1),
+            "events": events,
+            "next_since": since,
+        },
+    }
+
+
 def call(tool: str, args: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """Run one tool.  Always returns the Mod's response shape, never raises."""
+    refused = _unknown_arguments(tool, args or {})
+    if refused:
+        return refused
+    if tool == "wait":
+        return wait(args or {})
+    return call_mod(tool, args)
+
+
+def call_mod(tool: str, args: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     api_file = bridge_dir() / "api.json"
     try:
         api = json.loads(api_file.read_text(encoding="utf-8"))

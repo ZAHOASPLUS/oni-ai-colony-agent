@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
 
@@ -101,7 +102,63 @@ namespace OniAiProbeMod.Api
             {
                 entry["stored"] = stored;
             }
+            AddConfigurableOptions(go, entry);
             return entry;
+        }
+
+        // What configure can set here, so a player never has to guess an id.
+        private static void AddConfigurableOptions(GameObject go, Dictionary<string, object> entry)
+        {
+            ComplexFabricator fabricator = go.GetComponent<ComplexFabricator>();
+            if (fabricator != null)
+            {
+                entry["recipes"] = fabricator.GetRecipes().Select(recipe => (object)new Dictionary<string, object>
+                {
+                    { "id", recipe.id },
+                    { "makes", DescribeElements(recipe.results) },
+                    { "needs", DescribeElements(recipe.ingredients) },
+                    { "seconds", ApiValues.Number(recipe.time, 0) },
+                    { "queued", fabricator.GetRecipeQueueCount(recipe) }
+                }).ToList();
+            }
+
+            SingleEntityReceptacle receptacle = go.GetComponent<SingleEntityReceptacle>();
+            if (receptacle != null)
+            {
+                entry["occupant"] = receptacle.Occupant == null
+                    ? null
+                    : receptacle.Occupant.GetComponent<KPrefabID>().PrefabTag.Name;
+                entry["requested"] = receptacle.requestedEntityTag.IsValid ? receptacle.requestedEntityTag.Name : null;
+                entry["seeds_in_stock"] = ClusterManager.Instance.activeWorld.worldInventory.GetAccessibleAmounts()
+                    .Where(amount => amount.Value > 0f)
+                    .Select(amount => amount.Key)
+                    .Where(tag => CanHold(receptacle, tag))
+                    .Select(tag => tag.Name)
+                    .ToList();
+            }
+
+            TreeFilterable filterable = go.GetComponent<TreeFilterable>();
+            if (filterable != null)
+            {
+                entry["storage_filter"] = filterable.GetTags().Select(tag => tag.Name).ToList();
+            }
+        }
+
+        private static bool CanHold(SingleEntityReceptacle receptacle, Tag tag)
+        {
+            GameObject prefab = Assets.TryGetPrefab(tag);
+            return prefab != null &&
+                receptacle.possibleDepositObjectTags.Any(prefab.HasTag) &&
+                receptacle.IsValidEntity(prefab);
+        }
+
+        private static List<object> DescribeElements(IEnumerable<ComplexRecipe.RecipeElement> elements)
+        {
+            return elements.Select(element => (object)new Dictionary<string, object>
+            {
+                { "item", element.material.Name },
+                { "amount", ApiValues.Number(element.amount, 1) }
+            }).ToList();
         }
 
         private static List<object> ReadLooseItems(int cell)

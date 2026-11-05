@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using HarmonyLib;
 using Newtonsoft.Json.Linq;
+using OniAiProbeMod.Api;
 using OniAiProbeMod.Patches;
 using OniAiProbeMod.Probe;
 
@@ -23,11 +24,11 @@ namespace AutosaveGuardHarness
 
         private static int Main()
         {
-            // Keep ProbeWriter away from Documents\Klei: it resolves its
-            // directory from this variable the first time it writes.
+            // Keep the log away from Documents\Klei.
             string bridge = Path.Combine(Path.GetTempPath(), "oni-autosave-guard-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(bridge);
             Environment.SetEnvironmentVariable("ONI_AI_BRIDGE_DIR", bridge);
+            ApiLog.Initialize();
             try
             {
                 Run(bridge);
@@ -66,8 +67,8 @@ namespace AutosaveGuardHarness
             Require(patchSuppression != null && onSaveStarted != null, "LifecyclePatches hooks are missing");
             Harmony harmony = new Harmony("oni.autosave-guard-harness");
 
-            // Normal play: no accepted binding, so nothing may change.
-            Require(!StartupBinding.WasAccepted && !AutosaveGuard.IsActive, "guard armed without a binding");
+            // Normal play: API mode is off, so nothing may change.
+            Require(!AutosaveGuard.IsActive, "guard armed without API mode");
             SaveGame userSave = LoadSave(1);
             AutosaveGuard.OnSessionStarted();
             Require(AutosaveGuard.Tick(100f) == null && !AutosaveGuard.ShouldSuppressAutosave(), "inactive guard acted");
@@ -149,8 +150,7 @@ namespace AutosaveGuardHarness
 
             // Every save the session writes serializes interval 0.
             clone.AutoSaveCycleInterval = 4;
-            object[] saveArguments = { Path.Combine(bridge, "checkpoint.sav"), false, true, null };
-            onSaveStarted.Invoke(null, saveArguments);
+            onSaveStarted.Invoke(null, null);
             Require(clone.AutoSaveCycleInterval == 0, "a save write started with autosave enabled");
             Passed.Add("save_write_serializes_zero");
 
@@ -178,20 +178,17 @@ namespace AutosaveGuardHarness
                 (string)reload["status"] == "enforced", "reload re-enabled autosave: " + reload);
             Passed.Add("reload_forces_zero");
 
-            ProbeWriter.Shutdown();
-            List<JObject> records = File.ReadAllLines(Path.Combine(bridge, "state.jsonl"))
+            List<JObject> records = File.ReadAllLines(Path.Combine(bridge, "api-log.jsonl"))
                 .Where(line => line.Length > 0)
                 .Select(JObject.Parse)
                 .ToList();
-            JObject registered = records.SingleOrDefault(record =>
-                (string)record["event"] == "probe_patch_registered" && (string)record["patch"] == "autosave_suppression");
             JObject patchError = records.SingleOrDefault(record =>
-                (string)record["event"] == "probe_error" && (string)record["stage"] == "patch_autosave_suppression");
+                (string)record["event"] == "error" && (string)record["stage"] == "patch_autosave_suppression");
             JObject refused = records.SingleOrDefault(record => (string)record["event"] == "autosave_suppressed");
-            Require(harmonyWorks ? registered != null && patchError == null : registered == null && patchError != null,
+            Require(harmonyWorks ? patchError == null : patchError != null,
                 "the suppression patch outcome was not recorded");
             Require(refused != null && (int)refused["clock_cycle"] == 12 &&
-                (string)refused["autosave"]["status"] == "enforced", "the refused autosave was not recorded");
+                (string)refused["autosave_status"] == "enforced", "the refused autosave was not recorded");
             Passed.Add("events_recorded");
         }
 

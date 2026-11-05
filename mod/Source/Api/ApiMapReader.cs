@@ -52,7 +52,15 @@ namespace OniAiProbeMod.Api
 
         // Characters stay the same for a whole session, so the map a player saw
         // earlier can still be read after asking for another area.
-        private static readonly Palette SolidPalette = new Palette();
+        private static readonly Palette SolidPalette = new Palette(
+            new KeyValuePair<string, char>("SandStone", 'S'),
+            new KeyValuePair<string, char>("Sand", 's'),
+            new KeyValuePair<string, char>("Algae", 'A'),
+            new KeyValuePair<string, char>("Dirt", 'D'),
+            new KeyValuePair<string, char>("Granite", 'G'),
+            new KeyValuePair<string, char>("IgneousRock", 'I'),
+            new KeyValuePair<string, char>("Cuprite", 'C'),
+            new KeyValuePair<string, char>("Carbon", 'F'));
         private static readonly Palette LiquidPalette = new Palette(
             new KeyValuePair<string, char>("Water", 'W'),
             new KeyValuePair<string, char>("DirtyWater", 'D'),

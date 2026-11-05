@@ -29,7 +29,7 @@
     },
     {
       "name": "get_status",
-      "description": "The colony at a glance: time and speed, worlds and their coordinate bounds, every duplicant (position, current chore, stress, health, breath, calories, air, status), food, breathable gas, power, the game's own alerts, current research, and pending blueprints and dig marks.",
+      "description": "The colony at a glance: time and speed, worlds and their coordinate bounds, every duplicant (position, current chore, stress and what causes it, health, breath, calories, air, status), food, breathable gas, power, the game's own alerts, current research, and pending blueprints and dig marks.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -217,7 +217,7 @@
     },
     {
       "name": "build_path",
-      "description": "Lay a wire, pipe or rail along a path of neighbouring cells. To branch from an existing line, make an existing cell of that line part of the path: only a shared cell connects, so being adjacent is not enough. All or nothing: on a refusal nothing is placed.",
+      "description": "Lay a wire, pipe or rail along a path of neighbouring cells, or a run of ladders or tiles. To branch from an existing line, make an existing cell of that line part of the path: only a shared cell connects, so being adjacent is not enough. All or nothing: on a refusal nothing is placed.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -421,7 +421,7 @@
     },
     {
       "name": "set_speed",
-      "description": "0 pauses; 1, 2 and 3 run the game at the three speeds. Pause before planning a complicated layout.",
+      "description": "0 pauses; 1, 2 and 3 run the game at the three speeds. Pause before planning a complicated layout. 4 is ten times normal speed, for long unattended stretches; time_scale sets another multiple for it. Above 10 the game runs as fast as the CPU allows, which can be well under the multiple asked for, and duplicants may decide more slowly; go back to 4 or lower for careful play.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -431,8 +431,15 @@
               0,
               1,
               2,
-              3
+              3,
+              4
             ]
+          },
+          "time_scale": {
+            "type": "integer",
+            "minimum": 4,
+            "maximum": 60,
+            "description": "Only with speed 4. Default 10."
           }
         },
         "required": [
@@ -450,6 +457,376 @@
           "note": {
             "type": "string",
             "description": "Why this point is worth keeping."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_buildings",
+      "description": "Finished buildings with id, position, whether they run, and the game's status lines. Wires, pipes, tiles and ladders are left out unless def or include_structural asks for them. problems_only shows what is not running, and why.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "def": {
+            "type": "string",
+            "description": "Part of a building id."
+          },
+          "problems_only": {
+            "type": "boolean",
+            "description": "Default: false."
+          },
+          "include_structural": {
+            "type": "boolean",
+            "description": "Default: false."
+          },
+          "world": {
+            "type": "integer",
+            "description": "World id. Default: the active world."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_resources",
+      "description": "What the colony can reach right now: elements, food and items in kg, largest first.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "world": {
+            "type": "integer",
+            "description": "World id. Default: the active world."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "find",
+      "description": "The nearest things of a kind, among revealed cells: an element such as Algae, a loose or stored item, a building, a harvestable plant, or a revealed geyser. Answers with up to five, and the total.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "element",
+              "item",
+              "building",
+              "plant",
+              "geyser"
+            ]
+          },
+          "query": {
+            "type": "string",
+            "description": "Element, item or building id; part of a plant id. Empty lists every plant."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "How many to list, up to 100. Default: 5."
+          },
+          "x": {
+            "type": "integer",
+            "description": "Measure from here. Default: the first duplicant."
+          },
+          "y": {
+            "type": "integer"
+          },
+          "world": {
+            "type": "integer",
+            "description": "World id. Default: the active world."
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_progress",
+      "description": "The stage goal's numbers now and one row per cycle finished this session: duplicants, food, breathable gas, oxygen and power, and open alerts. Use it to judge trends.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "harvest",
+      "description": "Have duplicants harvest the plants in a rectangle when ready, wild ones included. enable false stops that. find with kind plant locates them.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "integer",
+            "description": "Left edge."
+          },
+          "y": {
+            "type": "integer",
+            "description": "Bottom edge."
+          },
+          "w": {
+            "type": "integer",
+            "description": "Width in cells. Default: 1."
+          },
+          "h": {
+            "type": "integer",
+            "description": "Height in cells. Default: 1."
+          },
+          "enable": {
+            "type": "boolean",
+            "description": "Default: true."
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9,
+            "description": "Default: 5."
+          }
+        },
+        "required": [
+          "x",
+          "y"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "sweep",
+      "description": "Mark loose items in a rectangle to be carried to storage. Needs a storage building.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "integer",
+            "description": "Left edge."
+          },
+          "y": {
+            "type": "integer",
+            "description": "Bottom edge."
+          },
+          "w": {
+            "type": "integer",
+            "description": "Width in cells. Default: 1."
+          },
+          "h": {
+            "type": "integer",
+            "description": "Height in cells. Default: 1."
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9,
+            "description": "Default: 5."
+          }
+        },
+        "required": [
+          "x",
+          "y"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "mop",
+      "description": "Mark shallow liquid on a floor to be mopped up. Deep liquid is reported and needs pumping.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "integer",
+            "description": "Left edge."
+          },
+          "y": {
+            "type": "integer",
+            "description": "Bottom edge."
+          },
+          "w": {
+            "type": "integer",
+            "description": "Width in cells. Default: 1."
+          },
+          "h": {
+            "type": "integer",
+            "description": "Height in cells. Default: 1."
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9,
+            "description": "Default: 5."
+          }
+        },
+        "required": [
+          "x",
+          "y"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "configure",
+      "description": "Set up a finished building. recipe with count queues a recipe on a fabricator such as a MicrobeMusher; count -1 repeats forever and 0 clears it. seed plants in a planter or farm tile. storage_filter sets what a storage building accepts, replacing the old list. inspect lists the recipes, seeds in stock and current filter.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "Finished building id from list_buildings or inspect."
+          },
+          "recipe": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "description": "Default: 1."
+          },
+          "seed": {
+            "type": "string"
+          },
+          "storage_filter": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "element_filter": {
+            "type": "string",
+            "description": "Element a GasFilter or LiquidFilter picks out. The picked element leaves by the middle cell, everything else by the far end."
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_chore_priority",
+      "description": "How much one duplicant likes a kind of work: 0 never, 5 most. A refusal lists the chore groups.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "duplicant": {
+            "type": "string",
+            "description": "Name from get_status."
+          },
+          "chore_group": {
+            "type": "string",
+            "description": "Such as Dig, Build, Cook, Research, Farming, Hauling."
+          },
+          "level": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 5
+          }
+        },
+        "required": [
+          "duplicant",
+          "chore_group",
+          "level"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_schedule",
+      "description": "Replace a schedule's day. get_status shows schedules in the same form.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "schedule": {
+            "type": "integer",
+            "description": "Index from get_status. Default: 0."
+          },
+          "blocks": {
+            "type": "string",
+            "description": "One character per block of the day: H hygiene, W work, R recreation, S sleep."
+          }
+        },
+        "required": [
+          "blocks"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_skills",
+      "description": "Each duplicant's unspent skill points, what they have mastered, and what they could learn now (with whether they are interested, which affects morale).",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "learn_skill",
+      "description": "Spend a skill point. Some work needs a skill, such as the advanced research station or digging the hardest rock.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "duplicant": {
+            "type": "string"
+          },
+          "skill": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "duplicant",
+          "skill"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_printables",
+      "description": "The printing pod's current offer: duplicants with traits, interests and attributes, and care packages. Each has an index for choose_printable. With nothing on offer, says how long until the next one. get_status shows printables_waiting.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "choose_printable",
+      "description": "Print one option from get_printables. Each new duplicant eats and breathes, so check food and oxygen first.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "index"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "reject_printables",
+      "description": "Turn down the whole offer. The pod starts counting towards the next one.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "wait",
+      "description": "Let the game run for up to 60 real seconds, then return what happened. Returns early when a serious alert appears or a duplicant is lost. Pass the next_since from the last get_events or wait. Time passes only if the game is not paused.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "seconds": {
+            "type": "number",
+            "description": "Real seconds, at most 60. Default: 10."
+          },
+          "since": {
+            "type": "integer",
+            "description": "Return events after this sequence number."
           }
         },
         "additionalProperties": false
