@@ -37,12 +37,30 @@ namespace OniAiProbeMod.Api
                 throw new ApiException("wrong_tool", def.PrefabID + " is laid along a path.", "Use build_path.");
             }
             int cell = ReadCell(args);
+            WorldContainer world = WorldForCell(cell);
             Orientation orientation = ReadOrientation(args, def);
-            List<Tag> materials = ReadMaterials(args, def);
+            List<Tag> materials = ReadMaterials(args, def, world);
             int priority = ReadPriority(args);
 
+            if (ApiRocketTools.IsRocketModuleDef(def))
+            {
+                GameObject rocketModule = ApiRocketTools.PlaceRocketModule(def, cell, materials);
+                int moduleCell = Grid.PosToCell(rocketModule);
+                ApiEvents.ExpectBuilding(def.PrefabID, moduleCell);
+                SetPriority(rocketModule, priority);
+                return new Dictionary<string, object>
+                {
+                    { "id", rocketModule.GetComponent<KPrefabID>().InstanceID },
+                    { "def", def.PrefabID },
+                    { "x", XOf(moduleCell) },
+                    { "y", YOf(moduleCell) },
+                    { "materials", materials.Select(material => material.Name).ToList() },
+                    { "priority", priority }
+                };
+            }
+
             string failure;
-            if (!def.IsValidPlaceLocation(null, cell, orientation, false, out failure, true))
+            if (!def.IsValidPlaceLocation(null, cell, orientation, false, out failure, false))
             {
                 throw new ApiException(
                     "invalid_placement",
@@ -72,7 +90,12 @@ namespace OniAiProbeMod.Api
                 throw new ApiException("wrong_tool", def.PrefabID + " is not laid along a path.", "Use build.");
             }
             List<int> cells = ReadPath(args);
-            List<Tag> materials = ReadMaterials(args, def);
+            WorldContainer world = WorldForCell(cells[0]);
+            if (cells.Any(c => Grid.WorldIdx[c] != world.id))
+            {
+                throw new ApiException("invalid_placement", "A single build_path cannot cross between different worlds.");
+            }
+            List<Tag> materials = ReadMaterials(args, def, world);
             int priority = ReadPriority(args);
             if (!def.isUtility)
             {
@@ -93,7 +116,7 @@ namespace OniAiProbeMod.Api
                 present[index] = Grid.Objects[cells[index], (int)def.TileLayer];
                 string failure;
                 if (present[index] == null &&
-                    !def.IsValidPlaceLocation(null, cells[index], Orientation.Neutral, false, out failure, true))
+                    !def.IsValidPlaceLocation(null, cells[index], Orientation.Neutral, false, out failure, false))
                 {
                     throw new ApiException(
                         "invalid_placement",
@@ -168,7 +191,7 @@ namespace OniAiProbeMod.Api
                     continue;
                 }
                 string failure;
-                if (!def.IsValidPlaceLocation(null, cell, Orientation.Neutral, false, out failure, true))
+                if (!def.IsValidPlaceLocation(null, cell, Orientation.Neutral, false, out failure, false))
                 {
                     throw new ApiException(
                         "invalid_placement",
@@ -497,7 +520,7 @@ namespace OniAiProbeMod.Api
                 orientation,
                 materials,
                 DefaultFacade,
-                restrictToActiveWorld: true);
+                restrictToActiveWorld: false);
             if (blueprint == null)
             {
                 throw new ApiException("invalid_placement", "The game placed no " + def.PrefabID + " at " + Describe(cell) + ".");
@@ -542,9 +565,19 @@ namespace OniAiProbeMod.Api
             return def;
         }
 
-        private static List<Tag> ReadMaterials(JObject args, BuildingDef def)
+        private static WorldContainer WorldForCell(int cell)
         {
-            WorldContainer world = ClusterManager.Instance.activeWorld;
+            byte worldId = Grid.WorldIdx[cell];
+            WorldContainer world = worldId == byte.MaxValue ? null : ClusterManager.Instance.GetWorld(worldId);
+            if (world == null)
+            {
+                throw new ApiException("invalid_placement", Describe(cell) + " is not inside any active asteroid or rocket world.");
+            }
+            return world;
+        }
+
+        private static List<Tag> ReadMaterials(JObject args, BuildingDef def, WorldContainer world)
+        {
             Recipe.Ingredient[] ingredients = def.CraftRecipe.Ingredients.ToArray();
             JToken requested = args["materials"];
             JArray names = requested as JArray;

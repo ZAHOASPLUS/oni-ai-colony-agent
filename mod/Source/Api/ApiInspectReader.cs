@@ -142,6 +142,12 @@ namespace OniAiProbeMod.Api
             {
                 entry["storage_filter"] = filterable.GetTags().Select(tag => tag.Name).ToList();
             }
+
+            Dictionary<string, object> rocket = ApiRocketTools.DescribeRocket(go);
+            if (rocket != null)
+            {
+                entry["rocket"] = rocket;
+            }
         }
 
         private static bool CanHold(SingleEntityReceptacle receptacle, Tag tag)

@@ -29,7 +29,7 @@
     },
     {
       "name": "get_status",
-      "description": "The colony at a glance: time and speed, worlds and their coordinate bounds, every duplicant (position, current chore, stress and what causes it, health, breath, calories, air, status), food, breathable gas, power, the game's own alerts, current research, and pending blueprints and dig marks.",
+      "description": "The colony at a glance: time and speed, worlds and their coordinate bounds, every duplicant (id, position, current chore, stress and what causes it, health, breath, calories, air, status), food, breathable gas, power, the game's own alerts, current research, and pending blueprints and dig marks. Names can repeat; the id is the save's own and every tool that takes a duplicant accepts it. colony.food_report_kcal is the game's daily food report in the form of oxygen_report_kg: today_made, today_used (negative) and yesterday_net, in kcal. Made counts harvests and butchering but not dishes a cooking station makes; used counts meals and the edible ingredients cooked.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -149,7 +149,7 @@
     },
     {
       "name": "get_events",
-      "description": "What changed since the last look: cycles, alerts raised and cleared, buildings completed and removed, duplicants lost or arrived, research completed. Pass the next_since from the previous call; missed says how many events aged out.",
+      "description": "What changed since the last look: cycles, alerts raised and cleared, buildings completed and removed, duplicants lost, arrived or short of breath (with id and name), research completed. Pass the next_since from the previous call; missed says how many events aged out.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -694,6 +694,31 @@
           "element_filter": {
             "type": "string",
             "description": "Element a GasFilter or LiquidFilter picks out. The picked element leaves by the middle cell, everything else by the far end."
+          },
+          "crew": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Duplicants assigned to board a rocket habitat module, each an id from get_status such as \"101\" or a name only one living duplicant has; a shared name is refused as ambiguous_duplicant, listing candidate_ids. An empty list releases crew."
+          },
+          "rocket_restriction": {
+            "type": "string",
+            "enum": [
+              "crew_only",
+              "unrestricted"
+            ],
+            "description": "Restrict grounded rocket interior access on a RocketControlStation to assigned crew only or unrestricted."
+          },
+          "rocket_action": {
+            "type": "string",
+            "enum": [
+              "orbit",
+              "launch",
+              "cancel_launch",
+              "land"
+            ],
+            "description": "Rocket starmap command on a LaunchPad, rocket module, or RocketControlStation: select adjacent space orbit hex, trigger/cancel launch, or return to land on a LaunchPad."
           }
         },
         "required": [
@@ -710,7 +735,7 @@
         "properties": {
           "duplicant": {
             "type": "string",
-            "description": "Name from get_status."
+            "description": "Id from get_status, such as \"101\", or a name only one living duplicant has; a shared name is refused as ambiguous_duplicant, listing candidate_ids."
           },
           "chore_group": {
             "type": "string",
@@ -753,7 +778,7 @@
     },
     {
       "name": "get_skills",
-      "description": "Each duplicant's unspent skill points, what they have mastered, and what they could learn now (with whether they are interested, which affects morale).",
+      "description": "Each duplicant's id, unspent skill points, what they have mastered, and what they could learn now (with whether they are interested, which affects morale).",
       "parameters": {
         "type": "object",
         "properties": {},
@@ -767,7 +792,8 @@
         "type": "object",
         "properties": {
           "duplicant": {
-            "type": "string"
+            "type": "string",
+            "description": "Id from get_status, such as \"101\", or a name only one living duplicant has; a shared name is refused as ambiguous_duplicant, listing candidate_ids."
           },
           "skill": {
             "type": "string"

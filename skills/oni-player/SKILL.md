@@ -74,3 +74,23 @@ description: Play Oxygen Not Included through the oni tools: observe the colony,
 - 能用什么建筑看 `get_buildable`，它列出了解锁状态和所需科技。想要某个建筑就直接 `set_research` 它的科技，前置科技会自动排队。
 - `build_path` 也能铺成排的梯子和地砖。
 - `get_status` 的 `printables_waiting` 为真时，打印舱有人选：`get_printables` 看选项，`choose_printable` 选一个，或者 `reject_printables`。不处理就不会有新复制人。
+- 复制人可能重名。`get_status` 给每人一个 `id`（存档自带），`set_chore_priority`、`learn_skill`、`configure crew` 都接受这个 id；重名时只给名字会被拒绝为 `ambiguous_duplicant` 并列出 `candidate_ids`。
+- `get_status` 的 `colony.food_report_kcal` 是游戏的每日食物报表：`today_made`、`today_used`（负数）、`yesterday_net`。做菜站产出的菜不算进 made。
+- 火箭：`configure` 的 `rocket_action`（orbit、launch、cancel_launch、land）、`rocket_restriction` 和 `crew`。
+
+## 殖民地规则
+
+来自 Antigravity 第 agy-r01 到 agy-r23 局的复盘（2026-11-05）：食物见底时还从 5 人扩到 12 人，19 人里死了 12 个，其中 10 个饿死，同一个检查点读了十次而不改计划。
+
+1. **每个周期算账**。食物产出对比消耗，氧气产出对比消耗，发电对比所有建筑同时运转的用电。一个复制人每周期吃约 1000 kcal。哪个系统亏，哪个就是唯一的最高优先级，直到转为盈余。库存不是产能：补给包里的食物不能证明农场养得活人。
+2. **打印舱要设门槛**。只有当库存食物够 3 天以上，且上一周期的食物产出覆盖了现有全部人口再多 1000 kcal 时，才打印新复制人。否则选食物补给包，没有就 `reject_printables`。不要打印和现有成员重名的复制人。
+3. **先稳定再做使命**。只有食物够 5 天以上、氧气产出覆盖消耗、电力有余量时才推进使命。使命要的人数是最后一步，不是第一步；生存不稳时不要从目标周期倒推计划。
+4. **死了人继续玩**。死亡是游戏的一部分：记下死因，在同一个殖民地里把原因修掉。不要为了撤销死亡或坏结果读旧检查点。只有工具或环境故障才读档，而且读之前先写下这次要做什么不同。
+5. **用结构来调度**。用建筑优先级、固定的作息和至少维持一个周期的工作优先级。不要一会儿改一次：agy-r23 里改作息让厨师做到一半下班，给所有醒着的人关掉 `MachineOperating` 让发电机断了煤。
+6. **限制在建工程**。优先级 9 的项目最多 3 个，做完再开新的。人手撑不起的蓝图和挖掘标记就取消或调低：几百个开着的工作会把饥饿的劳动力打散。
+7. **缺粮先保命**。食物紧张时挖泥土、开微生物捣碎机：一根 Mush Bar 800 kcal，用 75 kg 泥土和 75 kg 水。同时扩建隔热农场；毛刺花只在 10 到 30 °C 生长。
+8. **隔离气体，电力留余量**。用液封把生活区和污染气体隔开，农场做隔热，在外面干活的人配气压服。发电机用不止一种燃料，造能造的最大电池，别让一种燃料断供就让厨房停电。
+
+## Antigravity 接入
+
+Antigravity 用同一份 `tools/oni-tools.json`：直接会话用 `tools/antigravity_player.py`（`status`、`step`、`wait`，游标和审计写在 `--run-dir reports/play/<run>`），模型循环用 `AntigravityPlayer` 和 `antigravity_tools()`，MCP 由 `.agents/plugins/oni-player` 启动 `tools/oni_tools.py mcp`。说明在 `docs/antigravity-tool-interface-20261104.md`。

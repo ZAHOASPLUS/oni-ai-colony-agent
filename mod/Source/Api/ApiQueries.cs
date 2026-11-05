@@ -325,8 +325,83 @@ namespace OniAiProbeMod.Api
             {
                 { "now", ApiStatusReader.ReadProgressRow() },
                 { "duplicants_lost_this_session", ApiEvents.DuplicantsLost },
-                { "cycles_this_session", ApiEvents.CycleLog }
+                { "cycles_this_session", ApiEvents.CycleLog },
+                { "imperatives", ReadImperatives() },
+                { "achievements_unlocked", ReadUnlockedAchievements() }
             };
+        }
+
+        private static List<Dictionary<string, object>> ReadImperatives()
+        {
+            List<Dictionary<string, object>> imperatives = new List<Dictionary<string, object>>();
+            ColonyAchievementTracker tracker = SaveGame.Instance?.ColonyAchievementTracker;
+            if (tracker == null || Db.Get()?.ColonyAchievements?.resources == null)
+            {
+                return imperatives;
+            }
+            foreach (Database.ColonyAchievement achievement in Db.Get().ColonyAchievements.resources)
+            {
+                if (achievement == null || !achievement.isVictoryCondition || !achievement.IsValidForSave())
+                {
+                    continue;
+                }
+                ColonyAchievementStatus status = null;
+                if (tracker.achievements != null)
+                {
+                    tracker.achievements.TryGetValue(achievement.Id, out status);
+                }
+                bool achieved = status != null && status.success && !status.failed;
+                List<Dictionary<string, object>> requirements = new List<Dictionary<string, object>>();
+                IEnumerable<Database.ColonyAchievementRequirement> reqList =
+                    status != null ? status.Requirements : achievement.requirementChecklist;
+                if (reqList != null)
+                {
+                    foreach (Database.ColonyAchievementRequirement req in reqList)
+                    {
+                        if (req == null)
+                        {
+                            continue;
+                        }
+                        bool ok = achieved || req.Success();
+                        bool failed = req.Fail();
+                        requirements.Add(new Dictionary<string, object>
+                        {
+                            { "type", req.GetType().Name },
+                            { "success", ok },
+                            { "failed", failed },
+                            { "progress", req.GetProgress(ok) ?? string.Empty }
+                        });
+                    }
+                }
+                imperatives.Add(new Dictionary<string, object>
+                {
+                    { "id", achievement.Id },
+                    { "name", achievement.Name },
+                    { "achieved", achieved },
+                    { "failed", status != null && status.failed },
+                    { "requirements", requirements }
+                });
+            }
+            return imperatives;
+        }
+
+        private static List<string> ReadUnlockedAchievements()
+        {
+            List<string> unlocked = new List<string>();
+            ColonyAchievementTracker tracker = SaveGame.Instance?.ColonyAchievementTracker;
+            if (tracker?.achievements == null)
+            {
+                return unlocked;
+            }
+            foreach (KeyValuePair<string, ColonyAchievementStatus> pair in tracker.achievements)
+            {
+                if (pair.Value != null && pair.Value.success && !pair.Value.failed)
+                {
+                    unlocked.Add(pair.Key);
+                }
+            }
+            unlocked.Sort(StringComparer.Ordinal);
+            return unlocked;
         }
     }
 }

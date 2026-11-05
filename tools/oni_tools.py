@@ -70,6 +70,27 @@ def openai_tools() -> List[Dict[str, Any]]:
     ]
 
 
+def _gemini_schema(node: Any) -> Any:
+    """Gemini function declarations do not accept ``additionalProperties``."""
+    if isinstance(node, Mapping):
+        return {key: _gemini_schema(value) for key, value in node.items() if key != "additionalProperties"}
+    if isinstance(node, list):
+        return [_gemini_schema(item) for item in node]
+    return node
+
+
+def antigravity_tools() -> List[Dict[str, Any]]:
+    """The same tools as Gemini / Antigravity ``functionDeclarations``."""
+    return [
+        {
+            "name": tool["name"],
+            "description": tool["description"],
+            "parameters": _gemini_schema(tool["parameters"]),
+        }
+        for tool in load_tools()
+    ]
+
+
 def _failure(code: str, message: str, hint: Optional[str] = None) -> Dict[str, Any]:
     error: Dict[str, Any] = {"code": code, "message": message}
     if hint:

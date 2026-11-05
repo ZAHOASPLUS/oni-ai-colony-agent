@@ -38,7 +38,8 @@ namespace OniAiProbeMod.Api
             internal Dictionary<int, int> BuildingCells = new Dictionary<int, int>();
             internal Dictionary<int, string> Duplicants = new Dictionary<int, string>();
             internal HashSet<string> Techs = new HashSet<string>(StringComparer.Ordinal);
-            internal HashSet<string> LowBreath = new HashSet<string>(StringComparer.Ordinal);
+            // Duplicant ids: two duplicants can share a name.
+            internal HashSet<int> LowBreath = new HashSet<int>();
         }
 
         internal static void ExpectBuilding(string def, int cell)
@@ -155,10 +156,11 @@ namespace OniAiProbeMod.Api
             {
                 if (identity != null)
                 {
-                    state.Duplicants[identity.GetComponent<KPrefabID>().InstanceID] = identity.GetProperName();
+                    int id = ApiDuplicants.Id(identity);
+                    state.Duplicants[id] = identity.GetProperName();
                     if (Db.Get().Amounts.Breath.Lookup(identity.gameObject).value < LowBreathPercent)
                     {
-                        state.LowBreath.Add(identity.GetProperName());
+                        state.LowBreath.Add(id);
                     }
                 }
             }
@@ -221,7 +223,7 @@ namespace OniAiProbeMod.Api
             {
                 if (!after.Duplicants.ContainsKey(duplicant.Key))
                 {
-                    Add("duplicant_lost", new Dictionary<string, object> { { "name", duplicant.Value } });
+                    Add("duplicant_lost", new Dictionary<string, object> { { "id", duplicant.Key }, { "name", duplicant.Value } });
                     DuplicantsLost++;
                 }
             }
@@ -229,12 +231,12 @@ namespace OniAiProbeMod.Api
             {
                 if (!before.Duplicants.ContainsKey(duplicant.Key))
                 {
-                    Add("duplicant_arrived", new Dictionary<string, object> { { "name", duplicant.Value } });
+                    Add("duplicant_arrived", new Dictionary<string, object> { { "id", duplicant.Key }, { "name", duplicant.Value } });
                 }
             }
-            foreach (string name in after.LowBreath.Where(duplicant => !before.LowBreath.Contains(duplicant)))
+            foreach (int id in after.LowBreath.Where(duplicant => !before.LowBreath.Contains(duplicant)))
             {
-                Add("duplicant_low_breath", new Dictionary<string, object> { { "name", name } });
+                Add("duplicant_low_breath", new Dictionary<string, object> { { "id", id }, { "name", after.Duplicants[id] } });
             }
             foreach (string tech in after.Techs.Where(id => !before.Techs.Contains(id)))
             {

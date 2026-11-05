@@ -13,6 +13,8 @@ namespace OniAiProbeMod.Api
     {
         // One duplicant eats 1000 kcal per cycle (DUPLICANTSTATS.STANDARD).
         private const double KcalPerDuplicantCycle = 1000.0;
+        // The game counts food in calories; players read kcal.
+        private const float CaloriesPerKcal = 1000f;
         private const int StatusItemsPerDuplicant = 6;
 
         private static readonly FieldInfo NotificationsField =
@@ -129,6 +131,7 @@ namespace OniAiProbeMod.Api
                 ChoreDriver driver = go.GetComponent<ChoreDriver>();
                 Chore chore = driver == null ? null : driver.GetCurrentChore();
                 Dictionary<string, object> entry = ApiValues.Xy(cell);
+                entry["id"] = ApiDuplicants.Id(identity);
                 entry["name"] = identity.GetProperName();
                 entry["world"] = identity.GetMyWorldId();
                 entry["chore"] = chore?.choreType?.Id;
@@ -232,6 +235,7 @@ namespace OniAiProbeMod.Api
             {
                 { "food_kcal", System.Math.Round(foodKcal, 0) },
                 { "food_days", duplicantCount == 0 ? 0.0 : System.Math.Round(foodKcal / (KcalPerDuplicantCycle * duplicantCount), 1) },
+                { "food_report_kcal", ReadReport(ReportManager.ReportType.CaloriesCreated, CaloriesPerKcal) },
                 { "breathable_kg", ApiValues.Number(ReadBreathableKg(world), 0) },
                 { "oxygen_report_kg", ReadReport(ReportManager.ReportType.OxygenCreated) },
                 { "power_report_kj", ReadReport(ReportManager.ReportType.EnergyCreated) },
@@ -309,11 +313,14 @@ namespace OniAiProbeMod.Api
         }
 
         // Today's positive and negative totals and yesterday's net, as in the
-        // game's daily report.  The report is colony-wide.
-        private static object ReadReport(ReportManager.ReportType type)
+        // game's daily report, each divided by unit.  The report is colony-wide.
+        // Food made counts harvests and butchering but not dishes a cooking
+        // station makes; food used counts meals and the edible ingredients cooked.
+        internal static object ReadReport(ReportManager.ReportType type, float unit = 1f)
         {
+            // Managed null check: ReportManager clears Instance in OnCleanUp.
             ReportManager reports = ReportManager.Instance;
-            if (reports == null || reports.TodaysReport == null)
+            if (ReferenceEquals(reports, null) || reports.TodaysReport == null)
             {
                 return null;
             }
@@ -321,9 +328,9 @@ namespace OniAiProbeMod.Api
             ReportManager.DailyReport earlier = reports.YesterdaysReport;
             return new Dictionary<string, object>
             {
-                { "today_made", ApiValues.Number(today.Positive, 0) },
-                { "today_used", ApiValues.Number(today.Negative, 0) },
-                { "yesterday_net", earlier == null ? null : ApiValues.Number(earlier.GetEntry(type).Net, 0) }
+                { "today_made", ApiValues.Number(today.Positive / unit, 0) },
+                { "today_used", ApiValues.Number(today.Negative / unit, 0) },
+                { "yesterday_net", earlier == null ? null : ApiValues.Number(earlier.GetEntry(type).Net / unit, 0) }
             };
         }
 

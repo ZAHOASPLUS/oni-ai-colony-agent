@@ -61,6 +61,42 @@ namespace OniAiProbeMod.Api
                 }
             }
 
+            const string rocketCategory = "RocketModules";
+            categories.Add(rocketCategory);
+            if (category == null || string.Equals(category, rocketCategory, StringComparison.OrdinalIgnoreCase))
+            {
+                List<object> availableModules = new List<object>();
+                List<object> unavailableModules = new List<object>();
+                foreach (string moduleId in SelectModuleSideScreen.moduleButtonSortOrder)
+                {
+                    BuildingDef def = Assets.GetBuildingDef(moduleId);
+                    if (def == null || !def.IsAvailable() || !Game.IsCorrectDlcActiveForCurrentSave(def))
+                    {
+                        continue;
+                    }
+                    if (Db.Get().TechItems.IsTechItemComplete(def.PrefabID))
+                    {
+                        availableModules.Add(DescribeBuilding(def, world, optionsByTag));
+                    }
+                    else
+                    {
+                        unavailableModules.Add(new Dictionary<string, object>
+                        {
+                            { "id", def.PrefabID },
+                            { "tech", Db.Get().TechItems.GetTechFromItemID(def.PrefabID)?.Id }
+                        });
+                    }
+                }
+                if (availableModules.Count > 0)
+                {
+                    unlocked[rocketCategory] = availableModules;
+                }
+                if (includeLocked && unavailableModules.Count > 0)
+                {
+                    locked[rocketCategory] = unavailableModules;
+                }
+            }
+
             if (category != null && !categories.Contains(category, StringComparer.OrdinalIgnoreCase))
             {
                 throw new ApiException(

@@ -9,16 +9,20 @@ namespace OniAiProbeMod.Api
     /// <summary>A refusal the caller can act on; it becomes the response's error object.</summary>
     internal sealed class ApiException : Exception
     {
-        internal ApiException(string code, string message, string hint = null)
+        internal ApiException(string code, string message, string hint = null, JObject details = null)
             : base(message)
         {
             Code = code;
             Hint = hint;
+            Details = details;
         }
 
         internal string Code { get; }
 
         internal string Hint { get; }
+
+        /// <summary>More fields for the error object, such as the ids an ambiguous name could mean.</summary>
+        internal JObject Details { get; }
     }
 
     /// <summary>
@@ -123,7 +127,7 @@ namespace OniAiProbeMod.Api
             }
             catch (ApiException ex)
             {
-                return ApiResult.Failure(ex.Code, ex.Message, ex.Hint);
+                return Refusal(ex);
             }
             catch (Exception ex)
             {
@@ -131,6 +135,20 @@ namespace OniAiProbeMod.Api
                 ApiLog.Error("api_" + name, ex);
                 return ApiResult.Failure("internal_error", ex.GetType().Name + ": " + ex.Message);
             }
+        }
+
+        internal static JObject Refusal(ApiException ex)
+        {
+            JObject response = ApiResult.Failure(ex.Code, ex.Message, ex.Hint);
+            if (ex.Details != null)
+            {
+                JObject error = (JObject)response["error"];
+                foreach (JProperty field in ex.Details.Properties())
+                {
+                    error[field.Name] = field.Value;
+                }
+            }
+            return response;
         }
 
         // The hard limits on any change to the game: only a test clone, and only

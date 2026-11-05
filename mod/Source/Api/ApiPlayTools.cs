@@ -151,9 +151,28 @@ namespace OniAiProbeMod.Api
                 applied["element_filter"] = SetElementFilter(building, elementFilter);
                 any = true;
             }
+            if (args["crew"] is JArray crew)
+            {
+                applied["crew"] = ApiRocketTools.SetCrew(building, crew);
+                any = true;
+            }
+            string rocketRestriction = ApiArgs.Text(args, "rocket_restriction");
+            if (rocketRestriction != null)
+            {
+                applied["rocket_restriction"] = ApiRocketTools.SetRestriction(building, rocketRestriction);
+                any = true;
+            }
+            string rocketAction = ApiArgs.Text(args, "rocket_action");
+            if (rocketAction != null)
+            {
+                applied["rocket_action"] = ApiRocketTools.ExecuteRocketAction(building, rocketAction);
+                any = true;
+            }
             if (!any)
             {
-                throw new ApiException("invalid_argument", "Give recipe, seed, storage_filter or element_filter.");
+                throw new ApiException(
+                    "invalid_argument",
+                    "Give recipe, seed, storage_filter, element_filter, crew, rocket_restriction or rocket_action.");
             }
             return applied;
         }
@@ -233,21 +252,9 @@ namespace OniAiProbeMod.Api
             return tags.Select(tag => tag.Name).ToList();
         }
 
-        internal static MinionIdentity ReadDuplicant(JObject args)
-        {
-            string name = ApiArgs.Text(args, "duplicant");
-            MinionIdentity identity = Components.LiveMinionIdentities.Items
-                .FirstOrDefault(candidate => candidate != null && candidate.GetProperName() == name);
-            if (identity == null)
-            {
-                throw new ApiException("unknown_duplicant", "No living duplicant is called " + name + ".", "get_status lists them.");
-            }
-            return identity;
-        }
-
         internal static object SetChorePriority(JObject args)
         {
-            MinionIdentity identity = ReadDuplicant(args);
+            MinionIdentity identity = ApiDuplicants.Read(args, "duplicant");
             string groupId = ApiArgs.Text(args, "chore_group");
             ChoreGroup group = Db.Get().ChoreGroups.resources
                 .FirstOrDefault(candidate => string.Equals(candidate.Id, groupId, StringComparison.OrdinalIgnoreCase));
@@ -269,6 +276,7 @@ namespace OniAiProbeMod.Api
             return new Dictionary<string, object>
             {
                 { "duplicant", identity.GetProperName() },
+                { "id", ApiDuplicants.Id(identity) },
                 { "chore_group", group.Id },
                 { "level", consumer.GetPersonalPriority(group) }
             };

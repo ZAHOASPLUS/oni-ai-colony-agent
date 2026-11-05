@@ -19,6 +19,7 @@ namespace OniAiProbeMod.Api
                 MinionResume resume = identity.GetComponent<MinionResume>();
                 duplicants.Add(new Dictionary<string, object>
                 {
+                    { "id", ApiDuplicants.Id(identity) },
                     { "name", identity.GetProperName() },
                     { "points", resume.AvailableSkillpoints },
                     {
@@ -34,7 +35,7 @@ namespace OniAiProbeMod.Api
 
         internal static object Learn(JObject args)
         {
-            MinionIdentity identity = ApiPlayTools.ReadDuplicant(args);
+            MinionIdentity identity = ApiDuplicants.Read(args, "duplicant");
             string id = ApiArgs.Text(args, "skill");
             Database.Skill skill = Db.Get().Skills.TryGet(id);
             if (skill == null || skill.deprecated)
@@ -54,6 +55,7 @@ namespace OniAiProbeMod.Api
             return new Dictionary<string, object>
             {
                 { "duplicant", identity.GetProperName() },
+                { "id", ApiDuplicants.Id(identity) },
                 { "skill", id },
                 { "points_left", resume.AvailableSkillpoints }
             };

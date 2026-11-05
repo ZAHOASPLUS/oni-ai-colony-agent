@@ -1,0 +1,11 @@
+{
+  "name": "oni-player",
+  "displayName": "ONI Player",
+  "version": "1.0.0",
+  "description": "Oxygen Not Included localhost tool API integration (MCP server and oni-player skill) for Antigravity.",
+  "suggestedPrompts": [
+    "读取当前缺氧殖民地状态并继续推进生存与科研",
+    "检查最近的殖民地告警与事件，修复农场和氧气问题",
+    "在测试克隆存档上复盘当前周期并保存新的检查点"
+  ]
+}
