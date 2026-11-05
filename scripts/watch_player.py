@@ -18,6 +18,8 @@ Alerts:
   api_down         the game did not answer
   tool_code_changed the player touched mod/, tools/, scripts/ or agent/
   session_started  a new run directory appeared under reports/api
+  resumed          (--no-pause) the game was paused and the watcher set it
+                   running again at the last speed, never below 1
 """
 
 from __future__ import annotations
@@ -186,6 +188,28 @@ def read_status() -> Tuple[Optional[Dict[str, Any]], str]:
     return reply.get("result") or {}, ""
 
 
+def resume_speed(speed: int) -> str:
+    """Unpause at the given speed; returns "" or the error code."""
+    try:
+        done = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "tools" / "oni_tools.py"), "call", "set_speed",
+             json.dumps({"speed": max(1, speed)})],
+            capture_output=True, timeout=60, cwd=REPO_ROOT,
+        )
+        reply = json.loads(done.stdout.decode("utf-8", errors="replace") or "{}")
+    except (subprocess.TimeoutExpired, ValueError, OSError) as ex:
+        return type(ex).__name__
+    if reply.get("ok"):
+        return ""
+    error = reply.get("error") or {}
+    return str(error.get("code") if isinstance(error, dict) else error)
+
+
+def wants_pause(entry: Dict[str, Any]) -> bool:
+    args = entry.get("args") or {}
+    return entry.get("tool") == "set_speed" and bool(entry.get("ok")) and args.get("speed") == 0
+
+
 def tool_changes() -> str:
     done = subprocess.run(
         ["git", "status", "--porcelain", "--", *TOOL_PATHS], capture_output=True, cwd=REPO_ROOT,
@@ -207,6 +231,8 @@ def main(argv: Optional[List[str]] = None, emit: Callable[[str], None] = print) 
     parser.add_argument("--status-seconds", type=float, default=120.0)
     parser.add_argument("--stall-minutes", type=float, default=10.0)
     parser.add_argument("--status-minutes", type=float, default=30.0)
+    parser.add_argument("--no-pause", action="store_true",
+                        help="unpause the game whenever it is paused (user rule 2026-11-06: no pausing, speed >= 1)")
     args = parser.parse_args(argv)
 
     run_dir = args.run_dir if args.run_dir.is_absolute() else REPO_ROOT / args.run_dir
@@ -223,16 +249,29 @@ def main(argv: Optional[List[str]] = None, emit: Callable[[str], None] = print) 
         emit(line)
         sys.stdout.flush()
 
-    say(f"WATCH run_dir={run_dir} bridge={args.bridge}")
+    last_speed = 1
+
+    def resume(reason: str) -> None:
+        error = resume_speed(last_speed)
+        say(f"ALERT resumed: {reason}; set_speed {max(1, last_speed)}" + (f" failed: {error}" if error else ""))
+
+    say(f"WATCH run_dir={run_dir} bridge={args.bridge} no_pause={args.no_pause}")
     while True:
         now = time.time()
+        pause_seen = False
         for line in audit.lines():
             try:
                 entry = json.loads(line)
             except ValueError:
                 continue
+            requested = (entry.get("args") or {}).get("speed") if entry.get("tool") == "set_speed" else None
+            if isinstance(requested, int) and requested >= 1 and entry.get("ok"):
+                last_speed = requested
+            pause_seen = pause_seen or wants_pause(entry)
             for alert in watcher.feed_audit(entry, now):
                 say("ALERT " + alert)
+        if args.no_pause and pause_seen:
+            resume("player called set_speed 0")
         for line in issues.lines():
             say("ALERT issue: " + line[:400])
         if now - last_status >= args.status_seconds:
@@ -240,6 +279,11 @@ def main(argv: Optional[List[str]] = None, emit: Callable[[str], None] = print) 
             status, error = read_status()
             for alert in watcher.feed_status(status, now, error):
                 say("ALERT " + alert)
+            clock = (status or {}).get("time") or {}
+            if args.no_pause and clock.get("paused"):
+                if isinstance(clock.get("speed"), int) and clock["speed"] >= 1:
+                    last_speed = clock["speed"]
+                resume(f"game was paused at cycle {watcher.last_cycle}")
             code = tool_changes()
             if code != baseline_code:
                 baseline_code = code

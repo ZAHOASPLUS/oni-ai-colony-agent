@@ -10,7 +10,7 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from watch_player import Tail, Watcher  # noqa: E402
+from watch_player import Tail, Watcher, wants_pause  # noqa: E402
 
 
 def fail(tool: str, code: str) -> dict:
@@ -61,6 +61,14 @@ class WatcherTests(unittest.TestCase):
         self.assertTrue(w.feed_status(status(1, 0.3, 2, paused=True), 1500)[0].startswith("paused"))
         self.assertTrue(w.feed_status(None, 1600, "connection_refused")[0].startswith("api_down"))
         self.assertEqual(w.feed_status(None, 1700, "connection_refused"), [])
+
+
+class PauseTests(unittest.TestCase):
+    def test_only_a_successful_speed_zero_is_a_pause(self) -> None:
+        self.assertTrue(wants_pause({"tool": "set_speed", "ok": True, "args": {"speed": 0}}))
+        self.assertFalse(wants_pause({"tool": "set_speed", "ok": True, "args": {"speed": 1}}))
+        self.assertFalse(wants_pause({"tool": "set_speed", "ok": False, "args": {"speed": 0}}))
+        self.assertFalse(wants_pause({"tool": "dig", "ok": True, "args": {"speed": 0}}))
 
 
 class TailTests(unittest.TestCase):
