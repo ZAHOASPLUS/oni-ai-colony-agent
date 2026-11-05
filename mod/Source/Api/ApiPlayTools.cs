@@ -168,11 +168,12 @@ namespace OniAiProbeMod.Api
                 applied["rocket_action"] = ApiRocketTools.ExecuteRocketAction(building, rocketAction);
                 any = true;
             }
+            any = ApiBuildingSettings.Configure(building, args, applied) || any;
             if (!any)
             {
                 throw new ApiException(
                     "invalid_argument",
-                    "Give recipe, seed, storage_filter, element_filter, crew, rocket_restriction or rocket_action.");
+                    "Give recipe, seed, storage_filter, element_filter, crew, rocket_restriction, rocket_action, assigned_duplicant or massage stress thresholds.");
             }
             return applied;
         }

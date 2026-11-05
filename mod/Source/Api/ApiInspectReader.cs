@@ -109,6 +109,7 @@ namespace OniAiProbeMod.Api
         // What configure can set here, so a player never has to guess an id.
         private static void AddConfigurableOptions(GameObject go, Dictionary<string, object> entry)
         {
+            ApiBuildingSettings.Describe(go, entry);
             ComplexFabricator fabricator = go.GetComponent<ComplexFabricator>();
             if (fabricator != null)
             {

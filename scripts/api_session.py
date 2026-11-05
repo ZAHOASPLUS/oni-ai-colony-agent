@@ -60,6 +60,7 @@ STEAM_LAUNCH_URL = "steam://rungameid/457140"
 WM_CLOSE = 0x0010
 STOP_TIMEOUT_SECONDS = 25.0
 AUDIT_FILE = "api-audit.jsonl"
+PREEXISTING_AUDIT_FILE = "api-audit.preexisting.jsonl"
 CHECKPOINT_STEM = re.compile(r"-ckpt-(?P<index>[0-9]{3})$")
 
 
@@ -86,6 +87,25 @@ def game_process_ids() -> List[int]:
         check=True,
     ).stdout
     return [int(row[1]) for row in csv.reader(io.StringIO(listing)) if len(row) > 1 and row[0] == GAME_PROCESS]
+
+
+def archive_existing_audit(bridge: pathlib.Path, run_dir: pathlib.Path) -> bool:
+    """Keep earlier sessions' evidence without letting it become this run's audit."""
+    source = bridge / AUDIT_FILE
+    if not source.exists():
+        return False
+    target = run_dir / PREEXISTING_AUDIT_FILE
+    if target.exists():
+        raise CloneLaunchGuardError(f"Earlier audit evidence already exists: {target}")
+    source.rename(target)
+    return True
+
+
+def audit_time(value: Any) -> datetime.datetime:
+    stamp = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if stamp.utcoffset() is None:
+        raise CheckpointChainError("Audit timestamps must include a timezone.")
+    return stamp
 
 
 def start(args: argparse.Namespace) -> Dict[str, Any]:
@@ -118,6 +138,7 @@ def start(args: argparse.Namespace) -> Dict[str, Any]:
     prefs = root / "kplayerprefs.yaml"
     prefs_backup = run_dir / "kplayerprefs.before.yaml"
     shutil.copy2(prefs, prefs_backup)
+    archived_audit = archive_existing_audit(bridge, run_dir)
     session = {
         "schema": "oni.api-session.v1",
         "started_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -127,6 +148,7 @@ def start(args: argparse.Namespace) -> Dict[str, Any]:
         "preflight": preflight,
         "kplayerprefs_sha256": sha256(prefs),
         "installed_dll_sha256": sha256(root / "mods" / "Dev" / "oni-ai-colony-agent" / "OniAiProbeMod.dll"),
+        "preexisting_audit_archived": archived_audit,
     }
     write_json_atomic(run_dir / "session.json", session)
     write_json_atomic(
@@ -171,8 +193,15 @@ def stop(args: argparse.Namespace) -> Dict[str, Any]:
     root = oni_root()
     run_dir = pathlib.Path(args.run_dir).resolve()
     session = json.loads((run_dir / "session.json").read_text(encoding="utf-8"))
-
+    bridge = root / "ai-bridge"
     process_ids = game_process_ids()
+    end_path = run_dir / "session-end.json"
+    if (run_dir / AUDIT_FILE).exists() and ((bridge / AUDIT_FILE).exists() or process_ids):
+        raise CloneLaunchGuardError("This run already has an audit, but another game or audit is present; nothing was changed.")
+    if end_path.exists():
+        if process_ids:
+            raise CloneLaunchGuardError("This session already ended; refusing to close another game.")
+        return json.loads(end_path.read_text(encoding="utf-8"))
     if process_ids:
         _close_game_windows(process_ids)
         deadline = time.monotonic() + STOP_TIMEOUT_SECONDS
@@ -185,9 +214,10 @@ def stop(args: argparse.Namespace) -> Dict[str, Any]:
 
     prefs = root / "kplayerprefs.yaml"
     shutil.copy2(run_dir / "kplayerprefs.before.yaml", prefs)
-    bridge = root / "ai-bridge"
     if (bridge / AUDIT_FILE).exists():
-        os.replace(bridge / AUDIT_FILE, run_dir / AUDIT_FILE)
+        if (run_dir / AUDIT_FILE).exists():
+            raise CloneLaunchGuardError("This run already has an audit; refusing to overwrite its evidence.")
+        (bridge / AUDIT_FILE).rename(run_dir / AUDIT_FILE)
     sealed = seal_checkpoints(pathlib.Path(session["manifest"]), pathlib.Path(session["save"]), run_dir)
     report = {
         "schema": "oni.api-session-end.v1",
@@ -208,10 +238,19 @@ def seal_checkpoints(manifest: pathlib.Path, clone_save: pathlib.Path, run_dir: 
     if not audit.exists():
         return []
 
+    # Older session runners left a global append-only audit behind.  Preserve
+    # that file intact, but only seal entries made after this session began.
+    session_path = run_dir / "session.json"
+    started = None
+    if session_path.exists():
+        started = audit_time(json.loads(session_path.read_text(encoding="utf-8"))["started_utc"])
+
     saved: Dict[int, float] = {}
     for line in audit.read_text(encoding="utf-8").splitlines():
         entry = json.loads(line)
         if entry.get("tool") != "save_checkpoint" or not entry.get("ok"):
+            continue
+        if started is not None and audit_time(entry["utc"]) < started:
             continue
         path = pathlib.Path(str(entry["result"]["path"]))
         match = CHECKPOINT_STEM.search(path.stem)

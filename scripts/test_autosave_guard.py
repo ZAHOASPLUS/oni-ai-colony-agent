@@ -52,6 +52,10 @@ class AutosaveGuardTests(unittest.TestCase):
             result["cases"],
         )
         self.assertLessEqual({
+            "massage_range_round_trip_and_partial_update",
+            "massage_invalid_range_preserves_both_values",
+            "assignment_release_and_argument_types",
+            "assignment_shared_name_refused_and_id_resolved",
             "inactive_without_binding",
             "save_unavailable",
             "session_start_forces_zero",

@@ -38,6 +38,14 @@ class SchemaTests(unittest.TestCase):
         self.assertTrue(all(item["type"] == "function" for item in tools))
         self.assertTrue(all(item["function"]["parameters"]["type"] == "object" for item in tools))
 
+    def test_assignment_and_massage_settings_are_in_shared_schema(self) -> None:
+        configure = next(tool for tool in oni_tools.load_tools() if tool["name"] == "configure")
+        properties = configure["parameters"]["properties"]
+        self.assertEqual(properties["assigned_duplicant"]["type"], "string")
+        for name in ("massage_start_stress", "massage_stop_stress"):
+            self.assertEqual(properties[name]["type"], "integer")
+            self.assertEqual((properties[name]["minimum"], properties[name]["maximum"]), (0, 100))
+
 
 class WaitTests(unittest.TestCase):
     def test_returns_early_when_a_duplicant_is_lost(self) -> None:

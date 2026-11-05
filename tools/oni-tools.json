@@ -667,7 +667,7 @@
     },
     {
       "name": "configure",
-      "description": "Set up a finished building. recipe with count queues a recipe on a fabricator such as a MicrobeMusher; count -1 repeats forever and 0 clears it. seed plants in a planter or farm tile. storage_filter sets what a storage building accepts, replacing the old list. inspect lists the recipes, seeds in stock and current filter.",
+      "description": "Set up a finished building. recipe with count queues a recipe on a fabricator such as a MicrobeMusher; count -1 repeats forever and 0 clears it. seed plants in a planter or farm tile. storage_filter sets what a storage building accepts, replacing the old list. assigned_duplicant assigns individual furniture through the game's normal assignment rules. MassageTable stress thresholds control when massage starts and stops. inspect lists recipes, seeds, filters, assignment (kind, id, name) and massage thresholds.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -694,6 +694,22 @@
           "element_filter": {
             "type": "string",
             "description": "Element a GasFilter or LiquidFilter picks out. The picked element leaves by the middle cell, everything else by the far end."
+          },
+          "assigned_duplicant": {
+            "type": "string",
+            "description": "Duplicant id from get_status as a string, or a unique living duplicant name. Shared names are refused as ambiguous_duplicant with candidate_ids. Empty string releases the assignment: public use when allowed, otherwise unassigned. Null is not accepted. Room-managed furniture cannot be individually reassigned."
+          },
+          "massage_start_stress": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "MassageTable only: start massage at this stress percentage. Omitted retains its current value. Must be at least massage_stop_stress."
+          },
+          "massage_stop_stress": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "MassageTable only: stop massage at this stress percentage. Omitted retains its current value. Must not exceed massage_start_stress; give both to change the range together."
           },
           "crew": {
             "type": "array",

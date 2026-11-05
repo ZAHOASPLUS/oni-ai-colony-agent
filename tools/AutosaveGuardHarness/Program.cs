@@ -60,6 +60,7 @@ namespace AutosaveGuardHarness
 
         private static void Run(string bridge)
         {
+            BuildingSettingsTests.Run(Passed);
             MethodInfo doAutoSave = AccessTools.Method(typeof(GameClock), "DoAutoSave", new[] { typeof(int) });
             Require(doAutoSave != null, "GameClock.DoAutoSave(int) is missing from the game assembly");
             MethodInfo patchSuppression = typeof(LifecyclePatches).GetMethod("PatchAutosaveSuppression", AnyStatic);
