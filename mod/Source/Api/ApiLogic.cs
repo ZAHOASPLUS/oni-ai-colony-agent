@@ -99,8 +99,8 @@ namespace OniAiProbeMod.Api
             {
                 return;
             }
-            entry["smart_battery_low_pct"] = battery.ActivateValue;
-            entry["smart_battery_high_pct"] = battery.DeactivateValue;
+            entry["smart_battery_low_pct"] = Low(battery);
+            entry["smart_battery_high_pct"] = High(battery);
             entry["charge_pct"] = battery.Capacity > 0f
                 ? ApiValues.Number(100f * battery.JoulesAvailable / battery.Capacity, 0)
                 : (object)null;
@@ -124,20 +124,37 @@ namespace OniAiProbeMod.Api
             {
                 throw new ApiException("unsupported_setting", "Battery thresholds apply only to a finished BatterySmart.");
             }
-            float low = ReadPercent(args, "smart_battery_low_pct", battery.ActivateValue);
-            float high = ReadPercent(args, "smart_battery_high_pct", battery.DeactivateValue);
+            float low = ReadPercent(args, "smart_battery_low_pct", Low(battery));
+            float high = ReadPercent(args, "smart_battery_high_pct", High(battery));
             if (low > high)
             {
                 throw new ApiException(
                     "invalid_argument",
                     "smart_battery_low_pct must not exceed smart_battery_high_pct; supply both to change the range.");
             }
-            // ActiveRangeSideScreen writes these same properties.
-            battery.ActivateValue = low;
-            battery.DeactivateValue = high;
-            applied["smart_battery_low_pct"] = battery.ActivateValue;
-            applied["smart_battery_high_pct"] = battery.DeactivateValue;
+            // ActiveRangeSideScreen writes these same properties; each setter
+            // also re-evaluates the output signal.
+            battery.DeactivateValue = low;
+            battery.ActivateValue = high;
+            applied["smart_battery_low_pct"] = Low(battery);
+            applied["smart_battery_high_pct"] = High(battery);
             return true;
+        }
+
+        // BatterySmart's properties cross over its fields: ActivateValue reads
+        // and writes the field deactivateValue and DeactivateValue the field
+        // activateValue (checked in the game's IL, 2026-11-06).
+        // UpdateLogicCircuit turns the output on at charge <= activateValue
+        // and off at charge >= deactivateValue, so the low threshold is the
+        // DeactivateValue property and the high one the ActivateValue property.
+        private static float Low(BatterySmart battery)
+        {
+            return battery.DeactivateValue;
+        }
+
+        private static float High(BatterySmart battery)
+        {
+            return battery.ActivateValue;
         }
 
         private static float ReadPercent(JObject args, string name, float fallback)
