@@ -80,7 +80,7 @@ description: Play Oxygen Not Included through the oni tools: observe the colony,
 - 自动化：`get_buildable` 的 `logic_ports` 给出端口相对原点的偏移，`inspect` 给出已建建筑端口的实际格子、是否接上线（`connected`）和当前信号（1 绿 / 0 红）。智能电池用 `configure` 的 `smart_battery_low_pct`、`smart_battery_high_pct` 设置：电量降到下限时输出变绿，升到上限时变红，接发电机即可按需启停。
 - `move_to`（复制人 id + x, y）是游戏自带的“移动到”命令：复制人走过去，在那里等到接新活。看到 `breath_pct` 下降、身处氯气/二氧化碳/高温中时，先用它把人撤回有氧的地方，再处理挖掘路线。够不着的格子会被拒绝为 `unreachable`。倒地（incapacitated）的人不能走，只能由别人自动抬到空闲的分诊床（Triage Cot），分诊床不能用 `assigned_duplicant` 手动指派。
 - 间歇泉：`find` kind `geyser` 给出 `id`；`configure {"id": <id>, "study": true}` 派人去分析（需要有人会科研，重复设置不会反复切换）。分析后看 `average_kg_per_cycle`，它把喷发、间歇和休眠都平均进去了，做水或气的预算要用它，不要用 `kg_per_cycle_active`。`dormant_now` 和 `phase_cycles_left` 说明现在是否休眠、还剩几个周期。
-- `get_status` 的 `colony.food_report_kcal` 是游戏的每日食物报表：`today_made`、`today_used`（负数）、`yesterday_net`。做菜站产出的菜不算进 made，另见 `today_cooked`、`yesterday_cooked`（做菜站在同一份日报窗口里做出的菜，kcal；从读档时开始计，前一份日报没计全时为 null）。Mush Bar 殖民地看产量要用 made + cooked。游戏的日报在**入夜时**翻日，不是周期整点；每份报表带 `report_day`，today_* 都属于这一份，跨 report_day 的数不要相加。
+- `get_status` 的 `colony.food_report_kcal` 是游戏的每日食物报表：`today_made`（收获、屠宰）、`today_used`（吃饭，负数）、`yesterday_net`。游戏的报表看不见做菜：成品不算 made，原料也不算 used。补充字段（today_ 和 yesterday_ 各一套）：`*_cooked` 成品 kcal，`*_cooked_inputs` 用掉的可食用原料 kcal，`*_cooked_net` = 成品 − 原料（泥土做 Mush Bar 全算新增，Mealwood 腌成 Pickled Meal 不新增），`*_net_with_cooking` 是加上做菜后的真实食物净值，**看食物盈亏就看它**。前一份日报没从头计到尾时 yesterday_* 为 null。日报在**入夜时**翻日，不是周期整点；每份报表带 `report_day`，跨 report_day 的数不要相加。
 - 火箭：`configure` 的 `rocket_action`（orbit、launch、cancel_launch、land）、`rocket_restriction` 和 `crew`。
 
 ## 殖民地规则

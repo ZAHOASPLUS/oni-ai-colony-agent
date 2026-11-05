@@ -3,56 +3,91 @@ using System.Collections.Generic;
 namespace OniAiProbeMod.Api
 {
     /// <summary>
-    /// Calories of the dishes cooking stations make, per daily report.  The game's
-    /// daily food report counts harvests as made and the edible ingredients cooked
-    /// as used, but never the dish itself, so a colony fed by a Microbe Musher
-    /// reads as producing nothing.  The ledger fills that gap for the loaded game
-    /// only: it starts empty at every load and is not saved.
+    /// What cooking stations did to the colony's food, per daily report.  The
+    /// game's daily food report counts harvests as made and meals as used, but a
+    /// craft is invisible to it: the dish is never counted as made and the edible
+    /// ingredients are never counted as used.  Per craft CookedFoodPatch records
+    ///   gross:    the dish's calories,
+    ///   inputs:   the edible calories its ingredients took from the station,
+    ///   reported: what the game's report changed by during the craft (normally 0).
+    /// gross - inputs is the food cooking really added; a Mush Bar from dirt adds
+    /// all of it, a Pickled Meal from Mealwood adds nothing.
     ///
-    /// Days are ReportManager.DailyReport.day, not GameClock cycles: the game
-    /// starts a new report at nightfall, so keying by report keeps today_cooked in
-    /// the same window as today_made and today_used.
+    /// Days are ReportManager.DailyReport.day (the game opens a report at
+    /// nightfall), so the numbers share the native report's window.  The ledger
+    /// covers the loaded game only: it starts empty at every load.
     /// </summary>
     internal static class ApiFoodLedger
     {
-        private static readonly Dictionary<int, double> CaloriesByDay = new Dictionary<int, double>();
+        private sealed class Day
+        {
+            internal double Gross;
+            internal double Inputs;
+            internal double Reported;
+        }
+
+        private static readonly Dictionary<int, Day> Days = new Dictionary<int, Day>();
         private static object game;
         private static int firstFullDay = int.MaxValue;
         private static double countingSince = double.NaN;
 
-        /// <summary>Record one finished dish into the report of the given day.</summary>
-        internal static void Add(object currentGame, int day, double timeInCycles, double calories)
+        internal static void Add(object currentGame, int day, double timeInCycles, double gross, double inputs, double reported)
         {
             Follow(currentGame, day, timeInCycles);
-            if (calories <= 0.0 || double.IsNaN(calories) || double.IsInfinity(calories))
+            if (!Finite(gross) || !Finite(inputs) || !Finite(reported))
             {
                 return;
             }
-            CaloriesByDay.TryGetValue(day, out double total);
-            CaloriesByDay[day] = total + calories;
+            if (!Days.TryGetValue(day, out Day entry))
+            {
+                entry = new Day();
+                Days[day] = entry;
+            }
+            entry.Gross += gross;
+            entry.Inputs += inputs;
+            entry.Reported += reported;
         }
 
         /// <summary>
-        /// today_cooked and yesterday_cooked in kcal for the reports of today and
-        /// yesterday.  yesterday_cooked is null unless the whole of yesterday's
-        /// report was counted; cooked_counted_since_cycle says when counting began.
+        /// The cooking fields for today's and yesterday's reports.  todayNative
+        /// and yesterdayNative are those reports' own net, in calories.  The
+        /// yesterday_* fields are null unless the whole of that report was counted.
         /// </summary>
-        internal static Dictionary<string, object> Read(object currentGame, int today, int? yesterday, double timeInCycles)
+        internal static Dictionary<string, object> Read(
+            object currentGame, int today, double todayNative, int? yesterday, double? yesterdayNative, double timeInCycles)
         {
             Follow(currentGame, today, timeInCycles);
-            CaloriesByDay.TryGetValue(today, out double cooked);
-            object earlierCooked = null;
-            if (yesterday.HasValue && yesterday.Value >= firstFullDay)
+            Dictionary<string, object> fields = new Dictionary<string, object>();
+            Fill(fields, "today", today, todayNative);
+            if (yesterday.HasValue && yesterday.Value >= firstFullDay && yesterdayNative.HasValue)
             {
-                CaloriesByDay.TryGetValue(yesterday.Value, out double earlier);
-                earlierCooked = System.Math.Round(earlier / 1000.0, 0);
+                Fill(fields, "yesterday", yesterday.Value, yesterdayNative.Value);
             }
-            return new Dictionary<string, object>
+            else
             {
-                { "today_cooked", System.Math.Round(cooked / 1000.0, 0) },
-                { "yesterday_cooked", earlierCooked },
-                { "cooked_counted_since_cycle", System.Math.Round(countingSince + 1.0, 2) }
-            };
+                foreach (string name in new[] { "cooked", "cooked_inputs", "cooked_net", "cooked_reported", "net_with_cooking" })
+                {
+                    fields["yesterday_" + name] = null;
+                }
+            }
+            fields["cooked_counted_since_cycle"] = System.Math.Round(countingSince + 1.0, 2);
+            return fields;
+        }
+
+        private static void Fill(Dictionary<string, object> fields, string prefix, int day, double native)
+        {
+            Days.TryGetValue(day, out Day entry);
+            double gross = entry == null ? 0.0 : entry.Gross;
+            double inputs = entry == null ? 0.0 : entry.Inputs;
+            double reported = entry == null ? 0.0 : entry.Reported;
+            double cookedNet = gross - inputs;
+            fields[prefix + "_cooked"] = Kcal(gross);
+            fields[prefix + "_cooked_inputs"] = Kcal(inputs);
+            fields[prefix + "_cooked_net"] = Kcal(cookedNet);
+            fields[prefix + "_cooked_reported"] = Kcal(reported);
+            // The report's net, minus what it already said about crafts, plus
+            // what crafts really did.
+            fields[prefix + "_net_with_cooking"] = Kcal(native - reported + cookedNet);
         }
 
         // A new game object means a load: the ledger restarts.  So does a report
@@ -61,13 +96,13 @@ namespace OniAiProbeMod.Api
         private static void Follow(object currentGame, int day, double timeInCycles)
         {
             bool reloaded = !ReferenceEquals(currentGame, game);
-            bool rewound = !reloaded && CaloriesByDay.Count > 0 && day < MaxDay();
+            bool rewound = !reloaded && Days.Count > 0 && day < MaxDay();
             if (!reloaded && !rewound)
             {
                 return;
             }
             game = currentGame;
-            CaloriesByDay.Clear();
+            Days.Clear();
             countingSince = timeInCycles;
             firstFullDay = day + 1;
         }
@@ -75,7 +110,7 @@ namespace OniAiProbeMod.Api
         private static int MaxDay()
         {
             int max = int.MinValue;
-            foreach (int key in CaloriesByDay.Keys)
+            foreach (int key in Days.Keys)
             {
                 if (key > max)
                 {
@@ -83,6 +118,16 @@ namespace OniAiProbeMod.Api
                 }
             }
             return max;
+        }
+
+        private static double Kcal(double calories)
+        {
+            return System.Math.Round(calories / 1000.0, 0);
+        }
+
+        private static bool Finite(double value)
+        {
+            return !double.IsNaN(value) && !double.IsInfinity(value);
         }
     }
 }

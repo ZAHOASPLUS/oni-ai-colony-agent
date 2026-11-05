@@ -314,10 +314,11 @@ namespace OniAiProbeMod.Api
             return total;
         }
 
-        // The game's food report counts harvests and butchering as made, and meals
-        // and the edible ingredients cooked as used, but never the dish a cooking
-        // station makes.  today_cooked and yesterday_cooked come from
-        // ApiFoodLedger, which counts those dishes since the save was loaded.
+        // The game's food report counts harvests and butchering as made and meals
+        // as used; cooking is invisible to it (neither the dish nor the edible
+        // ingredients).  The cooked fields come from ApiFoodLedger, counted since
+        // the save was loaded; *_net_with_cooking is the report's net corrected
+        // for what cooking really added.
         private static object ReadFoodReport()
         {
             Dictionary<string, object> report =
@@ -330,8 +331,12 @@ namespace OniAiProbeMod.Api
             }
             ReportManager.DailyReport earlier = reports.YesterdaysReport;
             int? yesterday = earlier == null ? (int?)null : earlier.day;
-            foreach (KeyValuePair<string, object> entry in
-                     ApiFoodLedger.Read(Game.Instance, reports.TodaysReport.day, yesterday, clock.GetTimeInCycles()))
+            double? yesterdayNative = earlier == null
+                ? (double?)null
+                : earlier.GetEntry(ReportManager.ReportType.CaloriesCreated).Net;
+            double todayNative = reports.TodaysReport.GetEntry(ReportManager.ReportType.CaloriesCreated).Net;
+            foreach (KeyValuePair<string, object> entry in ApiFoodLedger.Read(
+                         Game.Instance, reports.TodaysReport.day, todayNative, yesterday, yesterdayNative, clock.GetTimeInCycles()))
             {
                 report[entry.Key] = entry.Value;
             }
