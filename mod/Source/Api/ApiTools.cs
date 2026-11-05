@@ -77,6 +77,7 @@ namespace OniAiProbeMod.Api
             { "set_schedule", new Tool(ApiPlayTools.SetSchedule, true, true) },
             { "get_skills", new Tool(ApiSkills.Read, true) },
             { "learn_skill", new Tool(ApiSkills.Learn, true, true) },
+            { "move_to", new Tool(ApiMovement.MoveTo, true, true) },
             { "get_printables", new Tool(ApiPrintables.Read, true) },
             { "choose_printable", new Tool(ApiPrintables.Choose, true, true) },
             { "reject_printables", new Tool(ApiPrintables.Reject, true, true) },

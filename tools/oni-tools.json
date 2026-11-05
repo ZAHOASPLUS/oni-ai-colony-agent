@@ -835,6 +835,31 @@
       }
     },
     {
+      "name": "move_to",
+      "description": "The game's Move To order: the duplicant walks to the cell and waits there until it takes new work. Use it to pull a duplicant out of danger (bad air, heat, a flooding pocket) before it collapses. Refused as unreachable when the game's navigator has no path; the hint says what a target needs. An incapacitated duplicant cannot walk: another duplicant carries it to a free Triage Cot by itself. Returns from, to and navigation_cost.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "duplicant": {
+            "type": "string",
+            "description": "Id from get_status, such as \"101\", or a name only one living duplicant has; a shared name is refused as ambiguous_duplicant, listing candidate_ids."
+          },
+          "x": {
+            "type": "integer"
+          },
+          "y": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "duplicant",
+          "x",
+          "y"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "get_printables",
       "description": "The printing pod's current offer: duplicants with traits, interests and attributes, and care packages. Each has an index for choose_printable. With nothing on offer, says how long until the next one. get_status shows printables_waiting.",
       "parameters": {

@@ -78,6 +78,7 @@ description: Play Oxygen Not Included through the oni tools: observe the colony,
 - 床、按摩床等个人设施用 `configure` 的 `assigned_duplicant` 指定复制人 **id 字符串**；空字符串 `""` 解除分配，允许公用的设施恢复公用。按摩床还可设 `massage_start_stress`、`massage_stop_stress`（0–100 的整数，stop ≤ start）。先用 `inspect` 核对分配和阈值，再看复制人的实际 `chore`（按摩为 `StressHeal`）及压力趋势，配置成功不等于已经开始恢复。
 - `inspect` 的 `room` 是游戏对这一格的房间判定：`type` 如 `Barracks`、`Bedroom`、`MessHall`、`GreatHall`，围起来但不够格时 `type` 为 null，不在任何封闭空间时 `room` 为 null。建完卧室、餐厅后用它验收。
 - 自动化：`get_buildable` 的 `logic_ports` 给出端口相对原点的偏移，`inspect` 给出已建建筑端口的实际格子、是否接上线（`connected`）和当前信号（1 绿 / 0 红）。智能电池用 `configure` 的 `smart_battery_low_pct`、`smart_battery_high_pct` 设置：电量降到下限时输出变绿，升到上限时变红，接发电机即可按需启停。
+- `move_to`（复制人 id + x, y）是游戏自带的“移动到”命令：复制人走过去，在那里等到接新活。看到 `breath_pct` 下降、身处氯气/二氧化碳/高温中时，先用它把人撤回有氧的地方，再处理挖掘路线。够不着的格子会被拒绝为 `unreachable`。倒地（incapacitated）的人不能走，只能由别人自动抬到空闲的分诊床（Triage Cot），分诊床不能用 `assigned_duplicant` 手动指派。
 - `get_status` 的 `colony.food_report_kcal` 是游戏的每日食物报表：`today_made`、`today_used`（负数）、`yesterday_net`。做菜站产出的菜不算进 made，另见 `today_cooked`、`yesterday_cooked`（做菜站在同一份日报窗口里做出的菜，kcal；从读档时开始计，前一份日报没计全时为 null）。Mush Bar 殖民地看产量要用 made + cooked。游戏的日报在**入夜时**翻日，不是周期整点；每份报表带 `report_day`，today_* 都属于这一份，跨 report_day 的数不要相加。
 - 火箭：`configure` 的 `rocket_action`（orbit、launch、cancel_launch、land）、`rocket_restriction` 和 `crew`。
 
