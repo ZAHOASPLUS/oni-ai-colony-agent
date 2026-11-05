@@ -372,7 +372,43 @@ namespace OniAiProbeMod.Api
             {
                 report[entry.Key] = entry.Value;
             }
+            report["today_used_by_note"] = UsedByNote(reports.TodaysReport.GetEntry(ReportManager.ReportType.CaloriesCreated));
+            report["yesterday_used_by_note"] = earlier == null
+                ? null
+                : UsedByNote(earlier.GetEntry(ReportManager.ReportType.CaloriesCreated));
             return report;
+        }
+
+        private const int NotesShown = 8;
+
+        // The report's own breakdown of what was used: the game files each
+        // negative value under a note (eaten, spoiled, ...) per context, the way
+        // the daily report screen lists them.
+        private static List<object> UsedByNote(ReportManager.ReportEntry entry)
+        {
+            Dictionary<string, float> byNote = new Dictionary<string, float>(System.StringComparer.Ordinal);
+            System.Action<ReportManager.ReportEntry.Note> add = note =>
+            {
+                if (note.value < 0f)
+                {
+                    string key = STRINGS.UI.StripLinkFormatting(note.note ?? "");
+                    byNote.TryGetValue(key, out float sum);
+                    byNote[key] = sum + note.value;
+                }
+            };
+            // AddData files each note on the entry and again on its context, so
+            // the entry's own notes are already the whole day.
+            entry.IterateNotes(add);
+            List<object> rows = new List<object>();
+            foreach (KeyValuePair<string, float> row in byNote.OrderBy(pair => pair.Value).Take(NotesShown))
+            {
+                rows.Add(new Dictionary<string, object>
+                {
+                    { "note", row.Key },
+                    { "kcal", ApiValues.Number(row.Value / CaloriesPerKcal, 0) }
+                });
+            }
+            return rows;
         }
 
         // Today's positive and negative totals and yesterday's net, as in the
