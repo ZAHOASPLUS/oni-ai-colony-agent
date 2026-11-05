@@ -18,8 +18,7 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 # gateway (Cline-pass, DeepSeek's own endpoint, local gateways) serves.
 WIRE_API_RESPONSES = "responses"
 WIRE_API_CHAT_COMPLETIONS = "chat_completions"
-# Active provider: the Cline-pass subscription gateway, whose DeepSeek models are
-# the admitted ONI controller/worker models (docs/model-routing-20261025.md).
+# Default provider for the DeepSeek player: the Cline-pass subscription gateway.
 DEFAULT_PROVIDER = "cline-pass"
 DEFAULT_BASE_URL = "https://api.cline.bot/api/v1"
 DEFAULT_MODEL = "cline-pass/deepseek-v4.1-flash"
@@ -76,23 +75,6 @@ PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
         "input_cost_per_million": None,
         "output_cost_per_million": None,
     },
-    # ChatGPT test runs (user decision 2026-10-27): Cockpit Tools' local
-    # OpenAI-compatible reverse proxy (one account's proxy service).  The model
-    # id must be stated explicitly (the 6.1 terra/sol models are served under
-    # the ids the proxy lists), and only this machine may receive the key.
-    "cockpit": {
-        "base_url": "http://127.0.0.1:14861/v1",
-        "model": None,
-        "wire_api": WIRE_API_CHAT_COMPLETIONS,
-        # Only the proxy's own key: falling back to OPENAI_API_KEY handed an
-        # unrelated key to the proxy, which answered 401 (live, 2026-10-27).
-        "key_env": ("COCKPIT_API_KEY",),
-        "models": (),
-        "hosts": ("127.0.0.1", "localhost", "::1"),
-        "structured_output": ("json_schema", "plain"),
-        "input_cost_per_million": None,
-        "output_cost_per_million": None,
-    },
     # Any other OpenAI-compatible endpoint: base_url and model must be stated
     # explicitly, and no host check applies.
     "compatible": {
@@ -141,7 +123,7 @@ _SECRET_FIELD_NAMES = {
 # Cline-pass gateway key is accepted directly so the ONI controller can use the
 # same admitted credential as the interactive session.
 _KEY_ENVIRONMENT_NAMES = (
-    "OPENAI_API_KEY", "ONI_AI_API_KEY", "CLINE_API_KEY", "NEWAPI_API_KEY", "DEEPSEEK_API_KEY", "COCKPIT_API_KEY",
+    "OPENAI_API_KEY", "ONI_AI_API_KEY", "CLINE_API_KEY", "NEWAPI_API_KEY", "DEEPSEEK_API_KEY",
 )
 _BASE_URL_ENVIRONMENT_NAMES = ("OPENAI_BASE_URL", "ONI_AI_BASE_URL")
 _MODEL_ENVIRONMENT_NAMES = ("OPENAI_MODEL", "ONI_AI_MODEL")
@@ -225,8 +207,8 @@ def load_llm_config(secrets_dir: Optional[pathlib.Path]) -> Dict[str, Any]:
     explicit_name = str(environment_provider or "").strip().lower()
     if explicit_name in PROVIDER_PRESETS:
         # A named provider reads its own key variable first.  Several keys can
-        # coexist on one machine (CLINE_API_KEY next to an OpenAI key for
-        # ChatGPT test runs); the generic order would hand OPENAI_API_KEY to
+        # coexist on one machine (CLINE_API_KEY next to an OpenAI key); the
+        # generic order would hand OPENAI_API_KEY to
         # whichever endpoint is configured.
         environment_key = first_environment(PROVIDER_PRESETS[explicit_name]["key_env"])
     if environment_key:
@@ -261,7 +243,7 @@ def load_llm_config(secrets_dir: Optional[pathlib.Path]) -> Dict[str, Any]:
     if not config.get("config_error") and (not config.get("base_url") or not config.get("model")):
         if config["provider"] in PROVIDER_PRESETS:
             # A provider whose preset has no endpoint (``compatible``) or no
-            # model (``cockpit``) must never fall back to the default gateway's
+            # model must never fall back to the default gateway's
             # values with this key.
             config["config_error"] = "endpoint_unset"
     config["base_url"] = str(config.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
