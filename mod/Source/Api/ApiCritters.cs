@@ -30,13 +30,27 @@ namespace OniAiProbeMod.Api
                 {
                     continue;
                 }
-                if (query != null && !string.Equals(prefab.PrefabTag.Name, query, System.StringComparison.OrdinalIgnoreCase))
+                if (query != null && !SameSpecies(prefab.PrefabTag.Name, query))
                 {
                     continue;
                 }
                 found.Add(Describe(brain.gameObject, cell));
             }
             return found;
+        }
+
+        // A baby is its own prefab (SquirrelBaby, DreckoBaby); a species query
+        // finds both, and the full prefab finds only that one.
+        internal static bool SameSpecies(string prefab, string query)
+        {
+            const string Baby = "Baby";
+            System.StringComparison ignoreCase = System.StringComparison.OrdinalIgnoreCase;
+            if (string.Equals(prefab, query, ignoreCase))
+            {
+                return true;
+            }
+            return prefab.EndsWith(Baby, ignoreCase) &&
+                   string.Equals(prefab.Substring(0, prefab.Length - Baby.Length), query, ignoreCase);
         }
 
         private static Dictionary<string, object> Describe(GameObject go, int cell)
