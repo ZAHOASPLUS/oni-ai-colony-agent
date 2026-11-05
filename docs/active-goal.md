@@ -27,4 +27,10 @@
 3. 每局结束后在 `reports/play/<run>/review.md` 写复盘，把通用的教训提交到 `skills/oni-player/`。
 4. 工具不够用时，在 `mod/Source/Api/` 和 `tools/oni-tools.json` 里一起补，构建并提交后再上实机。
 
+续玩 `oni-agy-r23`（ckpt-001 已封进链，`--resume` 会读它；Mod 已装上 `main` 的构建）：
+
+```
+python scripts/api_session.py start --manifest reports/runtime/agy-r23/test-clone-manifest.json --save C:\Users\user\Documents\Klei\OxygenNotIncluded\cloud_save_files\76561190000000000\oni-agy-r23\oni-agy-r23.sav --run-dir reports/api/<新的 run 名> --resume
+```
+
 开新克隆用 `scripts/create-named-test-clone.ps1`。从检查点续玩用 `scripts/api_session.py start --resume`：它读取克隆检查点链里最新的一环，所以检查点要先由 `api_session.py stop` 或 `seal` 封进链里。
