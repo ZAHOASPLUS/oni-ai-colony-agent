@@ -10,7 +10,7 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from watch_player import Tail, Watcher, wants_pause  # noqa: E402
+from watch_player import OwnCalls, Tail, Watcher, audit_epoch, wants_pause  # noqa: E402
 
 
 def fail(tool: str, code: str) -> dict:
@@ -69,6 +69,18 @@ class PauseTests(unittest.TestCase):
         self.assertFalse(wants_pause({"tool": "set_speed", "ok": True, "args": {"speed": 1}}))
         self.assertFalse(wants_pause({"tool": "set_speed", "ok": False, "args": {"speed": 0}}))
         self.assertFalse(wants_pause({"tool": "dig", "ok": True, "args": {"speed": 0}}))
+
+
+class OwnCallTests(unittest.TestCase):
+    def test_the_watchers_own_status_reads_are_not_the_players(self) -> None:
+        when = audit_epoch("2026-11-05T22:16:18.6178237+00:00")
+        self.assertAlmostEqual(when, audit_epoch("2026-11-05T22:16:18.617823+00:00"), places=5)
+        own = OwnCalls()
+        own.add("get_status", when - 0.5, when + 0.2)
+        self.assertTrue(own.owns({"utc": "2026-11-05T22:16:18.6178237+00:00", "tool": "get_status"}))
+        self.assertFalse(own.owns({"utc": "2026-11-05T22:16:18.6178237+00:00", "tool": "get_map"}))
+        self.assertFalse(own.owns({"utc": "2026-11-05T22:16:25.0000000+00:00", "tool": "get_status"}))
+        self.assertFalse(own.owns({"tool": "get_status"}))
 
 
 class TailTests(unittest.TestCase):

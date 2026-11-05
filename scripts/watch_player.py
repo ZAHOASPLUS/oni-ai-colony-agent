@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import datetime
 import json
 import pathlib
 import subprocess
@@ -205,6 +206,37 @@ def resume_speed(speed: int) -> str:
     return str(error.get("code") if isinstance(error, dict) else error)
 
 
+def audit_epoch(utc: Any) -> Optional[float]:
+    """The Mod writes "2026-11-05T22:16:18.6178237+00:00"; Python wants 6 digits."""
+    if not isinstance(utc, str):
+        return None
+    try:
+        head, _, rest = utc.partition(".")
+        digits = "".join(ch for ch in rest if ch.isdigit())[:6]
+        zone = rest[len("".join(ch for ch in rest if ch.isdigit())):] or "+00:00"
+        text = f"{head}.{digits or '0'}{zone}" if rest else utc
+        return datetime.datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
+
+
+class OwnCalls:
+    """The watcher's own get_status / set_speed calls, so they never count as the player's."""
+
+    def __init__(self, keep: int = 64) -> None:
+        self.spans: Deque[Tuple[str, float, float]] = collections.deque(maxlen=keep)
+
+    def add(self, tool: str, start: float, end: float) -> None:
+        self.spans.append((tool, start, end))
+
+    def owns(self, entry: Dict[str, Any], slack: float = 1.5) -> bool:
+        when = audit_epoch(entry.get("utc"))
+        if when is None:
+            return False
+        tool = entry.get("tool")
+        return any(tool == own and start - slack <= when <= end + slack for own, start, end in self.spans)
+
+
 def wants_pause(entry: Dict[str, Any]) -> bool:
     args = entry.get("args") or {}
     return entry.get("tool") == "set_speed" and bool(entry.get("ok")) and args.get("speed") == 0
@@ -259,9 +291,12 @@ def main(argv: Optional[List[str]] = None, emit: Callable[[str], None] = print) 
         sys.stdout.flush()
 
     last_speed = 1
+    own = OwnCalls()
 
     def resume(reason: str) -> None:
+        start = time.time()
         error = resume_speed(last_speed)
+        own.add("set_speed", start, time.time())
         say(f"ALERT resumed: {reason}; set_speed {max(1, last_speed)}" + (f" failed: {error}" if error else ""))
 
     say(f"WATCH run_dir={run_dir} bridge={args.bridge} no_pause={args.no_pause}")
@@ -273,7 +308,9 @@ def main(argv: Optional[List[str]] = None, emit: Callable[[str], None] = print) 
                 entry = json.loads(line)
             except ValueError:
                 continue
-            requested = (entry.get("args") or {}).get("speed") if entry.get("tool") == "set_speed" else None
+            if own.owns(entry):
+                continue
+            requested =(entry.get("args") or {}).get("speed") if entry.get("tool") == "set_speed" else None
             if isinstance(requested, int) and requested >= 1 and entry.get("ok"):
                 last_speed = requested
             pause_seen = pause_seen or wants_pause(entry)
@@ -285,7 +322,9 @@ def main(argv: Optional[List[str]] = None, emit: Callable[[str], None] = print) 
             say("ALERT issue: " + line[:400])
         if now - last_status >= args.status_seconds:
             last_status = now
+            start = time.time()
             status, error = read_status()
+            own.add("get_status", start, time.time())
             for alert in watcher.feed_status(status, now, error):
                 say("ALERT " + alert)
             clock = (status or {}).get("time") or {}
