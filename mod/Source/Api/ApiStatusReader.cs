@@ -323,15 +323,15 @@ namespace OniAiProbeMod.Api
             Dictionary<string, object> report =
                 ReadReport(ReportManager.ReportType.CaloriesCreated, CaloriesPerKcal) as Dictionary<string, object>;
             GameClock clock = GameClock.Instance;
-            if (clock == null)
+            ReportManager reports = ReportManager.Instance;
+            if (clock == null || report == null || ReferenceEquals(reports, null))
             {
                 return report;
             }
-            if (report == null)
-            {
-                report = new Dictionary<string, object>();
-            }
-            foreach (KeyValuePair<string, object> entry in ApiFoodLedger.Read(Game.Instance, clock.GetCycle(), clock.GetTimeInCycles()))
+            ReportManager.DailyReport earlier = reports.YesterdaysReport;
+            int? yesterday = earlier == null ? (int?)null : earlier.day;
+            foreach (KeyValuePair<string, object> entry in
+                     ApiFoodLedger.Read(Game.Instance, reports.TodaysReport.day, yesterday, clock.GetTimeInCycles()))
             {
                 report[entry.Key] = entry.Value;
             }
@@ -340,6 +340,8 @@ namespace OniAiProbeMod.Api
 
         // Today's positive and negative totals and yesterday's net, as in the
         // game's daily report, each divided by unit.  The report is colony-wide.
+        // The game opens a new report at nightfall (ReportManager.OnNightTime),
+        // not at the cycle boundary; report_day is the open report's own number.
         internal static object ReadReport(ReportManager.ReportType type, float unit = 1f)
         {
             // Managed null check: ReportManager clears Instance in OnCleanUp.
@@ -352,6 +354,7 @@ namespace OniAiProbeMod.Api
             ReportManager.DailyReport earlier = reports.YesterdaysReport;
             return new Dictionary<string, object>
             {
+                { "report_day", reports.TodaysReport.day },
                 { "today_made", ApiValues.Number(today.Positive / unit, 0) },
                 { "today_used", ApiValues.Number(today.Negative / unit, 0) },
                 { "yesterday_net", earlier == null ? null : ApiValues.Number(earlier.GetEntry(type).Net / unit, 0) }

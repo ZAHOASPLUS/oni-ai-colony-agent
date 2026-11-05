@@ -63,6 +63,11 @@ namespace OniAiProbeMod.Patches
             {
                 return;
             }
+            ReportManager reports = ReportManager.Instance;
+            if (ReferenceEquals(reports, null) || reports.TodaysReport == null)
+            {
+                return;
+            }
             try
             {
                 double calories = 0.0;
@@ -77,7 +82,7 @@ namespace OniAiProbeMod.Patches
                 if (calories > 0.0)
                 {
                     GameClock clock = GameClock.Instance;
-                    ApiFoodLedger.Add(Game.Instance, clock.GetCycle(), clock.GetTimeInCycles(), calories);
+                    ApiFoodLedger.Add(Game.Instance, reports.TodaysReport.day, clock.GetTimeInCycles(), calories);
                 }
             }
             catch (Exception ex)
