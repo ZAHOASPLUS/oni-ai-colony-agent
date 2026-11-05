@@ -32,6 +32,7 @@ namespace OniAiProbeMod
             TimelapseGuard.Activate("api_mode");
             LifecyclePatches.Install(harmony);
             SimFrameLimitPatch.Install(harmony);
+            CookedFoodPatch.Install(harmony);
             ApiHost.Launch(ApiLog.BridgeDirectory);
             Debug.Log(LogPrefix + " Tool API mode");
         }

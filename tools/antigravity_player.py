@@ -397,7 +397,10 @@ def compact_observation(tool_name: str, outcome: Mapping[str, Any]) -> Dict[str,
         dupes = [
             {
                 key: dupe.get(key)
-                for key in ("id", "name", "x", "y", "chore", "health", "breath_pct", "kcal", "stress_pct", "morale", "body_c", "status")
+                for key in (
+                    "id", "name", "world", "x", "y", "chore", "health", "breath_pct", "kcal",
+                    "stress_pct", "stress_causes", "morale", "body_c", "air", "status",
+                )
                 if key in dupe
             }
             for dupe in raw.get("duplicants", [])
@@ -406,6 +409,7 @@ def compact_observation(tool_name: str, outcome: Mapping[str, Any]) -> Dict[str,
             "ok": True,
             "result": {
                 "time": raw.get("time"),
+                "worlds": raw.get("worlds"),
                 "duplicants": dupes,
                 "colony": raw.get("colony"),
                 "alerts": raw.get("alerts"),

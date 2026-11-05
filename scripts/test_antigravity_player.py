@@ -276,7 +276,18 @@ class AntigravitySessionTests(unittest.TestCase):
         kept = compact_observation("get_status", raw)["result"]["duplicants"][0]
         self.assertEqual(kept["status"], ["Starving", "Scalding"])
         self.assertEqual(kept["body_c"], 38.6)
+        self.assertEqual(kept["air"], "Oxygen 1.2 kg")
         self.assertNotIn("temperature_c", kept)
+
+    def test_compact_status_keeps_stress_causes_world_and_world_bounds(self) -> None:
+        dupe = {"x": 40, "y": 120, "id": 101, "name": "Marie", "world": 0,
+                "stress_causes": [{"cause": "Hungry", "per_cycle": 12.0}]}
+        worlds = [{"id": 0, "name": "Terra", "min": {"x": 0, "y": 0}, "max": {"x": 255, "y": 383}}]
+        raw = {"ok": True, "result": {"worlds": worlds, "duplicants": [dupe]}}
+        result = compact_observation("get_status", raw)["result"]
+        self.assertEqual(result["worlds"], worlds)
+        self.assertEqual(result["duplicants"][0]["world"], 0)
+        self.assertEqual(result["duplicants"][0]["stress_causes"], dupe["stress_causes"])
 
     def test_shared_name_refusal_reaches_the_player_whole(self) -> None:
         refusal = {

@@ -237,7 +237,7 @@ namespace OniAiProbeMod.Api
             {
                 { "food_kcal", System.Math.Round(foodKcal, 0) },
                 { "food_days", duplicantCount == 0 ? 0.0 : System.Math.Round(foodKcal / (KcalPerDuplicantCycle * duplicantCount), 1) },
-                { "food_report_kcal", ReadReport(ReportManager.ReportType.CaloriesCreated, CaloriesPerKcal) },
+                { "food_report_kcal", ReadFoodReport() },
                 { "breathable_kg", ApiValues.Number(ReadBreathableKg(world), 0) },
                 { "oxygen_report_kg", ReadReport(ReportManager.ReportType.OxygenCreated) },
                 { "power_report_kj", ReadReport(ReportManager.ReportType.EnergyCreated, JoulesPerKj) },
@@ -314,10 +314,32 @@ namespace OniAiProbeMod.Api
             return total;
         }
 
+        // The game's food report counts harvests and butchering as made, and meals
+        // and the edible ingredients cooked as used, but never the dish a cooking
+        // station makes.  today_cooked and yesterday_cooked come from
+        // ApiFoodLedger, which counts those dishes since the save was loaded.
+        private static object ReadFoodReport()
+        {
+            Dictionary<string, object> report =
+                ReadReport(ReportManager.ReportType.CaloriesCreated, CaloriesPerKcal) as Dictionary<string, object>;
+            GameClock clock = GameClock.Instance;
+            if (clock == null)
+            {
+                return report;
+            }
+            if (report == null)
+            {
+                report = new Dictionary<string, object>();
+            }
+            foreach (KeyValuePair<string, object> entry in ApiFoodLedger.Read(Game.Instance, clock.GetCycle(), clock.GetTimeInCycles()))
+            {
+                report[entry.Key] = entry.Value;
+            }
+            return report;
+        }
+
         // Today's positive and negative totals and yesterday's net, as in the
         // game's daily report, each divided by unit.  The report is colony-wide.
-        // Food made counts harvests and butchering but not dishes a cooking
-        // station makes; food used counts meals and the edible ingredients cooked.
         internal static object ReadReport(ReportManager.ReportType type, float unit = 1f)
         {
             // Managed null check: ReportManager clears Instance in OnCleanUp.

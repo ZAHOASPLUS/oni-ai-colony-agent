@@ -75,7 +75,7 @@ description: Play Oxygen Not Included through the oni tools: observe the colony,
 - `build_path` 也能铺成排的梯子和地砖。
 - `get_status` 的 `printables_waiting` 为真时，打印舱有人选：`get_printables` 看选项，`choose_printable` 选一个，或者 `reject_printables`。不处理就不会有新复制人。
 - 复制人可能重名。`get_status` 给每人一个 `id`（存档自带），`set_chore_priority`、`learn_skill`、`configure crew` 都接受这个 id；重名时只给名字会被拒绝为 `ambiguous_duplicant` 并列出 `candidate_ids`。
-- `get_status` 的 `colony.food_report_kcal` 是游戏的每日食物报表：`today_made`、`today_used`（负数）、`yesterday_net`。做菜站产出的菜不算进 made。
+- `get_status` 的 `colony.food_report_kcal` 是游戏的每日食物报表：`today_made`、`today_used`（负数）、`yesterday_net`。做菜站产出的菜不算进 made，另见 `today_cooked`、`yesterday_cooked`（做菜站当天和前一天做出的菜，kcal；从读档时开始计，前一天没计全时为 null）。Mush Bar 殖民地看产量要用 made + cooked。
 - 火箭：`configure` 的 `rocket_action`（orbit、launch、cancel_launch、land）、`rocket_restriction` 和 `crew`。
 
 ## 殖民地规则
