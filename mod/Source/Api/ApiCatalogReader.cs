@@ -142,6 +142,11 @@ namespace OniAiProbeMod.Api
                 entry["power_output_w"] = ApiValues.Number(def.GeneratorWattageRating, 0);
                 entry["power_port"] = new[] { def.PowerOutputOffset.x, def.PowerOutputOffset.y };
             }
+            List<object> logicPorts = ApiLogic.DescribeDefPorts(def);
+            if (logicPorts.Count > 0)
+            {
+                entry["logic_ports"] = logicPorts;
+            }
             if (def.InputConduitType != ConduitType.None)
             {
                 entry["input"] = def.InputConduitType.ToString();

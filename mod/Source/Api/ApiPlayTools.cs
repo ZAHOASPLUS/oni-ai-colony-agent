@@ -169,11 +169,12 @@ namespace OniAiProbeMod.Api
                 any = true;
             }
             any = ApiBuildingSettings.Configure(building, args, applied) || any;
+            any = ApiLogic.Configure(building, args, applied) || any;
             if (!any)
             {
                 throw new ApiException(
                     "invalid_argument",
-                    "Give recipe, seed, storage_filter, element_filter, crew, rocket_restriction, rocket_action, assigned_duplicant or massage stress thresholds.");
+                    "Give recipe, seed, storage_filter, element_filter, crew, rocket_restriction, rocket_action, assigned_duplicant, massage stress thresholds or smart battery thresholds.");
             }
             return applied;
         }

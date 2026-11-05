@@ -89,7 +89,7 @@
     },
     {
       "name": "inspect",
-      "description": "One cell in detail: element, mass, temperature, germs, every building there (id, operational state, the game's status lines such as missing power, stored contents) and loose items.",
+      "description": "One cell in detail: element, mass, temperature, germs, the room the game sees there (room: type id such as Barracks or Bedroom, name, cells, min/max bounds; type null for a plain enclosed space, room null outside any enclosure), every building there (id, operational state, the game's status lines such as missing power, stored contents, automation ports with their cells, whether a wire reaches them and the signal 1 green / 0 red, smart battery thresholds and charge) and loose items.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -109,7 +109,7 @@
     },
     {
       "name": "get_buildable",
-      "description": "Buildings by build category. Unlocked ones list size, placement rule, materials with what the colony has, power use or output, and pipe and power ports (x, y offsets from the building's origin). Locked ones list the tech that unlocks them.",
+      "description": "Buildings by build category. Unlocked ones list size, placement rule, materials with what the colony has, power use or output, and pipe, power and automation ports (x, y offsets from the building's origin; logic_ports lists each input and output). Locked ones list the tech that unlocks them.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -667,7 +667,7 @@
     },
     {
       "name": "configure",
-      "description": "Set up a finished building. recipe with count queues a recipe on a fabricator such as a MicrobeMusher; count -1 repeats forever and 0 clears it. seed plants in a planter or farm tile. storage_filter sets what a storage building accepts, replacing the old list. assigned_duplicant assigns individual furniture through the game's normal assignment rules. MassageTable stress thresholds control when massage starts and stops. inspect lists recipes, seeds, filters, assignment (kind, id, name) and massage thresholds.",
+      "description": "Set up a finished building. recipe with count queues a recipe on a fabricator such as a MicrobeMusher; count -1 repeats forever and 0 clears it. seed plants in a planter or farm tile. storage_filter sets what a storage building accepts, replacing the old list. assigned_duplicant assigns individual furniture through the game's normal assignment rules. MassageTable stress thresholds control when massage starts and stops. smart_battery_low_pct and smart_battery_high_pct set a BatterySmart's automation range. inspect lists recipes, seeds, filters, assignment (kind, id, name), massage thresholds and smart battery thresholds.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -735,6 +735,18 @@
               "land"
             ],
             "description": "Rocket starmap command on a LaunchPad, rocket module, or RocketControlStation: select adjacent space orbit hex, trigger/cancel launch, or return to land on a LaunchPad."
+          },
+          "smart_battery_low_pct": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "BatterySmart only: its automation output turns green (on) when the charge falls to this percentage, and stays green until it reaches smart_battery_high_pct. Omitted retains its current value. Must not exceed smart_battery_high_pct."
+          },
+          "smart_battery_high_pct": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "BatterySmart only: its automation output turns red (off) when the charge rises to this percentage. Omitted retains its current value. Must be at least smart_battery_low_pct; give both to change the range together."
           }
         },
         "required": [

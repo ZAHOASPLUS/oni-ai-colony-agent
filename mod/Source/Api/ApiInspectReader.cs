@@ -43,6 +43,7 @@ namespace OniAiProbeMod.Api
                 { "mass_kg", ApiValues.Number(Grid.Mass[cell], 2) },
                 { "temperature_c", element.IsVacuum ? null : ApiValues.Celsius(Grid.Temperature[cell]) },
                 { "germs", Grid.DiseaseCount[cell] },
+                { "room", ApiLogic.DescribeRoom(cell) },
                 { "buildings", ReadBuildings(cell) },
                 { "items", ReadLooseItems(cell) }
             };
@@ -110,6 +111,12 @@ namespace OniAiProbeMod.Api
         private static void AddConfigurableOptions(GameObject go, Dictionary<string, object> entry)
         {
             ApiBuildingSettings.Describe(go, entry);
+            ApiLogic.DescribeBattery(go, entry);
+            List<object> logicPorts = ApiLogic.DescribePlacedPorts(go);
+            if (logicPorts.Count > 0)
+            {
+                entry["logic_ports"] = logicPorts;
+            }
             ComplexFabricator fabricator = go.GetComponent<ComplexFabricator>();
             if (fabricator != null)
             {
