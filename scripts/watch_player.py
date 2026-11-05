@@ -233,6 +233,8 @@ def main(argv: Optional[List[str]] = None, emit: Callable[[str], None] = print) 
     parser.add_argument("--status-minutes", type=float, default=30.0)
     parser.add_argument("--no-pause", action="store_true",
                         help="unpause the game whenever it is paused (user rule 2026-11-06: no pausing, speed >= 1)")
+    parser.add_argument("--digest-minutes", type=float, default=0.0,
+                        help="hold every alert but the player's issues and print them as one DIGEST line this often")
     args = parser.parse_args(argv)
 
     run_dir = args.run_dir if args.run_dir.is_absolute() else REPO_ROOT / args.run_dir
@@ -245,7 +247,14 @@ def main(argv: Optional[List[str]] = None, emit: Callable[[str], None] = print) 
     baseline_code = tool_changes()
     baseline_dirs = run_dirs()
 
+    pending: "collections.Counter[str]" = collections.Counter()
+
     def say(line: str) -> None:
+        # With --digest-minutes only the player's own issues come through at
+        # once; every other alert waits for the next DIGEST line.
+        if args.digest_minutes > 0 and line.startswith("ALERT ") and not line.startswith("ALERT issue:"):
+            pending[line[len("ALERT "):]] += 1
+            return
         emit(line)
         sys.stdout.flush()
 
@@ -294,7 +303,14 @@ def main(argv: Optional[List[str]] = None, emit: Callable[[str], None] = print) 
             baseline_dirs = dirs
         for alert in watcher.check_activity(now, started):
             say("ALERT " + alert)
-        if now - last_summary >= args.status_minutes * 60.0:
+        if args.digest_minutes > 0:
+            if now - last_summary >= args.digest_minutes * 60.0:
+                last_summary = now
+                alerts = "; ".join(f"{text} (x{count})" if count > 1 else text for text, count in pending.items())
+                pending.clear()
+                emit(f"DIGEST {watcher.summary()} | " + (alerts[:1500] if alerts else "no alerts"))
+                sys.stdout.flush()
+        elif now - last_summary >= args.status_minutes * 60.0:
             last_summary = now
             say("STATUS " + watcher.summary())
         time.sleep(args.poll_seconds)
