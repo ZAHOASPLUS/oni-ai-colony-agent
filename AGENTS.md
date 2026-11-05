@@ -25,6 +25,13 @@
 - 工具：`tools/oni-tools.json` 是唯一的工具定义。`python tools/oni_tools.py call <tool> '<json>'` 调用一个工具，`python tools/oni_tools.py mcp` 是 MCP 服务。Antigravity 走 `tools/antigravity_player.py`，DeepSeek 走 `agent/player_loop.py`，三者用同一份工具。
 - Mod 源码：`mod/Source/`。`scripts/build-mod.ps1` 构建，`scripts/install-dev-mod.ps1` 构建并安装到 `mods/Dev/oni-ai-colony-agent`。
 
+## 分工（2026-11-06 起）
+
+- 玩家（目前是 ChatGPT）只玩游戏：调用游戏工具、存检查点、在 `reports/play/<run>/` 写笔记和复盘。玩家不改 `mod/`、`tools/`、`scripts/`、`agent/`，不构建、不安装 Mod，不提交 git，不启动或关闭游戏，不调用 `load_save`。
+- 监督者（Claude）负责其余所有事：会话启停、克隆、Mod 和工具的修复、提交，以及把玩家的复盘收进 `skills/oni-player/`。监督者用 `scripts/watch_player.py` 盯着这一局。
+- 玩家遇到工具问题时，在 `reports/api/<run>/player-issues.jsonl` 追加一行，然后接着玩别的。监督者的回复写在 `reports/api/<run>/supervisor-notes.md`。
+- 玩家提示词见 `docs/player-prompt-chatgpt.md`。下面几节中凡是涉及会话、Mod、工具的规则，都由监督者执行。
+
 ## 游戏会话
 
 - 原始存档和用户自己的 Mod 配置不可改动。只玩命名测试克隆：克隆用 `scripts/create-named-test-clone.ps1` 创建，带 `test-clone-manifest.json`。
