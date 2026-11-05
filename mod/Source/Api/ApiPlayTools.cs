@@ -172,11 +172,12 @@ namespace OniAiProbeMod.Api
             any = ApiLogic.Configure(building, args, applied) || any;
             any = ApiGeysers.Configure(building, args, applied) || any;
             any = ApiCritters.Configure(building, args, applied) || any;
+            any = ApiSuits.Configure(building, args, applied) || any;
             if (!any)
             {
                 throw new ApiException(
                     "invalid_argument",
-                    "Give recipe, seed, storage_filter, element_filter, crew, rocket_restriction, rocket_action, assigned_duplicant, massage stress thresholds, smart battery thresholds, study, capture or critter_limit.");
+                    "Give recipe, seed, storage_filter, element_filter, crew, rocket_restriction, rocket_action, assigned_duplicant, massage stress thresholds, smart battery thresholds, study, capture, critter_limit or request_suit.");
             }
             return applied;
         }

@@ -668,7 +668,7 @@
     },
     {
       "name": "configure",
-      "description": "Set up a finished building. recipe with count queues a recipe on a fabricator such as a MicrobeMusher; count -1 repeats forever and 0 clears it. seed plants in a planter or farm tile. storage_filter sets what a storage building accepts, replacing the old list. assigned_duplicant assigns individual furniture through the game's normal assignment rules. MassageTable stress thresholds control when massage starts and stops. capture true marks a critter for wrangling (false clears it), critter_limit sets a Critter Drop-Off's limit. study true sends a duplicant to analyse a geyser (false cancels; the id comes from find kind geyser). smart_battery_low_pct and smart_battery_high_pct set a BatterySmart's automation range. inspect lists recipes, seeds, filters, assignment (kind, id, name), massage thresholds and smart battery thresholds.",
+      "description": "Set up a finished building. recipe with count queues a recipe on a fabricator such as a MicrobeMusher; count -1 repeats forever and 0 clears it. seed plants in a planter or farm tile. storage_filter sets what a storage building accepts, replacing the old list. assigned_duplicant assigns individual furniture through the game's normal assignment rules. MassageTable stress thresholds control when massage starts and stops. request_suit true makes a suit or oxygen mask dock request and keep a suit (false: hold none; a new dock does neither until set). capture true marks a critter for wrangling (false clears it), critter_limit sets a Critter Drop-Off's limit. study true sends a duplicant to analyse a geyser (false cancels; the id comes from find kind geyser). smart_battery_low_pct and smart_battery_high_pct set a BatterySmart's automation range. inspect lists recipes, seeds, filters, assignment (kind, id, name), massage thresholds and smart battery thresholds.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -762,6 +762,10 @@
             "minimum": 0,
             "maximum": 20,
             "description": "Critter Drop-Off only: how many critters its room should hold; duplicants deliver wrangled critters of the filtered species (storage_filter) until the room has this many. inspect reads critter_limit and critters_in_room."
+          },
+          "request_suit": {
+            "type": "boolean",
+            "description": "Suit Dock, Oxygen Mask Dock, Jet Suit Dock, Lead Suit Dock: true is the side screen's 'request suit', false its 'no suit'. inspect reads suit_configured, suit_requested, stored_suit and, with a suit in it, suit_oxygen_pct and suit_fully_charged."
           }
         },
         "required": [
