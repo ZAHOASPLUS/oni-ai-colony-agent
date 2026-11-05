@@ -40,6 +40,21 @@ namespace OniAiProbeMod.Api
             internal HashSet<string> Techs = new HashSet<string>(StringComparer.Ordinal);
             // Duplicant ids: two duplicants can share a name.
             internal HashSet<int> LowBreath = new HashSet<int>();
+            // Every critter, seen or not: a Brain leaves Components.Brains only when
+            // its object is destroyed, so one that goes missing died or grew up
+            // (a baby is replaced by a new adult object).  Wrangled, carried and
+            // stored critters keep their object.
+            internal Dictionary<int, CritterSeen> Critters = new Dictionary<int, CritterSeen>();
+        }
+
+        private sealed class CritterSeen
+        {
+            internal string Prefab;
+            internal string Name;
+            internal int Cell;
+            internal bool Visible;
+            internal bool Dead;
+            internal bool MarkedForCapture;
         }
 
         internal static void ExpectBuilding(string def, int cell)
@@ -164,6 +179,25 @@ namespace OniAiProbeMod.Api
                     }
                 }
             }
+            foreach (Brain brain in Components.Brains.Items)
+            {
+                if (brain == null || !(brain is CreatureBrain))
+                {
+                    continue;
+                }
+                KPrefabID prefab = brain.GetComponent<KPrefabID>();
+                int cell = Grid.PosToCell(brain.gameObject);
+                Capturable capturable = brain.GetComponent<Capturable>();
+                state.Critters[prefab.InstanceID] = new CritterSeen
+                {
+                    Prefab = prefab.PrefabTag.Name,
+                    Name = STRINGS.UI.StripLinkFormatting(brain.gameObject.GetProperName()),
+                    Cell = cell,
+                    Visible = Grid.IsValidCell(cell) && Grid.IsVisible(cell),
+                    Dead = prefab.HasTag(GameTags.Dead),
+                    MarkedForCapture = capturable != null && capturable.IsMarkedForCapture
+                };
+            }
             foreach (Tech tech in Db.Get().Techs.resources)
             {
                 if (tech.IsComplete())
@@ -238,10 +272,61 @@ namespace OniAiProbeMod.Api
             {
                 Add("duplicant_low_breath", new Dictionary<string, object> { { "id", id }, { "name", after.Duplicants[id] } });
             }
+            CompareCritters(before, after);
             foreach (string tech in after.Techs.Where(id => !before.Techs.Contains(id)))
             {
                 Add("research_completed", new Dictionary<string, object> { { "tech", tech } });
             }
+        }
+
+        private const int GrowUpCells = 3;
+
+        // Only critters the player could see when they went: the rest are fog.
+        private static void CompareCritters(Baseline before, Baseline after)
+        {
+            HashSet<int> adultsTaken = new HashSet<int>();
+            foreach (KeyValuePair<int, CritterSeen> gone in before.Critters)
+            {
+                if (after.Critters.ContainsKey(gone.Key) || !gone.Value.Visible)
+                {
+                    continue;
+                }
+                CritterSeen old = gone.Value;
+                Dictionary<string, object> fields = ApiValues.Xy(old.Cell);
+                fields["id"] = gone.Key;
+                fields["critter"] = old.Prefab;
+                fields["name"] = old.Name;
+                int adult = FindAdult(before, after, old, adultsTaken);
+                if (adult != 0)
+                {
+                    adultsTaken.Add(adult);
+                    fields["adult_id"] = adult;
+                    fields["adult"] = after.Critters[adult].Prefab;
+                    Add("critter_grew_up", fields);
+                    continue;
+                }
+                fields["was_dying"] = old.Dead;
+                fields["was_marked_for_capture"] = old.MarkedForCapture;
+                Add("critter_lost", fields);
+            }
+        }
+
+        private static int FindAdult(Baseline before, Baseline after, CritterSeen baby, HashSet<int> taken)
+        {
+            if (!baby.Prefab.EndsWith("Baby", StringComparison.Ordinal))
+            {
+                return 0;
+            }
+            string adult = baby.Prefab.Substring(0, baby.Prefab.Length - "Baby".Length);
+            foreach (KeyValuePair<int, CritterSeen> fresh in after.Critters)
+            {
+                if (!before.Critters.ContainsKey(fresh.Key) && !taken.Contains(fresh.Key) &&
+                    fresh.Value.Prefab == adult && Grid.GetCellDistance(fresh.Value.Cell, baby.Cell) <= GrowUpCells)
+                {
+                    return fresh.Key;
+                }
+            }
+            return 0;
         }
     }
 }

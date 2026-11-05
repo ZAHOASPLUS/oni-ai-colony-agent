@@ -83,6 +83,7 @@ description: Play Oxygen Not Included through the oni tools: observe the colony,
 - 畜牧：`find` kind `critter`（query 填物种名，如 `Drecko`）列出可见的活小动物：`id`、野生与否、年龄、野性、快乐度、能否捕捉、所在房间。`configure {"id": <小动物id>, "capture": true}` 标记捕捉（要有人学了畜牧技能）；小动物投放点用 `storage_filter` 选物种、`critter_limit` 设房间上限，`inspect` 读回 `critters_in_room`。
 - 防护服/氧气面罩柜：新建的柜子是**未配置**状态，不会去取服装。要用 `configure {"id": <柜子id>, "request_suit": true}` 让它申领；`inspect` 看 `suit_configured`、`suit_requested`、`stored_suit`、`suit_oxygen_pct`。柜子要放在检查站（Marker）的正确一侧。
 - 传送门（Teleporter Transmitter / WarpPortal）：先 `configure assigned_duplicant` 指定谁去，等他走进去、`inspect` 显示 `warp_ready` 为真，再 `configure warp_action start`；`cancel` 取消指派。传送后发射器要冷却（`warp_recharging`），对面世界要回来得靠那边的传送门。
+- 小动物从 `find critter` 里消失时看 `get_events`：`critter_lost` 是它的对象没了（死了），`critter_grew_up` 是幼崽长成了成年、换了新 id。被套住、被背着、装进容器的小动物不会消失。
 - `get_status` 的 `colony.food_report_kcal` 是游戏的每日食物报表：`today_made`（收获、屠宰）、`today_used`（吃饭，负数）、`yesterday_net`。游戏的报表看不见做菜：成品不算 made，原料也不算 used。补充字段（today_ 和 yesterday_ 各一套）：`*_cooked` 成品 kcal，`*_cooked_inputs` 用掉的可食用原料 kcal，`*_cooked_net` = 成品 − 原料（泥土做 Mush Bar 全算新增，Mealwood 腌成 Pickled Meal 不新增），`*_net_with_cooking` 是加上做菜后的真实食物净值，**看食物盈亏就看它**。前一份日报没从头计到尾时 yesterday_* 为 null。日报在**入夜时**翻日，不是周期整点；每份报表带 `report_day`，跨 report_day 的数不要相加。
 - 火箭：`configure` 的 `rocket_action`（orbit、launch、cancel_launch、land）、`rocket_restriction` 和 `crew`。
 

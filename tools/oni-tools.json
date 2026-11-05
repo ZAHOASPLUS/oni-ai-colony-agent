@@ -149,7 +149,7 @@
     },
     {
       "name": "get_events",
-      "description": "What changed since the last look: cycles, alerts raised and cleared, buildings completed and removed, duplicants lost, arrived or short of breath (with id and name), research completed. Pass the next_since from the previous call; missed says how many events aged out.",
+      "description": "What changed since the last look: cycles, alerts raised and cleared, buildings completed and removed, duplicants lost, arrived or short of breath (with id and name), research completed, and critters the player could see that were lost (critter_lost: the object is gone, so it died or was removed; was_dying, was_marked_for_capture) or grew up (critter_grew_up: a baby replaced by an adult with a new id). A wrangled, carried or stored critter is not lost. Pass the next_since from the previous call; missed says how many events aged out.",
       "parameters": {
         "type": "object",
         "properties": {
