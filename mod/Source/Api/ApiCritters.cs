@@ -45,7 +45,7 @@ namespace OniAiProbeMod.Api
             Dictionary<string, object> entry = ApiValues.Xy(cell);
             entry["id"] = prefab.InstanceID;
             entry["critter"] = prefab.PrefabTag.Name;
-            entry["name"] = go.GetProperName();
+            entry["name"] = STRINGS.UI.StripLinkFormatting(go.GetProperName());
             entry["wild"] = prefab.HasTag(GameTags.Creatures.Wild);
             AmountInstance age = Db.Get().Amounts.Age.Lookup(go);
             if (age != null)
