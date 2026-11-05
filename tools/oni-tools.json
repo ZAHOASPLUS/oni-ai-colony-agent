@@ -89,7 +89,7 @@
     },
     {
       "name": "inspect",
-      "description": "One cell in detail: element, mass, temperature, germs, the room the game sees there (room: type id such as Barracks or Bedroom, name, cells, min/max bounds; type null for a plain enclosed space, room null outside any enclosure), every building there (id, operational state, the game's status lines such as missing power, stored contents, automation ports with their cells, whether a wire reaches them and the signal 1 green / 0 red, smart battery thresholds and charge) and loose items.",
+      "description": "One cell in detail: element, mass, temperature, germs, the room the game sees there (room: type id such as Barracks or Bedroom, name, cells, min/max bounds; type null for a plain enclosed space, room null outside any enclosure), every building there (id, operational state, the game's status lines such as missing power, stored contents, automation ports with their cells, whether a wire reaches them and the signal 1 green / 0 red, smart battery thresholds and charge) and loose items. Map features on the building layer, such as a Gravitas ruin's Teleporter Transmitter (WarpPortal), are listed too with map_feature true and an id configure accepts; find building does not list them, so take their cells from get_map.",
       "parameters": {
         "type": "object",
         "properties": {

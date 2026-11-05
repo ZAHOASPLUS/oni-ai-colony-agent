@@ -56,7 +56,10 @@ namespace OniAiProbeMod.Api
             for (int layer = 0; layer < (int)ObjectLayer.NumLayers; layer++)
             {
                 GameObject go = Grid.Objects[cell, layer];
-                if (go == null || !seen.Add(go) || go.GetComponent<Building>() == null)
+                // A map feature (the Teleporter Transmitter of a Gravitas ruin, say)
+                // sits on the building layer with no Building component.
+                if (go == null || !seen.Add(go) ||
+                    (go.GetComponent<Building>() == null && layer != (int)ObjectLayer.Building))
                 {
                     continue;
                 }
@@ -71,8 +74,21 @@ namespace OniAiProbeMod.Api
             KPrefabID prefab = go.GetComponent<KPrefabID>();
             Dictionary<string, object> entry = ApiValues.Xy(Grid.PosToCell(go));
             entry["id"] = prefab.InstanceID;
-            entry["def"] = building.Def.PrefabID;
-            entry["size"] = new[] { building.Def.WidthInCells, building.Def.HeightInCells };
+            if (building != null)
+            {
+                entry["def"] = building.Def.PrefabID;
+                entry["size"] = new[] { building.Def.WidthInCells, building.Def.HeightInCells };
+            }
+            else
+            {
+                entry["def"] = prefab.PrefabTag.Name;
+                entry["map_feature"] = true;
+                OccupyArea area = go.GetComponent<OccupyArea>();
+                if (area != null)
+                {
+                    entry["size"] = new[] { area.GetWidthInCells(), area.GetHeightInCells() };
+                }
+            }
             entry["blueprint"] = building is BuildingUnderConstruction;
             PrimaryElement material = go.GetComponent<PrimaryElement>();
             if (material != null)

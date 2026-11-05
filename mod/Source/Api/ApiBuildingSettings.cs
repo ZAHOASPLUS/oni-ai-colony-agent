@@ -16,7 +16,9 @@ namespace OniAiProbeMod.Api
             {
                 return false;
             }
-            if (building.GetComponent<BuildingComplete>() == null)
+            // Not a blueprint: a map feature such as a Gravitas teleporter has no
+            // BuildingComplete but is assigned the same way.
+            if (building.GetComponent<BuildingUnderConstruction>() != null)
             {
                 throw new ApiException("unsupported_setting", "These settings need a finished building.");
             }
