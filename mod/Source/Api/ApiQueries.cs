@@ -142,7 +142,7 @@ namespace OniAiProbeMod.Api
             WorldContainer world = ApiValues.World(args);
             string kind = ApiArgs.Text(args, "kind");
             string query = ApiArgs.Text(args, "query");
-            Vector2I origin = ReadOrigin(args);
+            Vector2I origin = ReadOrigin(args, world);
 
             List<Dictionary<string, object>> found;
             switch (kind)
@@ -190,11 +190,13 @@ namespace OniAiProbeMod.Api
             return dx * dx + dy * dy;
         }
 
-        private static Vector2I ReadOrigin(JObject args)
+        // Default: the first duplicant on that world, else the world's middle.
+        private static Vector2I ReadOrigin(JObject args, WorldContainer world)
         {
-            MinionIdentity first = Components.LiveMinionIdentities.Items.FirstOrDefault(identity => identity != null);
-            int x = 0;
-            int y = 0;
+            MinionIdentity first = Components.LiveMinionIdentities.Items.FirstOrDefault(
+                identity => identity != null && identity.GetMyWorldId() == world.id);
+            int x = (int)((world.minimumBounds.x + world.maximumBounds.x) / 2f);
+            int y = (int)((world.minimumBounds.y + world.maximumBounds.y) / 2f);
             if (first != null)
             {
                 Grid.CellToXY(Grid.PosToCell(first), out x, out y);

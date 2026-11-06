@@ -38,7 +38,7 @@ namespace OniAiProbeMod.Api
                 { "time", ReadTime() },
                 { "worlds", ReadWorlds() },
                 { "duplicants", duplicants },
-                { "colony", ReadColony(world, duplicants.Count) },
+                { "colony", ReadColony(world, DuplicantsOn(world)) },
                 { "alerts", ReadAlerts().Select(alert => (object)new Dictionary<string, object>
                     {
                         { "title", alert.Title },
@@ -66,13 +66,16 @@ namespace OniAiProbeMod.Api
         {
             WorldContainer world = ClusterManager.Instance.activeWorld;
             int duplicants = Components.LiveMinionIdentities.Items.Count(identity => identity != null);
+            int here = DuplicantsOn(world);
             double foodKcal = ReadFoodKcal(world);
             return new Dictionary<string, object>
             {
                 { "cycle", GameClock.Instance.GetCycle() + 1 },
+                { "world", world.id },
                 { "duplicants", duplicants },
+                { "duplicants_here", here },
                 { "food_kcal", System.Math.Round(foodKcal, 0) },
-                { "food_days", duplicants == 0 ? 0.0 : System.Math.Round(foodKcal / (KcalPerDuplicantCycle * duplicants), 1) },
+                { "food_days", here == 0 ? 0.0 : System.Math.Round(foodKcal / (KcalPerDuplicantCycle * here), 1) },
                 { "breathable_kg", ApiValues.Number(ReadBreathableKg(world), 0) },
                 { "oxygen_report_kg", ReadReport(ReportManager.ReportType.OxygenCreated) },
                 { "power", ReadPower() },
@@ -262,11 +265,19 @@ namespace OniAiProbeMod.Api
             return names;
         }
 
+        // Food and air are counted per world, so days are per world too.
+        internal static int DuplicantsOn(WorldContainer world)
+        {
+            return Components.LiveMinionIdentities.Items.Count(identity => identity != null && identity.GetMyWorldId() == world.id);
+        }
+
         private static object ReadColony(WorldContainer world, int duplicantCount)
         {
             double foodKcal = ReadFoodKcal(world);
             return new Dictionary<string, object>
             {
+                { "world", world.id },
+                { "duplicants_here", duplicantCount },
                 { "food_kcal", System.Math.Round(foodKcal, 0) },
                 { "food_days", duplicantCount == 0 ? 0.0 : System.Math.Round(foodKcal / (KcalPerDuplicantCycle * duplicantCount), 1) },
                 { "food_report_kcal", ReadFoodReport() },

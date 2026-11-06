@@ -156,7 +156,7 @@ namespace OniAiProbeMod.Api
                     ? null
                     : receptacle.Occupant.GetComponent<KPrefabID>().PrefabTag.Name;
                 entry["requested"] = receptacle.requestedEntityTag.IsValid ? receptacle.requestedEntityTag.Name : null;
-                entry["seeds_in_stock"] = ClusterManager.Instance.activeWorld.worldInventory.GetAccessibleAmounts()
+                entry["seeds_in_stock"] = ClusterManager.Instance.GetWorld(go.GetMyWorldId()).worldInventory.GetAccessibleAmounts()
                     .Where(amount => amount.Value > 0f)
                     .Select(amount => amount.Key)
                     .Where(tag => CanHold(receptacle, tag))
