@@ -464,7 +464,7 @@
     },
     {
       "name": "list_buildings",
-      "description": "Finished buildings with id, position, whether they run, and the game's status lines. Wires, pipes, tiles and ladders are left out unless def or include_structural asks for them. problems_only shows what is not running, and why.",
+      "description": "Finished buildings with id, position, whether they run, and the game's status lines. Wires, pipes, tiles and ladders are left out unless def or include_structural asks for them. problems_only shows what is not running, and why. At most 200 per call, ordered by cell from the bottom row up: matched counts all, truncated says more remain, and next_offset is the offset for the next page. x_min/x_max/y_min/y_max keep only buildings whose origin cell is inside.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -483,6 +483,26 @@
           "world": {
             "type": "integer",
             "description": "World id. Default: the active world."
+          },
+          "x_min": {
+            "type": "integer",
+            "description": "Inclusive bound on the building's origin cell. Default: no bound."
+          },
+          "x_max": {
+            "type": "integer",
+            "description": "Inclusive bound on the building's origin cell. Default: no bound."
+          },
+          "y_min": {
+            "type": "integer",
+            "description": "Inclusive bound on the building's origin cell. Default: no bound."
+          },
+          "y_max": {
+            "type": "integer",
+            "description": "Inclusive bound on the building's origin cell. Default: no bound."
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Skip this many matches; pass next_offset from the previous page. Default: 0."
           }
         },
         "additionalProperties": false

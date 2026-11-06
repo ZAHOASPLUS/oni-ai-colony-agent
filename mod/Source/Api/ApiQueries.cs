@@ -22,11 +22,21 @@ namespace OniAiProbeMod.Api
             string filter = ApiArgs.Text(args, "def");
             bool problemsOnly = ApiArgs.Flag(args, "problems_only", false);
             bool structural = ApiArgs.Flag(args, "include_structural", false);
-            List<object> buildings = new List<object>();
-            int matched = 0;
+            int xMin = ApiArgs.Int(args, "x_min", int.MinValue);
+            int xMax = ApiArgs.Int(args, "x_max", int.MaxValue);
+            int yMin = ApiArgs.Int(args, "y_min", int.MinValue);
+            int yMax = ApiArgs.Int(args, "y_max", int.MaxValue);
+            int offset = Math.Max(0, ApiArgs.Int(args, "offset", 0));
+            List<KeyValuePair<int, BuildingComplete>> matches = new List<KeyValuePair<int, BuildingComplete>>();
             foreach (BuildingComplete building in Components.BuildingCompletes.Items)
             {
                 if (building == null || building.GetMyWorldId() != world.id)
+                {
+                    continue;
+                }
+                int cell = Grid.PosToCell(building);
+                Grid.CellToXY(cell, out int x, out int y);
+                if (x < xMin || x > xMax || y < yMin || y > yMax)
                 {
                     continue;
                 }
@@ -42,12 +52,21 @@ namespace OniAiProbeMod.Api
                 {
                     continue;
                 }
-                matched++;
-                if (buildings.Count >= BuildingLimit)
-                {
-                    continue;
-                }
-                Dictionary<string, object> entry = ApiValues.Xy(Grid.PosToCell(building));
+                matches.Add(new KeyValuePair<int, BuildingComplete>(cell, building));
+            }
+
+            // Row by row from the bottom, so offset pages stay put between calls.
+            List<object> buildings = new List<object>();
+            foreach (KeyValuePair<int, BuildingComplete> match in matches
+                         .OrderBy(pair => pair.Key)
+                         .ThenBy(pair => pair.Value.GetComponent<KPrefabID>().InstanceID)
+                         .Skip(offset)
+                         .Take(BuildingLimit))
+            {
+                BuildingComplete building = match.Value;
+                BuildingDef def = building.Def;
+                Operational operational = building.GetComponent<Operational>();
+                Dictionary<string, object> entry = ApiValues.Xy(match.Key);
                 entry["id"] = building.GetComponent<KPrefabID>().InstanceID;
                 entry["def"] = def.PrefabID;
                 if (operational != null)
@@ -57,9 +76,13 @@ namespace OniAiProbeMod.Api
                 }
                 buildings.Add(entry);
             }
+            int next = offset + buildings.Count;
             return new Dictionary<string, object>
             {
-                { "matched", matched },
+                { "matched", matches.Count },
+                { "offset", offset },
+                { "truncated", next < matches.Count },
+                { "next_offset", next < matches.Count ? (object)next : null },
                 { "buildings", buildings }
             };
         }
