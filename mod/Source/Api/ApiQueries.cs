@@ -312,11 +312,33 @@ namespace OniAiProbeMod.Api
                     }
                     WiltCondition wilt = plant.GetComponent<WiltCondition>();
                     entry["stifled"] = wilt != null && wilt.IsWilting();
+                    DescribeGrowth(plant.GetComponent<Growing>(), maturity, entry);
                     entry["status"] = ApiStatusReader.ReadStatusItems(plant.gameObject, 5);
                     found.Add(entry);
                 }
             }
             return found;
+        }
+
+        private const float SecondsPerCycle = 600f;
+
+        // wild: not replanted by a duplicant (Growing.IsWildPlanted), which grows
+        // at the wild rate.  Times are the plant tooltip's, in cycles: a full
+        // growth at the domestic and wild rates, and what is left at the current
+        // rate (null while it does not grow).
+        private static void DescribeGrowth(Growing growing, AmountInstance maturity, Dictionary<string, object> entry)
+        {
+            if (growing == null)
+            {
+                return;
+            }
+            entry["wild"] = growing.IsWildPlanted();
+            entry["domestic_growth_cycles"] = ApiValues.Number(growing.DomesticGrowthTime() / SecondsPerCycle, 1);
+            entry["wild_growth_cycles"] = ApiValues.Number(growing.WildGrowthTime() / SecondsPerCycle, 1);
+            float delta = maturity == null ? 0f : maturity.GetDelta();
+            entry["cycles_to_harvest"] = delta > 0f
+                ? ApiValues.Number((maturity.GetMax() - maturity.value) / delta / SecondsPerCycle, 1)
+                : null;
         }
 
         // Only what a player can see: revealed geysers, and their rates once studied.
