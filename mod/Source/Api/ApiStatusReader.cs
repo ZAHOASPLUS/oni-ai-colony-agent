@@ -176,7 +176,7 @@ namespace OniAiProbeMod.Api
             Durability durability = worn.GetComponent<Durability>();
             if (durability != null)
             {
-                suit["durability_pct"] = ApiValues.Number(durability.GetDurability() * 100f, 0);
+                suit["durability_pct"] = ApiValues.Number(WornDurability(durability) * 100f, 0);
             }
             SuitTank tank = worn.GetComponent<SuitTank>();
             if (tank != null)
@@ -185,6 +185,21 @@ namespace OniAiProbeMod.Api
                 suit["oxygen_low"] = tank.IsLowOxygen();
             }
             return suit;
+        }
+
+        private static readonly AccessTools.FieldRef<Durability, float> DurabilityLeft = AccessTools.FieldRefAccess<Durability, float>("durability");
+        private static readonly AccessTools.FieldRef<Durability, float> TimeEquipped = AccessTools.FieldRefAccess<Durability, float>("timeEquipped");
+        private static readonly AccessTools.FieldRef<Durability, float> LossPerCycle = AccessTools.FieldRefAccess<Durability, float>("durabilityLossPerCycle");
+        private static readonly AccessTools.FieldRef<Durability, float> DifficultyMod = AccessTools.FieldRefAccess<Durability, float>("difficultySettingMod");
+
+        // What the suit will have when taken off.  Durability.GetDurability
+        // subtracts time worn times a negative loss per cycle, so it climbs
+        // while worn; OnUnequipped adds that product, scaled by the difficulty
+        // setting, and clamps to 0..1.
+        private static float WornDurability(Durability durability)
+        {
+            float worn = GameClock.Instance.GetTimeInCycles() - TimeEquipped(durability);
+            return Mathf.Clamp01(DurabilityLeft(durability) + worn * LossPerCycle(durability) * DifficultyMod(durability));
         }
 
         /// <summary>What moves stress right now, in percent per cycle.</summary>
