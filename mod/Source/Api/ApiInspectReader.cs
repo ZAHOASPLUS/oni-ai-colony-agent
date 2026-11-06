@@ -131,6 +131,7 @@ namespace OniAiProbeMod.Api
             ApiCritters.DescribeBuilding(go, entry);
             ApiSuits.Describe(go, entry);
             ApiWarp.Describe(go, entry);
+            ApiEnable.Describe(go, entry);
             List<object> logicPorts = ApiLogic.DescribePlacedPorts(go);
             if (logicPorts.Count > 0)
             {
