@@ -33,7 +33,7 @@ agy-r23 上次的优先事项（保留备查）：给按摩床 `(123,213)` id100
 续玩 `oni-agy-r23`（ckpt-002 已封进链，`--resume` 会读它）：
 
 ```
-python scripts/api_session.py start --manifest reports/runtime/agy-r23/test-clone-manifest.json --save C:\Users\user\Documents\Klei\OxygenNotIncluded\cloud_save_files\76561190000000000\oni-agy-r23\oni-agy-r23.sav --run-dir reports/api/<新的 run 名> --resume
+python scripts/api_session.py start --manifest reports/runtime/agy-r23/test-clone-manifest.json --save %USERPROFILE%\Documents\Klei\OxygenNotIncluded\cloud_save_files\<SteamID>\oni-agy-r23\oni-agy-r23.sav --run-dir reports/api/<新的 run 名> --resume
 ```
 
 开新克隆用 `scripts/create-named-test-clone.ps1`。从检查点续玩用 `scripts/api_session.py start --resume`：它读取克隆检查点链里最新的一环，所以检查点要先由 `api_session.py stop` 或 `seal` 封进链里。

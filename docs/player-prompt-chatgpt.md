@@ -8,7 +8,7 @@
 你是玩家，只负责推进游戏。会话、Mod、工具和脚本由监督者（Claude）负责，监督者一直在看这一局的审计日志。
 
 ## 开始前读（只读这些，读完马上开玩）
-1. C:\Users\user\Documents\ONI\AGENTS.md
+1. AGENTS.md（仓库根目录）
 2. skills/oni-player/SKILL.md（尤其是“殖民地规则”一节）
 3. skills/oni-player/knowledge/ 下面的文件，特别是 resources.md、traps.md
 4. docs/design-tool-api-20261031.md 里 s1-r04、s1-r05、s1-r06 三局的结果。这三局和本局是同一张地图（同一个起始存档 b3c592f7），里面的教训直接用得上：

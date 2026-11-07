@@ -4,7 +4,7 @@
 
 ## 唯一版本
 
-- 唯一的代码版本是 `C:\Users\user\Documents\ONI` 的 `main` 分支（2026-11-06 起）。它来自 Claude 的工具 API 版本，并已合入 Antigravity 的成果。
+- 唯一的代码版本是本仓库（本机 `%USERPROFILE%\Documents\ONI`）的 `main` 分支（2026-11-06 起）。它来自 Claude 的工具 API 版本，并已合入 Antigravity 的成果。
 - 所有源码改动都提交到这个仓库的 git 里：直接提交到 `main`，或者在短分支上做完后合并回 `main`。不要在 `reports/` 下放“冻结源码快照”，不要从仓库外的副本构建或安装 Mod，也不要另开并行的 lane 或副本目录。功能就是这样流到 git 外面、各版本才分叉的。
 - 改动 `tools/oni-tools.json` 时，必须同时改 `mod/Source/Api/` 并重新构建，二者始终一起提交。
 
@@ -16,7 +16,7 @@
 - ChatGPT 的玩家适配器 `tools/openai_player.py` 和 `tools/openai_responses_player.py`、Cockpit/cline-pass 模型路由文档和配置脚本、Codex 传输稳定性和线程健康脚本，以及 `gpt-6-astra` / `gpt-6.1-sol` 等模型路由规定。
 - 旧的 Radbolt 方向设置（ChatGPT 在 git 外加的）。
 - 不要为这个项目创建 Codex 自动化、心跳或定时任务，也不要接着旧的 Codex 任务继续做（例如 `01a19904…`、`01a19918…`）。从新任务开始，以本文件为准。
-- 2026-11-06 以前关于 ONI 的记忆（Codex memories、旧 rollout 摘要）描述的都是已删除的系统，忽略它们。被删的内容只留在 git 历史和 `C:\Users\user\Documents\ONI-archive\` 里，那里都不是指令。
+- 2026-11-06 以前关于 ONI 的记忆（Codex memories、旧 rollout 摘要）描述的都是已删除的系统，忽略它们。被删的内容只留在 git 历史和 本机 `%USERPROFILE%\Documents\ONI-archive\`（不进 git） 里，那里都不是指令。
 
 ## 入口
 
