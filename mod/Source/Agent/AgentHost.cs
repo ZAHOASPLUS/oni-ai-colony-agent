@@ -138,6 +138,7 @@ namespace OniAiProbeMod.Agent
                 PollDevCommand();
             }
             if (sessionId != null && !BoundSessionIsCurrent()) NotifySessionChanged(false);
+            if (sessionId != null) AgentPauseControl.Observe();
             if (retiring && runtime.Completion.IsCompleted) FinishRetirement();
             if (!retiring) dispatcher?.Pump();
             if (operation != null && operation.IsCompleted)
@@ -256,8 +257,13 @@ namespace OniAiProbeMod.Agent
                     runtime.EventRaised += audit.Record;
                 }
                 if (!AgentWriteLease.Acquire(sessionId)) throw new InvalidOperationException("Another session owns writes.");
+                JObject resumed = AgentPauseControl.ResumeLoadPause(sessionId);
+                string speedNote = resumed == null ? "Game speed was not changed."
+                    : (bool?)resumed["ok"] == true ? "The load pause was resumed at 1x."
+                    : "The load pause could not be resumed (" + (string)resumed["error"]?["code"] + ").";
+                if (resumed != null) audit.Record("load_pause", speedNote);
                 runtime.Start(sessionId, config.Goal);
-                notice = "Agent started. External writes are blocked until Stop. Game speed was not changed.";
+                notice = "Agent started. External writes are blocked until Stop. " + speedNote;
             }
             catch (Exception ex)
             {

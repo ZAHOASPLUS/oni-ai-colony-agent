@@ -11,6 +11,7 @@ namespace OniAiProbeMod.Agent
         private static bool agentCall;
         private static bool agentOwnsPause;
         private static bool hooksInstalled;
+        private static float loadClock = float.NaN;
         private static System.DateTime pauseStarted;
 
         internal static void Install(Harmony harmony)
@@ -31,7 +32,39 @@ namespace OniAiProbeMod.Agent
         {
             if (!agentCall) agentOwnsPause = false;
         }
-        internal static void Reset() { agentOwnsPause = false; }
+        internal static void Reset()
+        {
+            agentOwnsPause = false;
+            loadClock = float.NaN;
+        }
+
+        /// <summary>Records the game time once, right after a session is bound.</summary>
+        internal static void Observe()
+        {
+            if (float.IsNaN(loadClock) && GameClock.Instance != null) loadClock = GameClock.Instance.GetTime();
+        }
+
+        /// <summary>
+        /// ONI loads a save paused.  While game time has not moved since the load,
+        /// that pause belongs to nobody, so Start may resume it at 1x (user
+        /// decision 2026-11-08: pressing Start means "let the Agent play").  Once
+        /// the game has run at all, every later pause is the player's again.
+        /// Game time is used rather than an Unpause hook because the load sequence
+        /// itself calls Unpause (live test 2026-11-08).
+        /// </summary>
+        /// <returns>null when there was nothing to resume, else the set_speed outcome.</returns>
+        internal static JObject ResumeLoadPause(string session)
+        {
+            var control = SpeedControlScreen.Instance;
+            if (!hooksInstalled || control == null || !control.IsPaused || float.IsNaN(loadClock) ||
+                GameClock.Instance == null || GameClock.Instance.GetTime() > loadClock + 0.01f) return null;
+            try
+            {
+                agentCall = true;
+                return ApiTools.Invoke("set_speed", new JObject { ["speed"] = 1 }, "agent", session);
+            }
+            finally { agentCall = false; }
+        }
         internal static bool NeedsResumeReminder => agentOwnsPause && System.DateTime.UtcNow - pauseStarted > TimeSpan.FromMinutes(2);
 
         internal static JObject Execute(JObject args, string policy, string session)

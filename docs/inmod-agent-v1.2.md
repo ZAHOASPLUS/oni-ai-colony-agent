@@ -83,6 +83,6 @@ python -m unittest discover -s scripts -p 'test_*.py' -v
 - 通过：游戏内 HTTPS 连接、DPAPI 解密、主线程派发、写权限锁（外部写返回 `write_owner_conflict`）、纠偏取消旧代次。修复后 Agent 观察→挖 4 格→复查，并如实报告未完成部分。
 - 已修：任务指令每轮附在工具结果之后，模型连续 12 轮只观察不行动（e0e2f9f）。凭据读取失败会清空整份配置（e55d4b2）。
 - 新增开发用无界面控制 `ai-bridge/agent-command.json`：start / stop / pause / resume / correct / status / import（e55d4b2）。
-- 未解决：读档后的暂停被当作玩家暂停，Agent 不会恢复，而 Agent 运行时外部也不能写，殖民地停住。实测时先外部 `set_speed 1` 再 Start。需要定策略。
+- 读档暂停（用户 2026-11-08 选方案 B）：读档后游戏时间未走过时，Start 把读档暂停恢复到 1 倍速并记 `load_pause`；游戏跑过之后的暂停仍归玩家，Agent 不恢复。按游戏时间判断，因为读档流程本身会调用 Unpause。t10 实测通过（paused true → false，时间前进）。
 - 行为变化：共享 schema 校验对外部调用也生效，整数参数 `10.0` 现在被拒。
 - 测试环境注意：Claude 桌面版是 MSIX 打包应用，它写到 LocalAppData 的文件被虚拟化到 `Packages\Claude_…\LocalCache`，游戏看不到；用 `import` 让游戏自己复制。
