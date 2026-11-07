@@ -11,7 +11,7 @@ namespace OniAiProbeMod.Agent
         private static bool agentCall;
         private static bool agentOwnsPause;
         private static bool hooksInstalled;
-        private static DateTime pauseStarted;
+        private static System.DateTime pauseStarted;
 
         internal static void Install(Harmony harmony)
         {
@@ -32,7 +32,7 @@ namespace OniAiProbeMod.Agent
             if (!agentCall) agentOwnsPause = false;
         }
         internal static void Reset() { agentOwnsPause = false; }
-        internal static bool NeedsResumeReminder => agentOwnsPause && DateTime.UtcNow - pauseStarted > TimeSpan.FromMinutes(2);
+        internal static bool NeedsResumeReminder => agentOwnsPause && System.DateTime.UtcNow - pauseStarted > TimeSpan.FromMinutes(2);
 
         internal static JObject Execute(JObject args, string policy, string session)
         {
@@ -57,7 +57,7 @@ namespace OniAiProbeMod.Agent
                     if (speed == 0 && !wasPaused)
                     {
                         agentOwnsPause = true;
-                        pauseStarted = DateTime.UtcNow;
+                        pauseStarted = System.DateTime.UtcNow;
                     }
                     if (speed != 0) agentOwnsPause = false;
                 }

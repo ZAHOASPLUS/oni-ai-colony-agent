@@ -67,7 +67,7 @@ namespace OniAiProbeMod.Agent
             string toolName = null, string toolCallId = null, string data = null)
         {
             Kind = kind; Message = message; SessionId = sessionId; Generation = generation;
-            ToolName = toolName; ToolCallId = toolCallId; Data = data; TimestampUtc = DateTime.UtcNow;
+            ToolName = toolName; ToolCallId = toolCallId; Data = data; TimestampUtc = System.DateTime.UtcNow;
         }
         internal string Kind { get; }
         internal string Message { get; }
@@ -76,7 +76,7 @@ namespace OniAiProbeMod.Agent
         internal string ToolName { get; }
         internal string ToolCallId { get; }
         internal string Data { get; }
-        internal DateTime TimestampUtc { get; }
+        internal System.DateTime TimestampUtc { get; }
     }
 
     /// <summary>
