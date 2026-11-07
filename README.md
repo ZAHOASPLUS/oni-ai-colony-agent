@@ -37,10 +37,12 @@ assign skills and save checkpoints.
 ## Build and install the Mod
 
 ```powershell
-# ONIManagedDir defaults to the standard Steam location; override if needed.
-powershell -File scripts/build-mod.ps1 -ONIManagedDir "<game>\OxygenNotIncluded_Data\Managed"
-powershell -File scripts/install-dev-mod.ps1
+# Builds and installs in one step. -ONIManagedDir defaults to the standard
+# Steam location (C:\Program Files (x86)\Steam\...); pass it if the game is elsewhere.
+powershell -File scripts/install-dev-mod.ps1 -ONIManagedDir "<game>\OxygenNotIncluded_Data\Managed"
 ```
+
+(`scripts/build-mod.ps1` takes the same `-ONIManagedDir` if you only want to build.)
 
 This installs to `Documents\Klei\OxygenNotIncluded\mods\Dev\oni-ai-colony-agent`.
 Enable it in the in-game Mods menu.
@@ -51,7 +53,7 @@ The API is off unless a session asks for it, and the tools only ever play a
 **named test clone**, never your original save:
 
 ```powershell
-powershell -File scripts/create-named-test-clone.ps1 -SourceSave <your .sav> -TargetStem my-clone -RunId my-run   # writes test-clone-manifest.json
+powershell -File scripts/create-named-test-clone.ps1 -SourceSave <your .sav> -TargetStem oni-my-clone -RunId my-run   # writes test-clone-manifest.json; the name must start with oni-
 python scripts/api_session.py start --manifest <manifest> --save <clone .sav> --run-dir reports/api/<run>
 python tools/oni_tools.py call get_status '{}'
 python scripts/api_session.py stop --run-dir reports/api/<run>
@@ -59,15 +61,20 @@ python scripts/api_session.py stop --run-dir reports/api/<run>
 
 `stop` restores game preferences and checks that the original save is
 unchanged. The Mod writes `api.json` (port + token) to
-`Documents\Klei\OxygenNotIncluded\ai-bridge` (override with
-`ONI_AI_BRIDGE_DIR`).
+`Documents\Klei\OxygenNotIncluded\ai-bridge`. To move that folder, set
+`ONI_AI_BRIDGE_DIR` as a user-level environment variable and restart Steam:
+the game is launched through Steam, so a variable set only in your shell
+reaches the scripts but not the Mod.
 
 To use the tools from an MCP client, point it at `python tools/oni_tools.py mcp`
 (see `.mcp.json`). For Antigravity, `python tools/antigravity_player.py
 mcp-config` prints a config with absolute paths for your machine.
 
-The DeepSeek player (`agent/`) reads its endpoint and key from the
-environment; see `.env.example`. Never commit a real key.
+The DeepSeek player (`agent/`) reads its key from the environment; see
+`.env.example`. It refuses to send a key unless you also choose a provider
+(`ONI_AI_PROVIDER`) or an endpoint (`OPENAI_BASE_URL`), so a generic
+`OPENAI_API_KEY` is never sent to a gateway you did not pick. Never commit a
+real key.
 
 ## Tests
 

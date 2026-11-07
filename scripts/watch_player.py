@@ -28,6 +28,7 @@ import argparse
 import collections
 import datetime
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -35,7 +36,8 @@ import time
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-DEFAULT_BRIDGE = pathlib.Path.home() / "Documents" / "Klei" / "OxygenNotIncluded" / "ai-bridge"
+DEFAULT_BRIDGE = (pathlib.Path(os.environ["ONI_AI_BRIDGE_DIR"].strip()) if os.environ.get("ONI_AI_BRIDGE_DIR", "").strip()
+                  else pathlib.Path.home() / "Documents" / "Klei" / "OxygenNotIncluded" / "ai-bridge")
 READ_ONLY_TOOLS = {
     "get_lifecycle", "get_status", "get_map", "inspect", "get_buildable", "get_research",
     "get_events", "list_buildings", "get_resources", "find", "get_progress", "get_skills",

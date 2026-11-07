@@ -68,6 +68,12 @@ def oni_root() -> pathlib.Path:
     return pathlib.Path.home() / "Documents" / "Klei" / "OxygenNotIncluded"
 
 
+def bridge_dir() -> pathlib.Path:
+    """The same folder the Mod and tools/oni_tools.py use: ONI_AI_BRIDGE_DIR, else ai-bridge."""
+    configured = os.environ.get("ONI_AI_BRIDGE_DIR", "").strip()
+    return pathlib.Path(configured) if configured else oni_root() / "ai-bridge"
+
+
 def sha256(path: pathlib.Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -110,7 +116,7 @@ def audit_time(value: Any) -> datetime.datetime:
 
 def start(args: argparse.Namespace) -> Dict[str, Any]:
     root = oni_root()
-    bridge = root / "ai-bridge"
+    bridge = bridge_dir()
     save = pathlib.Path(args.save).resolve()
     preview = save.with_suffix(".png")
     run_dir = pathlib.Path(args.run_dir).resolve()
@@ -193,7 +199,7 @@ def stop(args: argparse.Namespace) -> Dict[str, Any]:
     root = oni_root()
     run_dir = pathlib.Path(args.run_dir).resolve()
     session = json.loads((run_dir / "session.json").read_text(encoding="utf-8"))
-    bridge = root / "ai-bridge"
+    bridge = bridge_dir()
     process_ids = game_process_ids()
     end_path = run_dir / "session-end.json"
     if (run_dir / AUDIT_FILE).exists() and ((bridge / AUDIT_FILE).exists() or process_ids):

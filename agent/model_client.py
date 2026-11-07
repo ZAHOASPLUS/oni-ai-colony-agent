@@ -239,6 +239,11 @@ def load_llm_config(secrets_dir: Optional[pathlib.Path]) -> Dict[str, Any]:
     if environment_provider and not config.get("provider"):
         config["provider"] = environment_provider
     config["provider_explicit"] = bool(config.get("provider"))
+    if config.get("api_key") and not config.get("config_error") and not config["provider_explicit"] and not config.get("base_url"):
+        # A key with neither a provider nor an endpoint must not be sent to the
+        # default gateway: a generic OPENAI_API_KEY or DEEPSEEK_API_KEY belongs
+        # to someone else's service.  The operator has to choose one.
+        config["config_error"] = "provider_unset"
     apply_provider_preset(config)
     if not config.get("config_error") and (not config.get("base_url") or not config.get("model")):
         if config["provider"] in PROVIDER_PRESETS:

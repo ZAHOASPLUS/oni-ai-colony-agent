@@ -61,10 +61,24 @@ class SecretsConfigTests(unittest.TestCase):
         config = model_client.load_llm_config(self.secrets)
         self.assertEqual(config["base_url"], model_client.DEFAULT_BASE_URL)
         self.assertEqual(config["config_source"], "environment")
+        self.assertIsNone(config["api_key"])
+
+    def test_a_key_without_provider_or_endpoint_is_never_sent_to_the_default_gateway(self):
+        for name in ("OPENAI_API_KEY", "DEEPSEEK_API_KEY"):
+            with self.subTest(name=name), mock.patch.dict(os.environ, {name: "sk-generic-000000000000000000000000"}):
+                config = model_client.load_llm_config(None)
+                self.assertEqual(config["config_error"], "provider_unset")
+                self.assertIsNone(config["api_key"])
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-generic-000000000000000000000000",
+                                          "OPENAI_BASE_URL": "https://relay.example/v1"}):
+            config = model_client.load_llm_config(None)
+            self.assertIsNone(config.get("config_error"))
+            self.assertEqual(config["api_key"], "sk-generic-000000000000000000000000")
 
     def test_bare_token_lines_are_not_guessed_as_keys(self):
         self.write("github.txt", "ghp_" + "A" * 36 + "\n")
-        self.write("openai.env", "OPENAI_API_KEY=sk-explicit-key-0000000000000000000\n")
+        self.write("openai.env", "OPENAI_API_KEY=sk-explicit-key-0000000000000000000\n"
+                                 "OPENAI_BASE_URL=https://relay.example/v1\n")
         config = model_client.load_llm_config(self.secrets)
         self.assertEqual(config["api_key"], "sk-explicit-key-0000000000000000000")
         self.assertEqual(config["config_source"], "secrets_dir")

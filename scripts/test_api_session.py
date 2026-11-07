@@ -128,6 +128,15 @@ class AuditArchiveTests(unittest.TestCase):
             self.assertEqual(source.read_bytes(), b"another session\n")
 
 
+class BridgeDirTests(unittest.TestCase):
+    def test_bridge_dir_follows_the_same_variable_as_the_mod(self) -> None:
+        with mock.patch.dict(api_session.os.environ, {"ONI_AI_BRIDGE_DIR": r"D:\custom-bridge"}):
+            self.assertEqual(api_session.bridge_dir(), pathlib.Path(r"D:\custom-bridge"))
+        with mock.patch.dict(api_session.os.environ, {"ONI_AI_BRIDGE_DIR": ""}), \
+                mock.patch.object(api_session, "oni_root", return_value=pathlib.Path("root")):
+            self.assertEqual(api_session.bridge_dir(), pathlib.Path("root") / "ai-bridge")
+
+
 class StopRetryTests(unittest.TestCase):
     def setUp(self) -> None:
         folder = tempfile.TemporaryDirectory()
