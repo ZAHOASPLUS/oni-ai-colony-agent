@@ -14,6 +14,7 @@
   <ItemGroup>
     <EmbeddedResource Include="..\tools\oni-tools.json" LogicalName="OniAiProbeMod.oni-tools.json" />
     <EmbeddedResource Include="..\skills\oni-player\knowledge\*.md" LogicalName="OniAiProbeMod.knowledge.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="..\skills\oni-player\SKILL.md" LogicalName="OniAiProbeMod.knowledge.SKILL.md" />
     <Reference Include="UnityEngine.IMGUIModule">
       <HintPath>$(ONIManagedDir)\UnityEngine.IMGUIModule.dll</HintPath>
       <Private>false</Private>

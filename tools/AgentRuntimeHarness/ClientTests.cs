@@ -88,7 +88,7 @@ namespace OniAiProbeMod.Agent.Harness
                 Check(request.Headers.Authorization.Scheme == "Bearer" && request.Headers.Authorization.Parameter == FakeKey, "authorization header");
                 JObject body = JObject.Parse(await request.Content.ReadAsStringAsync().ConfigureAwait(false));
                 Check((string)body["model"] == "explicit-model" && !(bool)body["stream"], "snapshot model and non-streaming");
-                Check((int)body["max_tokens"] == 4096, "completion limit sent");
+                Check((int)body["max_completion_tokens"] == new AgentConfig().MaxCompletionTokens && body["max_tokens"] == null, "completion limit sent as max_completion_tokens");
                 JObject response = ResponseObject("氧气正常");
                 response["choices"][0]["message"]["reasoning_content"] = "must not be surfaced";
                 response["usage"] = new JObject { ["prompt_tokens"] = 3, ["completion_tokens"] = 4, ["total_tokens"] = 7, ["secret_debug"] = FakeKey };
@@ -183,8 +183,12 @@ namespace OniAiProbeMod.Agent.Harness
                 response["choices"][0]["finish_reason"] = "length";
                 return Task.FromResult(Json(response));
             });
+            // A length cut keeps what arrived instead of discarding the whole reply.
             using (OpenAiCompatibleClient client = new OpenAiCompatibleClient(Config(), FakeKey, truncated))
-                await ExpectCode("incomplete_response", () => client.CompleteAsync(Messages(), new JArray(), CancellationToken.None)).ConfigureAwait(false);
+            {
+                JObject partial = await client.CompleteAsync(Messages(), new JArray(), CancellationToken.None).ConfigureAwait(false);
+                Check((string)partial["content"] == "partial", "length-cut text kept");
+            }
             FakeHandler duplicateCalls = new FakeHandler((request, token) =>
             {
                 JObject response = ToolResponse("echo", "test");
@@ -192,8 +196,13 @@ namespace OniAiProbeMod.Agent.Harness
                 calls.Add(calls[0].DeepClone());
                 return Task.FromResult(Json(response));
             });
+            // A duplicate id is cleared for the runtime to replace; the reply is not discarded.
             using (OpenAiCompatibleClient client = new OpenAiCompatibleClient(Config(), FakeKey, duplicateCalls))
-                await ExpectCode("invalid_tool_call", () => client.CompleteAsync(Messages(), new JArray(), CancellationToken.None)).ConfigureAwait(false);
+            {
+                JObject repaired = await client.CompleteAsync(Messages(), new JArray(), CancellationToken.None).ConfigureAwait(false);
+                JArray calls = (JArray)repaired["tool_calls"];
+                Check(calls.Count == 2 && (calls[1]["id"] == null || calls[1]["id"].Type == JTokenType.Null || (string)calls[1]["id"] == null), "duplicate id cleared, call kept: " + repaired.ToString(Formatting.None));
+            }
         }
 
         private static async Task RetryBounds()

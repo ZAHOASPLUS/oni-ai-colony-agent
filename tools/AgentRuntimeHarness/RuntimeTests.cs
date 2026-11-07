@@ -23,12 +23,15 @@ namespace OniAiProbeMod.Agent.Harness
             await StopInvalidatesLateResponse();
             await SessionChangeRejectsOldGeneration();
             await PerToolErrorsRemainPaired();
-            await OversizedBatchExecutesNothing();
+            await OversizedBatchIsTrimmed();
             await BudgetsAreEnforced();
             await SessionTimeBudgetCancelsRequest();
             await FailedStateRefreshPreventsPlanning();
             await ModelErrorsRetainSafeDiagnostics();
-            Console.WriteLine("PASS: runtime/context/lease tests (15 cases).");
+            await TransientModelErrorsRetry();
+            await ContinuousModeChecksInAgain();
+            await RepeatedCallsGetANote();
+            Console.WriteLine("PASS: runtime/context/lease tests (18 cases).");
         }
 
         private static void ContextIsBoundedAndAtomic()
@@ -277,17 +280,74 @@ namespace OniAiProbeMod.Agent.Harness
             }
         }
 
-        private static async Task OversizedBatchExecutesNothing()
+        private static async Task OversizedBatchIsTrimmed()
         {
-            var model = new Model((n, messages, token) => Task.FromResult(Calls("a", "b")));
+            // An oversized batch used to fault the whole task; now the first calls run.
+            var model = new Model((n, messages, token) => Task.FromResult(n == 1 ? Calls("a", "b") : Final()));
             var dispatch = new Dispatcher();
             var options = Options();
             options.MaxToolCallsPerTurn = 1;
             using (var runtime = New(model, dispatch, options))
             {
                 runtime.Start("colony", "A task.");
-                await Until(() => runtime.State == AgentRuntimeState.Faulted);
-                Assert(dispatch.Names.SequenceEqual(new[] { "get_status" }), "Part of an oversized batch executed.");
+                await Until(() => runtime.State == AgentRuntimeState.Paused && model.Count == 2);
+                Assert(dispatch.Names.SequenceEqual(new[] { "get_status", "a" }), "Oversized batch was not trimmed to the limit.");
+                AssertProtocol(model.Requests.Last());
+            }
+        }
+
+        private static async Task TransientModelErrorsRetry()
+        {
+            var model = new Model((n, messages, token) => n == 1
+                ? throw new AgentModelException("http_error", 503) : Task.FromResult(Final()));
+            var options = Options();
+            options.ModelErrorBaseDelay = TimeSpan.FromMilliseconds(10);
+            using (var runtime = New(model, new Dispatcher(), options))
+            {
+                runtime.Start("colony", "A task.");
+                await Until(() => runtime.State == AgentRuntimeState.Paused && model.Count == 2);
+            }
+            model = new Model((n, messages, token) => throw new AgentModelException("timeout"));
+            options.MaxConsecutiveModelErrors = 2;
+            using (var runtime = New(model, new Dispatcher(), options))
+            {
+                runtime.Start("colony", "A task.");
+                await Until(() => runtime.State == AgentRuntimeState.Paused);
+                Assert(model.Count == 3, "Retries were not bounded by MaxConsecutiveModelErrors.");
+            }
+        }
+
+        private static async Task ContinuousModeChecksInAgain()
+        {
+            var model = new Model((n, messages, token) => Task.FromResult(n == 2 ? Calls("a") : Final()));
+            var dispatch = new Dispatcher();
+            var options = Options();
+            options.Continuous = true;
+            options.ContinueDelay = TimeSpan.FromMilliseconds(10);
+            options.MaxModelTurns = 3;
+            using (var runtime = New(model, dispatch, options))
+            {
+                runtime.Start("colony", "A task.");
+                await Until(() => runtime.State == AgentRuntimeState.Paused);
+                Assert(model.Count == 3, "Continuous mode did not keep playing after a text-only reply.");
+                Assert(dispatch.Names.SequenceEqual(new[] { "get_status", "get_status", "a" }),
+                    "Check-in did not refresh state before the next turn.");
+                AssertProtocol(model.Requests.Last());
+                Assert(model.Requests.Last().ToString().Contains("Check-in 1"), "Check-in note missing.");
+            }
+        }
+
+        private static async Task RepeatedCallsGetANote()
+        {
+            var model = new Model((n, messages, token) => Task.FromResult(Calls("a")));
+            var options = Options();
+            options.MaxModelTurns = 4;
+            using (var runtime = New(model, new Dispatcher(), options))
+            {
+                runtime.Start("colony", "A task.");
+                await Until(() => runtime.State == AgentRuntimeState.Paused);
+                Assert(model.Requests.Last().ToString().Contains("exactly the same tool calls"), "Repetition was not pointed out.");
+                AssertProtocol(model.Requests.Last());
             }
         }
 
@@ -303,9 +363,11 @@ namespace OniAiProbeMod.Agent.Harness
                 await Until(() => runtime.State == AgentRuntimeState.Paused);
                 Assert(dispatch.Names.SequenceEqual(new[] { "get_status", "a" }), "Tool budget exceeded.");
                 Assert(model.Count == 1, "Additional model request occurred after budget exhaustion.");
-                runtime.Correct("Another instruction must not reset the budget.");
-                await Until(() => runtime.State == AgentRuntimeState.Paused);
-                Assert(model.Count == 1 && dispatch.Names.Count == 2, "Correction reset task budgets.");
+                // A correction is a go-ahead: it gets a fresh budget and keeps the context.
+                runtime.Correct("Another instruction gets a fresh budget.");
+                await Until(() => runtime.State == AgentRuntimeState.Paused && model.Count == 2);
+                Assert(dispatch.Names.SequenceEqual(new[] { "get_status", "a", "get_status", "a" }),
+                    "Correction did not run with a fresh, still bounded budget.");
             }
             options = Options();
             options.MaxModelTurns = 1;
@@ -374,7 +436,8 @@ namespace OniAiProbeMod.Agent.Harness
                     { ["name"] = name, ["parameters"] = new JObject { ["type"] = "object" } } }));
         }
         private static AgentRuntimeOptions Options()
-        { return new AgentRuntimeOptions { RefreshToolName = "get_status", ModelTurnDelay = TimeSpan.Zero }; }
+        { return new AgentRuntimeOptions { RefreshToolName = "get_status", ModelTurnDelay = TimeSpan.Zero,
+            RefreshRetryDelay = TimeSpan.FromMilliseconds(10) }; }
         private static JObject Calls(params string[] names)
         {
             return new JObject { ["role"] = "assistant", ["content"] = "Public decision summary.",

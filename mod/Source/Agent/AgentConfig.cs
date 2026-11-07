@@ -12,19 +12,24 @@ namespace OniAiProbeMod.Agent
         [JsonProperty] public string BaseUrl { get; set; } = "";
         [JsonProperty] public string Model { get; set; } = "";
         [JsonProperty] public bool AllowLocalhostHttp { get; set; }
-        [JsonProperty] public int RequestTimeoutSeconds { get; set; } = 60;
-        [JsonProperty] public int MaxRequestBytes { get; set; } = 512 * 1024;
+        [JsonProperty] public int RequestTimeoutSeconds { get; set; } = 180;
+        [JsonProperty] public int MaxRequestBytes { get; set; } = 2 * 1024 * 1024;
         [JsonProperty] public int MaxResponseBytes { get; set; } = 1024 * 1024;
         [JsonProperty] public int MaxRetries { get; set; } = 2;
         [JsonProperty] public int MaxRetryDelaySeconds { get; set; } = 8;
-        [JsonProperty] public int MaxCompletionTokens { get; set; } = 4096;
-        [JsonProperty] public int MaxToolCallsPerTurn { get; set; } = 8;
-        [JsonProperty] public int MaxModelTurns { get; set; } = 20;
-        [JsonProperty] public int MaxContextMessages { get; set; } = 64;
-        [JsonProperty] public int MaxContextCharacters { get; set; } = 64000;
-        [JsonProperty] public int MaxResultCharacters { get; set; } = 12000;
+        [JsonProperty] public int MaxCompletionTokens { get; set; } = 16384;
+        [JsonProperty] public int MaxToolCallsPerTurn { get; set; } = 16;
+        [JsonProperty] public int MaxModelTurns { get; set; } = 400;
+        [JsonProperty] public int MaxToolCallsTotal { get; set; } = 2000;
+        [JsonProperty] public int MaxSessionMinutes { get; set; } = 240;
+        /// <summary>Keep playing after a text-only reply, checking in every ContinueDelaySeconds.</summary>
+        [JsonProperty] public bool Continuous { get; set; } = true;
+        [JsonProperty] public int ContinueDelaySeconds { get; set; } = 30;
+        [JsonProperty] public int MaxContextMessages { get; set; } = 256;
+        [JsonProperty] public int MaxContextCharacters { get; set; } = 400000;
+        [JsonProperty] public int MaxResultCharacters { get; set; } = 32000;
         [JsonProperty] public string Goal { get; set; } = "自主经营殖民地，优先保障氧气、食物、水和电力，逐步建立可持续生存体系。";
-        [JsonProperty] public string PausePolicy { get; set; } = "agent_decides";
+        [JsonProperty] public string PausePolicy { get; set; } = "never_pause";
         [JsonProperty] public bool RollbackEnabled { get; set; }
         [JsonProperty] public int RollbackMaxPerColony { get; set; } = 3;
 
@@ -41,9 +46,12 @@ namespace OniAiProbeMod.Agent
             CheckRange(MaxResponseBytes, 1024, 8 * 1024 * 1024, nameof(MaxResponseBytes));
             CheckRange(MaxRetries, 0, 5, nameof(MaxRetries));
             CheckRange(MaxRetryDelaySeconds, 1, 60, nameof(MaxRetryDelaySeconds));
-            CheckRange(MaxCompletionTokens, 1, 32768, nameof(MaxCompletionTokens));
+            CheckRange(MaxCompletionTokens, 1, 128000, nameof(MaxCompletionTokens));
             CheckRange(MaxToolCallsPerTurn, 1, 32, nameof(MaxToolCallsPerTurn));
-            CheckRange(MaxModelTurns, 1, 200, nameof(MaxModelTurns));
+            CheckRange(MaxModelTurns, 1, 100000, nameof(MaxModelTurns));
+            CheckRange(MaxToolCallsTotal, 1, 1000000, nameof(MaxToolCallsTotal));
+            CheckRange(MaxSessionMinutes, 1, 7 * 24 * 60, nameof(MaxSessionMinutes));
+            CheckRange(ContinueDelaySeconds, 1, 3600, nameof(ContinueDelaySeconds));
             CheckRange(MaxContextMessages, 4, 512, nameof(MaxContextMessages));
             CheckRange(MaxContextCharacters, 2048, 1024 * 1024, nameof(MaxContextCharacters));
             CheckRange(MaxResultCharacters, 512, 128 * 1024, nameof(MaxResultCharacters));

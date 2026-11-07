@@ -53,6 +53,14 @@ namespace OniAiProbeMod.Agent
             Trim();
         }
 
+        /// <summary>A runtime note to the model (check-in, repetition), kept in order like a correction.</summary>
+        internal void AddNote(string note)
+        {
+            if (string.IsNullOrWhiteSpace(note)) return;
+            history.Add(new List<JObject> { Message("user", note) });
+            Trim();
+        }
+
         internal JArray Snapshot()
         {
             // Pinned instruction first, then history in order.  Appending it after the

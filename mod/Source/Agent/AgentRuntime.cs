@@ -42,6 +42,15 @@ namespace OniAiProbeMod.Agent
         internal TimeSpan ModelTurnDelay { get; set; } = TimeSpan.FromMilliseconds(250);
         internal string RefreshToolName { get; set; } = "get_lifecycle";
         internal JObject RefreshToolArguments { get; set; } = new JObject();
+        /// <summary>Text-only replies check in again after ContinueDelay instead of pausing.</summary>
+        internal bool Continuous { get; set; }
+        internal TimeSpan ContinueDelay { get; set; } = TimeSpan.FromSeconds(30);
+        /// <summary>Transient model failures retried before pausing; 0 pauses on the first one.</summary>
+        internal int MaxConsecutiveModelErrors { get; set; } = 6;
+        internal TimeSpan ModelErrorBaseDelay { get; set; } = TimeSpan.FromSeconds(10);
+        internal TimeSpan MaxModelErrorDelay { get; set; } = TimeSpan.FromMinutes(5);
+        internal int RefreshAttempts { get; set; } = 3;
+        internal TimeSpan RefreshRetryDelay { get; set; } = TimeSpan.FromSeconds(2);
 
         internal AgentRuntimeOptions ValidatedCopy()
         {
@@ -50,7 +59,11 @@ namespace OniAiProbeMod.Agent
                 MaxContextCharacters < 2048 || MaxToolResultCharacters < 512 || MaxAssistantCharacters < 512)
                 throw new ArgumentOutOfRangeException(nameof(AgentRuntimeOptions), "Invalid runtime budget.");
             if (MaxSessionDuration <= TimeSpan.Zero || MaxSessionDuration.TotalMilliseconds > int.MaxValue ||
-                ModelTurnDelay < TimeSpan.Zero || ModelTurnDelay.TotalMilliseconds > int.MaxValue)
+                ModelTurnDelay < TimeSpan.Zero || ModelTurnDelay.TotalMilliseconds > int.MaxValue ||
+                ContinueDelay < TimeSpan.Zero || ContinueDelay.TotalMilliseconds > int.MaxValue ||
+                ModelErrorBaseDelay < TimeSpan.Zero || MaxModelErrorDelay < TimeSpan.Zero ||
+                MaxModelErrorDelay.TotalMilliseconds > int.MaxValue || MaxConsecutiveModelErrors < 0 ||
+                RefreshAttempts < 1 || RefreshRetryDelay < TimeSpan.Zero || RefreshRetryDelay.TotalMilliseconds > int.MaxValue)
                 throw new ArgumentOutOfRangeException(nameof(AgentRuntimeOptions), "Invalid runtime time limit.");
             if (string.IsNullOrWhiteSpace(RefreshToolName))
                 throw new ArgumentException("A read-only refresh tool is required.", nameof(RefreshToolName));
@@ -113,6 +126,9 @@ namespace OniAiProbeMod.Agent
         private Stopwatch elapsed;
         private int modelTurns;
         private int toolCalls;
+        private int observations;
+        private int repeats;
+        private string lastSignature;
 
         internal AgentRuntime(IAgentModelClient client, IAgentToolDispatcher dispatcher, JArray tools,
             AgentRuntimeOptions options = null)
@@ -160,9 +176,7 @@ namespace OniAiProbeMod.Agent
                 generation = checked(generation + 1);
                 sessionId = session;
                 context = nextContext;
-                modelTurns = 0;
-                toolCalls = 0;
-                elapsed = Stopwatch.StartNew();
+                ResetBudgetLocked();
                 BeginLocked();
                 notification = EventLocked("started", "Agent started; reading fresh state.");
             }
@@ -182,7 +196,12 @@ namespace OniAiProbeMod.Agent
                 state = AgentRuntimeState.Interrupting;
                 RetireLocked();
                 generation = checked(generation + 1);
-                BeginLocked(); // Keeps this task's consumed budgets; correcting is not a budget reset.
+                // A player instruction is a deliberate go-ahead: give it a fresh budget and
+                // keep the context.  (Keeping the spent budget made a correction after an
+                // exhausted budget stop again at once, with Start, which drops the context,
+                // as the only way out.)
+                ResetBudgetLocked();
+                BeginLocked();
                 notification = EventLocked("corrected", "Correction accepted; old queued work is invalid and current state will be re-read.");
             }
             Publish(notification);
@@ -214,6 +233,7 @@ namespace OniAiProbeMod.Agent
                 if (state != AgentRuntimeState.Paused || context == null)
                     throw new InvalidOperationException("Only a paused Agent task can be resumed.");
                 generation = checked(generation + 1);
+                ResetBudgetLocked(); // Same reasoning as Correct: resuming is a go-ahead.
                 BeginLocked();
                 notification = EventLocked("resumed", "Agent resumed; reading fresh state.");
             }
@@ -245,6 +265,15 @@ namespace OniAiProbeMod.Agent
                 RetireLocked();
             }
             Signal();
+        }
+
+        private void ResetBudgetLocked()
+        {
+            modelTurns = 0;
+            toolCalls = 0;
+            repeats = 0;
+            lastSignature = null;
+            elapsed = Stopwatch.StartNew();
         }
 
         private void BeginLocked()
@@ -323,37 +352,9 @@ namespace OniAiProbeMod.Agent
         private async Task ExecuteAsync(Run run)
         {
             if (!CheckBudget(run)) return;
-            string observationId = "state_" + run.Generation;
-            var observation = new JObject
-            {
-                ["role"] = "assistant", ["content"] = "Read current game state before planning.",
-                ["tool_calls"] = new JArray(new JObject
-                {
-                    ["id"] = observationId, ["type"] = "function",
-                    ["function"] = new JObject { ["name"] = options.RefreshToolName,
-                        ["arguments"] = options.RefreshToolArguments.ToString(Formatting.None) }
-                })
-            };
-            lock (gate)
-            {
-                if (!IsCurrentLocked(run)) return;
-                run.Context.EnsureTurnFits(observation);
-            }
-            JObject observed = await DispatchAsync(run, observationId, options.RefreshToolName,
-                (JObject)options.RefreshToolArguments.DeepClone()).ConfigureAwait(false);
-            if (!IsCurrent(run)) return;
-            lock (gate)
-            {
-                if (!IsCurrentLocked(run)) return;
-                run.Context.AppendTurn(observation, new[] { observed });
-            }
-            // A failed refresh is not current state. Do not let the model continue on stale data.
-            if (observed["error"] != null)
-            {
-                End(run, AgentRuntimeState.Paused, "state_refresh_failed", "Unable to read fresh game state. Agent paused.");
-                return;
-            }
+            if (!await ObserveAsync(run).ConfigureAwait(false)) return;
 
+            int idleCheckIns = 0;
             while (CheckBudget(run))
             {
                 JArray messages;
@@ -363,14 +364,15 @@ namespace OniAiProbeMod.Agent
                     modelTurns++;
                     messages = run.Context.Snapshot();
                 }
-                JObject raw = await client.CompleteAsync(messages, (JArray)tools.DeepClone(), run.Source.Token).ConfigureAwait(false);
+                JObject raw = await CompleteWithRetryAsync(run, messages).ConfigureAwait(false);
+                if (raw == null) return; // Ended by the retry policy or a newer generation.
                 if (!IsCurrent(run) || run.Source.IsCancellationRequested)
                 {
                     Publish(Event(run, "stale_response_discarded", "Ignored a model response from an invalid generation."));
                     run.Source.Token.ThrowIfCancellationRequested();
                     return;
                 }
-                JObject assistant = NormalizeAssistant(raw);
+                JObject assistant = NormalizeAssistant(run, raw);
                 JArray calls = assistant["tool_calls"] as JArray;
                 lock (gate)
                 {
@@ -387,10 +389,30 @@ namespace OniAiProbeMod.Agent
                         if (!IsCurrentLocked(run)) return;
                         run.Context.AppendTurn(assistant, new JObject[0]);
                     }
-                    End(run, AgentRuntimeState.Paused, "awaiting_instruction",
-                        "Model returned without tool calls. Any claimed completion remains unverified.");
-                    return;
+                    if (!options.Continuous)
+                    {
+                        End(run, AgentRuntimeState.Paused, "awaiting_instruction",
+                            "Model returned without tool calls. Any claimed completion remains unverified.");
+                        return;
+                    }
+                    // Continuous play: a text-only reply is a report, not the end of the
+                    // game.  Let the colony run, then check in with fresh state.
+                    if (!CheckBudget(run)) return; // Do not wait and re-read just to stop.
+                    idleCheckIns++;
+                    Publish(Event(run, "idle", "No tool calls; checking in again in " +
+                        (int)options.ContinueDelay.TotalSeconds + " s."));
+                    await Task.Delay(options.ContinueDelay, run.Source.Token).ConfigureAwait(false);
+                    lock (gate)
+                    {
+                        if (!IsCurrentLocked(run)) return;
+                        run.Context.AddNote("Check-in " + idleCheckIns + ": the game kept running since your last reply. " +
+                            "Read what changed, then keep working toward the objective. Reply without tool calls only " +
+                            "when there is truly nothing useful to do until the next check-in.");
+                    }
+                    if (!await ObserveAsync(run).ConfigureAwait(false)) return;
+                    continue;
                 }
+                idleCheckIns = 0;
 
                 var results = new List<JObject>();
                 foreach (JToken call in calls)
@@ -411,9 +433,131 @@ namespace OniAiProbeMod.Agent
                 {
                     if (!IsCurrentLocked(run)) return;
                     run.Context.AppendTurn(assistant, results);
+                    NoteRepetitionLocked(run, calls);
                 }
                 if (options.ModelTurnDelay > TimeSpan.Zero)
                     await Task.Delay(options.ModelTurnDelay, run.Source.Token).ConfigureAwait(false);
+            }
+        }
+
+        /// <summary>
+        /// Same calls with the same arguments, turn after turn, mean the model is not
+        /// using what it already read (live test 2026-11-08: 12 turns of identical
+        /// get_status/get_events/get_map).  Say so once it repeats; the budget still bounds it.
+        /// </summary>
+        private void NoteRepetitionLocked(Run run, JArray calls)
+        {
+            var signature = new System.Text.StringBuilder();
+            foreach (JToken call in calls)
+                signature.Append((string)call["function"]["name"]).Append('(')
+                    .Append((string)call["function"]["arguments"]).Append(");");
+            string current = signature.ToString();
+            repeats = current == lastSignature ? repeats + 1 : 0;
+            lastSignature = current;
+            if (repeats >= 2)
+                run.Context.AddNote("You have issued exactly the same tool calls " + (repeats + 1) +
+                    " turns in a row. Their results are already above. Act on them, or change approach.");
+        }
+
+        /// <summary>
+        /// Transient model failures (timeouts, 429/5xx, network, malformed or empty
+        /// replies) wait and retry instead of faulting the whole task; only errors that
+        /// retrying cannot fix (authentication, bad endpoint or model) fault at once.
+        /// </summary>
+        private async Task<JObject> CompleteWithRetryAsync(Run run, JArray messages)
+        {
+            for (int failures = 0; ; failures++)
+            {
+                try
+                {
+                    return await client.CompleteAsync(messages, (JArray)tools.DeepClone(), run.Source.Token).ConfigureAwait(false);
+                }
+                catch (AgentModelException error) when (IsTransient(error) && failures < options.MaxConsecutiveModelErrors)
+                {
+                    TimeSpan delay = TimeSpan.FromTicks(Math.Min(options.MaxModelErrorDelay.Ticks,
+                        options.ModelErrorBaseDelay.Ticks * (1L << Math.Min(failures, 16))));
+                    Publish(Event(run, "model_retry", "Model request failed (" + error.Code +
+                        (error.StatusCode.HasValue ? "; HTTP " + error.StatusCode.Value : string.Empty) +
+                        "); retrying in " + (int)delay.TotalSeconds + " s."));
+                    await Task.Delay(delay, run.Source.Token).ConfigureAwait(false);
+                    if (!IsCurrent(run)) return null;
+                }
+                catch (AgentModelException error) when (IsTransient(error))
+                {
+                    // Out of retries: pause (releasing writes) rather than fault, so Resume works.
+                    End(run, AgentRuntimeState.Paused, "model_unavailable", "Model kept failing (" + error.Code +
+                        (error.StatusCode.HasValue ? "; HTTP " + error.StatusCode.Value : string.Empty) +
+                        "). Agent paused; Resume to try again.");
+                    return null;
+                }
+            }
+        }
+
+        private static bool IsTransient(AgentModelException error)
+        {
+            switch (error.Code)
+            {
+                case "http_error":
+                    int status = error.StatusCode ?? 0;
+                    return status == 408 || status == 409 || status == 425 || status == 429 || status >= 500;
+                case "network_error":
+                case "timeout":
+                case "request_failed":
+                case "retry_limit":
+                case "incomplete_response":
+                case "empty_response":
+                case "empty_assistant_message":
+                case "invalid_response_json":
+                case "invalid_response_encoding":
+                case "invalid_assistant_message":
+                case "response_too_large":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        /// <returns>false when the run ended or was replaced.</returns>
+        private async Task<bool> ObserveAsync(Run run)
+        {
+            string observationId = "state_" + run.Generation + "_" + Interlocked.Increment(ref observations);
+            for (int attempt = 1; ; attempt++)
+            {
+                var observation = new JObject
+                {
+                    ["role"] = "assistant", ["content"] = "Read current game state before planning.",
+                    ["tool_calls"] = new JArray(new JObject
+                    {
+                        ["id"] = observationId + "_" + attempt, ["type"] = "function",
+                        ["function"] = new JObject { ["name"] = options.RefreshToolName,
+                            ["arguments"] = options.RefreshToolArguments.ToString(Formatting.None) }
+                    })
+                };
+                lock (gate)
+                {
+                    if (!IsCurrentLocked(run)) return false;
+                    run.Context.EnsureTurnFits(observation);
+                }
+                JObject observed = await DispatchAsync(run, observationId + "_" + attempt, options.RefreshToolName,
+                    (JObject)options.RefreshToolArguments.DeepClone()).ConfigureAwait(false);
+                if (!IsCurrent(run)) return false;
+                // A failed refresh is not current state: never plan on it.  One failed read
+                // used to pause the task; retry a few times first.
+                if (observed["error"] == null)
+                {
+                    lock (gate)
+                    {
+                        if (!IsCurrentLocked(run)) return false;
+                        run.Context.AppendTurn(observation, new[] { observed });
+                    }
+                    return true;
+                }
+                if (attempt >= options.RefreshAttempts)
+                {
+                    End(run, AgentRuntimeState.Paused, "state_refresh_failed", "Unable to read fresh game state. Agent paused.");
+                    return false;
+                }
+                await Task.Delay(options.RefreshRetryDelay, run.Source.Token).ConfigureAwait(false);
             }
         }
 
@@ -464,38 +608,48 @@ namespace OniAiProbeMod.Agent
             return summary.ToString(Formatting.None);
         }
 
-        private JObject NormalizeAssistant(JObject raw)
+        /// <summary>
+        /// Repairs instead of rejecting: an oversized batch is cut to the per-turn limit,
+        /// a bad or duplicate call id is replaced, an unusable name becomes an unknown
+        /// tool (answered with an error), and overlong text is shortened.  Each of these
+        /// used to fault the whole task.
+        /// </summary>
+        private JObject NormalizeAssistant(Run run, JObject raw)
         {
             if (raw == null || (string)raw["role"] != "assistant")
-                throw new ArgumentException("Model response must be an assistant message.");
+                throw new AgentModelException("invalid_assistant_message");
             JToken content = raw["content"];
-            if (content != null && content.Type != JTokenType.Null && content.Type != JTokenType.String)
-                throw new ArgumentException("Assistant content must be text or null.");
-            var normalized = new JObject { ["role"] = "assistant", ["content"] = content?.DeepClone() ?? JValue.CreateNull() };
-            JToken value = raw["tool_calls"];
-            if (value != null && value.Type != JTokenType.Null)
+            string text = content != null && content.Type == JTokenType.String ? (string)content : null;
+            int textLimit = options.MaxAssistantCharacters / 2;
+            if (text != null && text.Length > textLimit)
             {
-                if (!(value is JArray calls) || calls.Count > options.MaxToolCallsPerTurn)
-                    throw new ArgumentException("Model exceeded the per-turn tool-call limit or returned an invalid call list.");
-                var ids = new HashSet<string>(StringComparer.Ordinal);
-                var cleanCalls = new JArray();
-                foreach (JToken call in calls)
-                {
-                    if (!(call is JObject)) throw new ArgumentException("Tool call must be an object.");
-                    string id = (string)call["id"];
-                    var function = call["function"] as JObject;
-                    string name = (string)function?["name"];
-                    if (call["id"]?.Type != JTokenType.String || string.IsNullOrWhiteSpace(id) || id.Length > 128 ||
-                        !ids.Add(id) || (string)call["type"] != "function" ||
-                        function?["name"]?.Type != JTokenType.String || string.IsNullOrWhiteSpace(name))
-                        throw new ArgumentException("Malformed or duplicate tool call.");
-                    cleanCalls.Add(new JObject { ["id"] = id, ["type"] = "function", ["function"] =
-                        new JObject { ["name"] = name, ["arguments"] = function["arguments"]?.DeepClone() ?? JValue.CreateNull() } });
-                }
-                if (cleanCalls.Count > 0) normalized["tool_calls"] = cleanCalls;
+                text = text.Substring(0, textLimit) + " [shortened]";
+                Publish(Event(run, "assistant_shortened", "Assistant text exceeded " + textLimit + " characters and was shortened."));
             }
-            if (normalized.ToString(Formatting.None).Length > options.MaxAssistantCharacters)
-                throw new ArgumentException("Assistant message exceeded the configured context limit.");
+            var normalized = new JObject { ["role"] = "assistant", ["content"] = text == null ? JValue.CreateNull() : new JValue(text) };
+            JArray calls = raw["tool_calls"] as JArray;
+            if (calls == null || calls.Count == 0) return normalized;
+            if (calls.Count > options.MaxToolCallsPerTurn)
+                Publish(Event(run, "tool_calls_truncated", "Model sent " + calls.Count + " tool calls; only the first " +
+                    options.MaxToolCallsPerTurn + " run this turn."));
+            var ids = new HashSet<string>(StringComparer.Ordinal);
+            var cleanCalls = new JArray();
+            for (int i = 0; i < calls.Count && cleanCalls.Count < options.MaxToolCallsPerTurn; i++)
+            {
+                var function = calls[i]?["function"] as JObject;
+                string id = calls[i]?["id"]?.Type == JTokenType.String ? (string)calls[i]["id"] : null;
+                if (string.IsNullOrWhiteSpace(id) || id.Length > 128 || !ids.Add(id))
+                {
+                    id = "call_" + run.Generation + "_" + i;
+                    ids.Add(id);
+                }
+                string name = function?["name"]?.Type == JTokenType.String ? (string)function["name"] : null;
+                if (string.IsNullOrWhiteSpace(name) || name.Length > 64) name = "invalid_tool_name";
+                JToken arguments = function?["arguments"];
+                cleanCalls.Add(new JObject { ["id"] = id, ["type"] = "function", ["function"] =
+                    new JObject { ["name"] = name, ["arguments"] = arguments?.DeepClone() ?? new JValue("{}") } });
+            }
+            normalized["tool_calls"] = cleanCalls;
             return normalized;
         }
 

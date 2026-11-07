@@ -152,7 +152,10 @@ namespace OniAiProbeMod.Agent
             using (CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token))
             {
                 // This deadline covers queue wait, every attempt and every backoff, not just one HTTP send.
-                deadline.CancelAfter(TimeSpan.FromSeconds(config.RequestTimeoutSeconds));
+                // Each attempt gets the full per-attempt timeout; backoffs share the total.
+                // (The first version gave all attempts and backoffs one timeout together, so a
+                // single slow reply left no time to retry.)
+                deadline.CancelAfter(TimeSpan.FromSeconds(config.RequestTimeoutSeconds * (config.MaxRetries + 1)));
                 CancellationToken token = deadline.Token;
                 try
                 {
@@ -173,14 +176,18 @@ namespace OniAiProbeMod.Agent
                                 request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
                                 request.Content = new ByteArrayContent(payload);
                                 request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json") { CharSet = "utf-8" };
-                                using (HttpResponseMessage response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false))
+                                using (CancellationTokenSource attemptDeadline = CancellationTokenSource.CreateLinkedTokenSource(token))
+                                {
+                                attemptDeadline.CancelAfter(TimeSpan.FromSeconds(config.RequestTimeoutSeconds));
+                                CancellationToken attemptToken = attemptDeadline.Token;
+                                using (HttpResponseMessage response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, attemptToken).ConfigureAwait(false))
                                 {
                                     int status = (int)response.StatusCode;
                                     if (status >= 300 && status < 400)
                                         throw new AgentModelException("redirect_rejected", status);
                                     if (status >= 200 && status < 300)
                                     {
-                                        string body = await ReadBoundedAsync(response.Content, token).ConfigureAwait(false);
+                                        string body = await ReadBoundedAsync(response.Content, attemptToken).ConfigureAwait(false);
                                         token.ThrowIfCancellationRequested();
                                         JObject assistant = ParseAssistant(body);
                                         token.ThrowIfCancellationRequested();
@@ -191,11 +198,18 @@ namespace OniAiProbeMod.Agent
                                         throw new AgentModelException("http_error", status);
                                     retryDelay = GetRetryDelay(response.Headers.RetryAfter, attempt);
                                 }
+                                }
                             }
                         }
                         catch (HttpRequestException)
                         {
                             if (attempt == config.MaxRetries) throw new AgentModelException("network_error");
+                            retryDelay = GetRetryDelay(null, attempt);
+                        }
+                        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+                        {
+                            // Only this attempt's own timeout fired: retry like a network error.
+                            if (attempt == config.MaxRetries) throw new AgentModelException("timeout");
                             retryDelay = GetRetryDelay(null, attempt);
                         }
                         await Task.Delay(retryDelay, token).ConfigureAwait(false);
@@ -245,7 +259,8 @@ namespace OniAiProbeMod.Agent
                     json.WriteValue(false);
                     json.WritePropertyName("messages");
                     messages.WriteTo(json);
-                    json.WritePropertyName("max_tokens");
+                    // max_tokens is rejected by current OpenAI reasoning models.
+                    json.WritePropertyName("max_completion_tokens");
                     json.WriteValue(config.MaxCompletionTokens);
                     if (tools.Count > 0)
                     {
@@ -328,8 +343,10 @@ namespace OniAiProbeMod.Agent
             JObject message = choice?["message"] as JObject;
             string finish = choice?["finish_reason"]?.Type == JTokenType.String ? (string)choice["finish_reason"] : null;
             if (message == null || (string)message["role"] != "assistant") throw new AgentModelException("invalid_assistant_message");
-            if (finish == "length" || finish == "content_filter") throw new AgentModelException("incomplete_response");
-            if (finish != "stop" && finish != "tool_calls") throw new AgentModelException("unsupported_finish_reason");
+            // Gateways differ: "stop" with tool calls, null, "end_turn".  Only a filtered
+            // reply is unusable; a length cut keeps what arrived (a truncated call's
+            // arguments fail to parse and go back to the model as an error).
+            if (finish == "content_filter") throw new AgentModelException("incomplete_response");
             JToken content = message["content"];
             if (content != null && content.Type != JTokenType.Null && content.Type != JTokenType.String)
                 throw new AgentModelException("unsupported_content");
@@ -339,7 +356,7 @@ namespace OniAiProbeMod.Agent
                 throw new AgentModelException("invalid_tool_calls");
             if (calls != null && calls.Count > 0)
             {
-                if (finish != "tool_calls" || calls.Count > config.MaxToolCallsPerTurn) throw new AgentModelException("invalid_tool_call_count");
+                // The runtime trims an oversized batch and repairs ids; keep every call here.
                 JArray normalizedCalls = new JArray();
                 HashSet<string> identifiers = new HashSet<string>(StringComparer.Ordinal);
                 foreach (JToken call in calls)
@@ -348,10 +365,11 @@ namespace OniAiProbeMod.Agent
                     string id = call["id"]?.Type == JTokenType.String ? (string)call["id"] : null;
                     string name = function?["name"]?.Type == JTokenType.String ? (string)function["name"] : null;
                     string arguments = function?["arguments"]?.Type == JTokenType.String ? (string)function["arguments"] : null;
-                    if ((string)call["type"] != "function" || !ValidIdentifier(id, 128, false) || !identifiers.Add(id) ||
-                        !ValidIdentifier(name, 64, true) || arguments == null)
-                        throw new AgentModelException("invalid_tool_call");
-                    ParseObject(arguments);
+                    // Repair instead of rejecting the whole reply: the runtime answers an
+                    // unknown name or unparsable arguments with an error to the model.
+                    if (!ValidIdentifier(id, 128, false) || !identifiers.Add(id)) id = null;
+                    if (!ValidIdentifier(name, 64, true)) name = "invalid_tool_name";
+                    if (arguments == null) arguments = "{}";
                     normalizedCalls.Add(new JObject
                     {
                         ["id"] = id,
@@ -361,8 +379,8 @@ namespace OniAiProbeMod.Agent
                 }
                 normalized["tool_calls"] = normalizedCalls;
             }
-            else if (finish == "tool_calls" || string.IsNullOrWhiteSpace((string)content))
-                throw new AgentModelException("empty_assistant_message");
+            else if (string.IsNullOrWhiteSpace((string)content))
+                throw new AgentModelException(finish == "length" ? "incomplete_response" : "empty_assistant_message");
             LastFinishReason = finish;
             JObject usage = root["usage"] as JObject;
             if (usage != null)

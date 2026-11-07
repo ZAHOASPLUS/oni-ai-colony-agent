@@ -148,7 +148,11 @@ namespace OniAiProbeMod.Agent
                 operationCancellation.Dispose();
                 operationCancellation = null;
             }
-            if (runtime != null && (runtime.State == AgentRuntimeState.Stopped || runtime.State == AgentRuntimeState.Faulted))
+            // Hold writes only while the Agent is actually working.  A Paused Agent
+            // (budget, awaiting instruction, refresh failure) used to keep the lease,
+            // so neither it nor an external player could act on the colony.
+            if (runtime != null && runtime.State != AgentRuntimeState.Running &&
+                runtime.State != AgentRuntimeState.Interrupting)
                 AgentWriteLease.Release(sessionId);
         }
 
@@ -206,6 +210,7 @@ namespace OniAiProbeMod.Agent
                     case "correct":
                         string instruction = (string)command["instruction"];
                         if (runtime == null || string.IsNullOrWhiteSpace(instruction)) notice = "Nothing to correct.";
+                        else if (!AgentWriteLease.Acquire(sessionId)) notice = "Another session owns writes.";
                         else { runtime.Correct(instruction); notice = "Correction sent."; }
                         break;
                     default:
@@ -246,6 +251,11 @@ namespace OniAiProbeMod.Agent
                         MaxContextMessages = frozen.MaxContextMessages,
                         MaxContextCharacters = frozen.MaxContextCharacters,
                         MaxToolResultCharacters = frozen.MaxResultCharacters,
+                        MaxToolCallsTotal = frozen.MaxToolCallsTotal,
+                        MaxSessionDuration = TimeSpan.FromMinutes(frozen.MaxSessionMinutes),
+                        MaxAssistantCharacters = 65536,
+                        Continuous = frozen.Continuous,
+                        ContinueDelay = TimeSpan.FromSeconds(frozen.ContinueDelaySeconds),
                         Knowledge = AgentKnowledge.ForCycle(GameClock.Instance.GetCycle() + 1),
                         SystemPrompt = "You operate Oxygen Not Included through tools on an authorized development test clone. " +
                             "Read current state, act, inspect real results, and adapt. Give only short public decision summaries, never hidden reasoning. " +
@@ -361,7 +371,12 @@ namespace OniAiProbeMod.Agent
                 (runtime.State == AgentRuntimeState.Running || runtime.State == AgentRuntimeState.Paused);
             if (GUILayout.Button("Send correction") && !string.IsNullOrWhiteSpace(instruction))
             {
-                try { runtime.Correct(instruction); instruction = ""; }
+                try
+                {
+                    if (!AgentWriteLease.Acquire(sessionId)) throw new InvalidOperationException("Another session owns writes.");
+                    runtime.Correct(instruction);
+                    instruction = "";
+                }
                 catch (Exception ex) { notice = Safe(ex.Message); }
             }
             GUI.enabled = true;
