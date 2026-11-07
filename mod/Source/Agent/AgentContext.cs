@@ -44,21 +44,23 @@ namespace OniAiProbeMod.Agent
             var next = Message("user", "Task objective:\n" + goal + "\n\nLatest player correction:\n" + correction +
                 "\n\nEarlier actions may have finished before interruption. Re-read the current state before replanning.");
             ValidatePinned(next); // Fail before changing the current instruction.
-            // Preserve prior instructions in ordinary bounded history; pin the latest one.
-            history.Add(new List<JObject> { (JObject)instruction.DeepClone() });
+            // The pinned instruction (right after the system prompt) always holds the
+            // latest correction; the correction is also recorded where it happened, so
+            // the model sees it once, in order, and not as a new request every turn.
+            history.Add(new List<JObject> { Message("user", "Player correction:\n" + correction +
+                "\n\nEarlier actions may have finished before interruption. Re-read the current state before replanning.") });
             instruction = next;
             Trim();
         }
 
         internal JArray Snapshot()
         {
-            var messages = new JArray(system.DeepClone());
+            // Pinned instruction first, then history in order.  Appending it after the
+            // latest tool results (as before) re-asked the whole task every turn: live
+            // test 2026-11-08 had the model re-observe for 12 turns and never act.
+            var messages = new JArray(system.DeepClone(), instruction.DeepClone());
             foreach (var group in history)
                 foreach (var message in group) messages.Add(message.DeepClone());
-            // Keep the active instruction AFTER historical instructions/results. Putting it
-            // before history lets a superseded correction appear to be the latest user request.
-            // Every tool exchange is complete before this final user message is appended.
-            messages.Add(instruction.DeepClone());
             return messages;
         }
 
