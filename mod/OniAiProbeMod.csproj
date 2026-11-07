@@ -12,6 +12,16 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="..\tools\oni-tools.json" LogicalName="OniAiProbeMod.oni-tools.json" />
+    <EmbeddedResource Include="..\skills\oni-player\knowledge\*.md" LogicalName="OniAiProbeMod.knowledge.%(Filename)%(Extension)" />
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(ONIManagedDir)\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(ONIManagedDir)\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="0Harmony">
       <HintPath>$(ONIManagedDir)\0Harmony.dll</HintPath>
       <Private>false</Private>

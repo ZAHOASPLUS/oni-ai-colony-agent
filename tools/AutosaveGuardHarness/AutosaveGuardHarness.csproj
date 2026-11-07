@@ -13,11 +13,15 @@
        AutosaveGuard and its GameClock.DoAutoSave patch against the real
        SaveGame/GameClock types (created without Unity, never initialized). -->
   <ItemGroup>
+    <EmbeddedResource Include="..\..\tools\oni-tools.json" LogicalName="OniAiProbeMod.oni-tools.json" />
+    <EmbeddedResource Include="..\..\skills\oni-player\knowledge\*.md" LogicalName="OniAiProbeMod.knowledge.%(Filename)%(Extension)" />
     <Compile Include="..\..\mod\Source\**\*.cs" LinkBase="ModSource" />
     <Reference Include="0Harmony"><HintPath>$(ONIManagedDir)\0Harmony.dll</HintPath><Private>true</Private></Reference>
     <Reference Include="Assembly-CSharp"><HintPath>$(ONIManagedDir)\Assembly-CSharp.dll</HintPath><Private>true</Private></Reference>
     <Reference Include="Assembly-CSharp-firstpass"><HintPath>$(ONIManagedDir)\Assembly-CSharp-firstpass.dll</HintPath><Private>true</Private></Reference>
     <Reference Include="UnityEngine.CoreModule"><HintPath>$(ONIManagedDir)\UnityEngine.CoreModule.dll</HintPath><Private>true</Private></Reference>
+    <Reference Include="UnityEngine.IMGUIModule"><HintPath>$(ONIManagedDir)\UnityEngine.IMGUIModule.dll</HintPath><Private>true</Private></Reference>
+    <Reference Include="UnityEngine.InputLegacyModule"><HintPath>$(ONIManagedDir)\UnityEngine.InputLegacyModule.dll</HintPath><Private>true</Private></Reference>
     <Reference Include="Newtonsoft.Json"><HintPath>$(ONIManagedDir)\Newtonsoft.Json.dll</HintPath><Private>true</Private></Reference>
   </ItemGroup>
 </Project>

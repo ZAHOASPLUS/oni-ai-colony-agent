@@ -15,6 +15,14 @@ assign skills and save checkpoints.
 `tools/oni_tools.py` 把它包装成 MCP 服务或函数调用工具。项目内部的工作规则和设计记录主要是中文，
 见 `AGENTS.md` 和 `docs/`。
 
+## In-mod Agent v1.2 development branch
+
+This branch adds an opt-in in-mod Agent runtime and Alt+F12 development console
+for the existing protected test-clone workflow. It is a **source implementation,
+not a built or live-validated release**. New-game control and native autosave
+rollback are deliberately unavailable until the required game API and save-safety
+checks are complete. See [implementation status and test instructions](docs/inmod-agent-v1.2.md).
+
 ## Layout
 
 | Path | What |

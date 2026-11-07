@@ -4,6 +4,7 @@ using System.Reflection;
 using HarmonyLib;
 using OniAiProbeMod.Api;
 using OniAiProbeMod.Probe;
+using OniAiProbeMod.Agent;
 using UnityEngine;
 
 namespace OniAiProbeMod.Patches
@@ -278,6 +279,9 @@ namespace OniAiProbeMod.Patches
         private static void OnSaveLoaded(bool __result)
         {
             ApiLifecycle.SessionActive = __result;
+            ApiEvents.ResetSession();
+            ApiPrintables.ResetSession();
+            AgentHost.NotifySessionChanged(__result);
             if (__result)
             {
                 try
@@ -308,6 +312,9 @@ namespace OniAiProbeMod.Patches
         private static void OnGameStopped()
         {
             ApiLifecycle.SessionActive = false;
+            ApiEvents.ResetSession();
+            ApiPrintables.ResetSession();
+            AgentHost.NotifySessionChanged(false);
         }
     }
 }

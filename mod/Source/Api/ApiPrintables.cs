@@ -24,6 +24,8 @@ namespace OniAiProbeMod.Api
 
         private static List<Offer> offers;
 
+        internal static void ResetSession() { offers = null; }
+
         internal static object Read(JObject args)
         {
             Immigration immigration = Immigration.Instance;

@@ -20,6 +20,7 @@ namespace OniAiProbeMod.Api
 
         private static readonly Queue<Dictionary<string, object>> Buffer = new Queue<Dictionary<string, object>>();
         private static long nextSequence = 1;
+        private static long sessionFirstSequence = 1;
         private static float nextTickAt;
         private static Baseline previous;
         // Buildings the player ordered.  Map features spawn as an area is revealed
@@ -29,6 +30,20 @@ namespace OniAiProbeMod.Api
         internal static List<Dictionary<string, object>> CycleLog { get; } = new List<Dictionary<string, object>>();
 
         internal static int DuplicantsLost { get; private set; }
+
+        /// <summary>Main-thread lifecycle boundary; never reuse a prior colony's observations.</summary>
+        internal static void ResetSession()
+        {
+            Buffer.Clear();
+            CycleLog.Clear();
+            Ordered.Clear();
+            DuplicantsLost = 0;
+            previous = null;
+            nextTickAt = 0f;
+            // Keep event cursors monotonic for connected external readers, but do
+            // not count the previous colony's cleared history as missed events.
+            sessionFirstSequence = nextSequence;
+        }
 
         private sealed class Baseline
         {
@@ -144,7 +159,7 @@ namespace OniAiProbeMod.Api
                 { "events", page },
                 { "next_since", page.Count == 0 ? since : (long)page[page.Count - 1]["seq"] },
                 { "more", matching.Count > page.Count },
-                { "missed", Math.Max(0, oldest - since - 1) }
+                { "missed", Math.Max(0, oldest - Math.Max(since, sessionFirstSequence - 1) - 1) }
             };
         }
 

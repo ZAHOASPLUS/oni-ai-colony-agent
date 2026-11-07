@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <ONIManagedDir Condition="'$(ONIManagedDir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\OxygenNotIncluded\OxygenNotIncluded_Data\Managed</ONIManagedDir>
+    <NewtonsoftJsonPath Condition="'$(NewtonsoftJsonPath)' == ''">$(ONIManagedDir)\Newtonsoft.Json.dll</NewtonsoftJsonPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Newtonsoft.Json"><HintPath>$(NewtonsoftJsonPath)</HintPath><Private>true</Private></Reference>
+    <Compile Include="Program.cs" />
+    <Compile Include="RuntimeTests.cs" />
+    <Compile Include="ClientTests.cs" />
+    <Compile Include="RollbackBudgetTests.cs" />
+    <Compile Include="SchemaTests.cs" />
+    <Compile Include="../../mod/Source/Agent/AgentContext.cs" Link="Core/AgentContext.cs" />
+    <Compile Include="../../mod/Source/Agent/AgentAudit.cs" Link="Core/AgentAudit.cs" />
+    <Compile Include="../../mod/Source/Agent/AgentRuntime.cs" Link="Core/AgentRuntime.cs" />
+    <Compile Include="../../mod/Source/Agent/AgentConfig.cs" Link="Core/AgentConfig.cs" />
+    <Compile Include="../../mod/Source/Agent/OpenAiCompatibleClient.cs" Link="Core/OpenAiCompatibleClient.cs" />
+    <Compile Include="../../mod/Source/Agent/CredentialStore.cs" Link="Core/CredentialStore.cs" />
+    <Compile Include="../../mod/Source/Agent/RollbackBudgetLedger.cs" Link="Core/RollbackBudgetLedger.cs" />
+    <Compile Include="../../mod/Source/Agent/AgentWriteLease.cs" Link="Core/AgentWriteLease.cs" />
+    <Compile Include="../../mod/Source/Api/ApiToolSchema.cs" Link="Core/ApiToolSchema.cs" />
+    <Compile Include="../../mod/Source/Api/ApiException.cs" Link="Core/ApiException.cs" />
+    <EmbeddedResource Include="../oni-tools.json" LogicalName="OniAiProbeMod.oni-tools.json" />
+  </ItemGroup>
+  <Target Name="RequireNewtonsoft" BeforeTargets="ResolveReferences">
+    <Error Condition="!Exists('$(NewtonsoftJsonPath)')" Text="Provide -p:NewtonsoftJsonPath=/path/to/Newtonsoft.Json.dll or -p:ONIManagedDir=/path/to/ONI/Managed. This harness does not download packages." />
+  </Target>
+</Project>

@@ -3,28 +3,10 @@ using System.Collections.Generic;
 using System.Linq;
 using Newtonsoft.Json.Linq;
 using OniAiProbeMod.Probe;
+using OniAiProbeMod.Agent;
 
 namespace OniAiProbeMod.Api
 {
-    /// <summary>A refusal the caller can act on; it becomes the response's error object.</summary>
-    internal sealed class ApiException : Exception
-    {
-        internal ApiException(string code, string message, string hint = null, JObject details = null)
-            : base(message)
-        {
-            Code = code;
-            Hint = hint;
-            Details = details;
-        }
-
-        internal string Code { get; }
-
-        internal string Hint { get; }
-
-        /// <summary>More fields for the error object, such as the ids an ambiguous name could mean.</summary>
-        internal JObject Details { get; }
-    }
-
     /// <summary>
     /// Tool dispatch, on the game's main thread.  The tool list here and
     /// tools/oni-tools.json must name the same tools.
@@ -78,19 +60,28 @@ namespace OniAiProbeMod.Api
             { "get_skills", new Tool(ApiSkills.Read, true) },
             { "learn_skill", new Tool(ApiSkills.Learn, true, true) },
             { "move_to", new Tool(ApiMovement.MoveTo, true, true) },
-            { "get_printables", new Tool(ApiPrintables.Read, true) },
+            // Reading may generate/cache offers and consume the game's RNG.
+            { "get_printables", new Tool(ApiPrintables.Read, true, true) },
             { "choose_printable", new Tool(ApiPrintables.Choose, true, true) },
             { "reject_printables", new Tool(ApiPrintables.Reject, true, true) },
             { "save_checkpoint", new Tool(ApiActions.SaveCheckpoint, true, true) }
         };
 
-        internal static JObject Invoke(string name, JObject args)
+        internal static IEnumerable<string> Names => Tools.Keys;
+
+        internal static bool IsWrite(string name) => name == "load_save" ||
+            (name != null && Tools.TryGetValue(name, out Tool found) && found.Writes);
+
+        internal static JObject Invoke(string name, JObject args, string owner = "external", string sessionId = null)
         {
             Tool tool;
             Tools.TryGetValue(name, out tool);
-            bool writes = tool != null && tool.Writes;
-            JObject response = Run(name, tool, args);
-            ApiAudit.Record(name, args, response, writes);
+            bool writes = IsWrite(name);
+            JObject response = Run(name, tool, args, owner, sessionId);
+            // In-mod calls already carry session/generation into the bounded,
+            // redacted background AgentAudit. Do not duplicate raw model strings
+            // into the legacy synchronous external-player audit.
+            if (owner != "agent") ApiAudit.Record(name, args, response, writes);
             if (writes && response["error"] != null)
             {
                 ApiEvents.Add("action_failed", new Dictionary<string, object>
@@ -102,10 +93,13 @@ namespace OniAiProbeMod.Api
             return response;
         }
 
-        private static JObject Run(string name, Tool tool, JObject args)
+        private static JObject Run(string name, Tool tool, JObject args, string owner, string sessionId)
         {
             try
             {
+                ApiToolSchema.Validate(name, args);
+                if (IsWrite(name) && !AgentWriteLease.Allows(owner, sessionId))
+                    throw new ApiException("write_owner_conflict", "The in-mod Agent owns this session. Stop it before external writes.");
                 if (tool == null)
                 {
                     throw new ApiException(
@@ -133,6 +127,8 @@ namespace OniAiProbeMod.Api
             catch (Exception ex)
             {
                 // Never let a tool's failure reach the game's update loop.
+                if (owner == "agent")
+                    return ApiResult.Failure("internal_error", "Game handler failed with " + ex.GetType().Name + ".");
                 ApiLog.Error("api_" + name, ex);
                 return ApiResult.Failure("internal_error", ex.GetType().Name + ": " + ex.Message);
             }

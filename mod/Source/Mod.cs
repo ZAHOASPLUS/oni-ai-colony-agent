@@ -4,6 +4,7 @@ using KMod;
 using OniAiProbeMod.Api;
 using OniAiProbeMod.Patches;
 using OniAiProbeMod.Probe;
+using OniAiProbeMod.Agent;
 using UnityEngine;
 
 namespace OniAiProbeMod
@@ -11,7 +12,7 @@ namespace OniAiProbeMod
     public sealed class Mod : UserMod2
     {
         internal const string LogPrefix = "[ONI AI]";
-        internal const string ModVersion = "1.0.0";
+        internal const string ModVersion = "1.2.0-dev.1";
 
         public override void OnLoad(Harmony harmony)
         {
@@ -34,6 +35,7 @@ namespace OniAiProbeMod
             SimFrameLimitPatch.Install(harmony);
             CookedFoodPatch.Install(harmony);
             ApiHost.Launch(ApiLog.BridgeDirectory);
+            AgentHost.Launch(harmony);
             Debug.Log(LogPrefix + " Tool API mode");
         }
     }
