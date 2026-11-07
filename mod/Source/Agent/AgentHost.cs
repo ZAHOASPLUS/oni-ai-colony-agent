@@ -30,6 +30,8 @@ namespace OniAiProbeMod.Agent
         private Task<string> operation;
         private CancellationTokenSource operationCancellation;
         private Rect window = new Rect(30, 30, 780, 650);
+        private const string DevCommandFileName = "agent-command.json";
+        private float nextCommandPoll;
 
         internal static void Launch(Harmony harmony)
         {
@@ -46,6 +48,16 @@ namespace OniAiProbeMod.Agent
             dataDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OniAiColonyAgent");
             configPath = Path.Combine(dataDirectory, "agent-config.json");
             credentials = new CredentialStore(dataDirectory);
+            LoadSettings();
+            audit = new AgentAudit(dataDirectory, apiKey);
+            audit.Record("host_ready", "Development clone-only build. New-game and native rollback are unavailable.");
+            if (!string.IsNullOrEmpty(notice)) audit.Record("host_notice", notice);
+            // Never start from stored Enabled alone. A player starts this dev
+            // build explicitly after inspecting the bound protected clone.
+        }
+
+        private void LoadSettings()
+        {
             config = new AgentConfig();
             try
             {
@@ -55,17 +67,49 @@ namespace OniAiProbeMod.Agent
                     config = JsonConvert.DeserializeObject<AgentConfig>(File.ReadAllText(configPath)) ?? new AgentConfig();
                     config.Validate();
                 }
-                apiKey = credentials.Load() ?? "";
             }
-            catch (Exception)
+            catch (Exception ex)
             {
                 config = new AgentConfig();
-                notice = "Settings/credential could not be read. Agent is disabled; re-enter configuration.";
+                notice = "Settings could not be read (" + ex.GetType().Name + "). Agent is disabled; re-enter configuration.";
             }
-            audit = new AgentAudit(dataDirectory, apiKey);
-            audit.Record("host_ready", "Development clone-only build. New-game and native rollback are unavailable.");
-            // Never start from stored Enabled alone. A player starts this dev
-            // build explicitly after inspecting the bound protected clone.
+            try
+            {
+                apiKey = credentials.Load() ?? "";
+            }
+            catch (Exception ex)
+            {
+                // A credential failure keeps the settings: only the key is missing.
+                apiKey = "";
+                notice = "Credential could not be read (" +
+                    (ex is CredentialStoreException store ? store.Code : ex.GetType().Name) + "). Save the key again.";
+            }
+        }
+
+        /// <summary>
+        /// Copies agent-config.json and an already DPAPI-protected agent-key.dpapi
+        /// from the bridge directory into the data directory, then reloads.  A
+        /// packaged (MSIX) supervisor's writes to LocalAppData are virtualized
+        /// away from the game, so they have to be written by the game itself.
+        /// </summary>
+        private void ImportSettings()
+        {
+            if (runtime != null) throw new InvalidOperationException("Stop the Agent before importing settings.");
+            Directory.CreateDirectory(dataDirectory);
+            int copied = 0;
+            foreach (string name in new[] { "agent-config.json", "agent-key.dpapi" })
+            {
+                string source = Path.Combine(ApiLog.BridgeDirectory, name);
+                if (!File.Exists(source)) continue;
+                if (new FileInfo(source).Length > 65536) throw new InvalidDataException();
+                File.Copy(source, Path.Combine(dataDirectory, name), true);
+                File.Delete(source);
+                copied++;
+            }
+            notice = "";
+            LoadSettings();
+            audit.SetSecret(apiKey);
+            if (string.IsNullOrEmpty(notice)) notice = "Imported " + copied + " file(s).";
         }
 
         internal static void NotifySessionChanged(bool loaded)
@@ -88,6 +132,11 @@ namespace OniAiProbeMod.Agent
         {
             if (Input.GetKeyDown(KeyCode.F12) && (Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt)))
                 visible = !visible;
+            if (Time.unscaledTime >= nextCommandPoll)
+            {
+                nextCommandPoll = Time.unscaledTime + 1f;
+                PollDevCommand();
+            }
             if (sessionId != null && !BoundSessionIsCurrent()) NotifySessionChanged(false);
             if (retiring && runtime.Completion.IsCompleted) FinishRetirement();
             if (!retiring) dispatcher?.Pump();
@@ -100,6 +149,75 @@ namespace OniAiProbeMod.Agent
             }
             if (runtime != null && (runtime.State == AgentRuntimeState.Stopped || runtime.State == AgentRuntimeState.Faulted))
                 AgentWriteLease.Release(sessionId);
+        }
+
+        /// <summary>
+        /// Headless control for supervised test runs, so a supervisor can drive the
+        /// console without taking keyboard focus: ai-bridge/agent-command.json
+        /// {"action": "start|stop|pause|resume|correct", "instruction": "..."}.
+        /// Consumed on read, like autoload.json; the outcome goes to the audit log.
+        /// The host only exists in API mode, so normal play never reads it.
+        /// </summary>
+        private void PollDevCommand()
+        {
+            string path = Path.Combine(ApiLog.BridgeDirectory, DevCommandFileName);
+            if (!File.Exists(path)) return;
+            string action = "unreadable";
+            try
+            {
+                string text = new FileInfo(path).Length > 16384 ? null : File.ReadAllText(path);
+                File.Delete(path);
+                if (text == null) throw new InvalidDataException();
+                JObject command = JObject.Parse(text);
+                action = (string)command["action"] ?? "";
+                switch (action)
+                {
+                    case "start":
+                        StartAgent();
+                        break;
+                    case "import":
+                        ImportSettings();
+                        break;
+                    case "status":
+                        notice = "state=" + (runtime == null ? "Stopped" : runtime.State.ToString()) +
+                            " enabled=" + config.Enabled + " key=" + (apiKey.Length > 0) +
+                            " dpapi=" + CredentialStore.IsSupported + " clone=" + BoundSessionIsCurrent() +
+                            " config_file=" + File.Exists(configPath) + " dir=" + dataDirectory +
+                            (string.IsNullOrEmpty(notice) ? "" : " last=" + notice);
+                        break;
+                    case "stop":
+                        StopAgent();
+                        notice = "Agent stopped.";
+                        break;
+                    case "pause":
+                        runtime?.Pause();
+                        notice = "Agent paused.";
+                        break;
+                    case "resume":
+                        if (runtime != null && runtime.State == AgentRuntimeState.Paused &&
+                            BoundSessionIsCurrent() && AgentWriteLease.Acquire(sessionId))
+                        {
+                            runtime.Resume();
+                            notice = "Agent resumed.";
+                        }
+                        else notice = "Nothing to resume.";
+                        break;
+                    case "correct":
+                        string instruction = (string)command["instruction"];
+                        if (runtime == null || string.IsNullOrWhiteSpace(instruction)) notice = "Nothing to correct.";
+                        else { runtime.Correct(instruction); notice = "Correction sent."; }
+                        break;
+                    default:
+                        notice = "Unknown dev command.";
+                        break;
+                }
+            }
+            catch (Exception ex) when (ex is IOException || ex is JsonException || ex is InvalidDataException ||
+                ex is UnauthorizedAccessException || ex is InvalidOperationException || ex is ArgumentException)
+            {
+                notice = Safe(ex.Message);
+            }
+            audit.Record("dev_command", action + ": " + notice);
         }
 
         private void StartAgent()
